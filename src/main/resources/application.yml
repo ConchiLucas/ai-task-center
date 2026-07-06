@@ -1,0 +1,22 @@
+server:
+  port: 8080
+
+spring:
+  datasource:
+    url: ${TASK_CENTER_DB_URL:jdbc:postgresql://localhost:55432/ai_task_center}
+    username: ${TASK_CENTER_DB_USER:conchi}
+    password: ${TASK_CENTER_DB_PASSWORD:conchi123456}
+    driver-class-name: org.postgresql.Driver
+  jpa:
+    hibernate:
+      ddl-auto: update
+    open-in-view: false
+    properties:
+      hibernate:
+        format_sql: false
+        jdbc:
+          time_zone: Asia/Shanghai
+
+logging:
+  level:
+    org.hibernate.SQL: warn

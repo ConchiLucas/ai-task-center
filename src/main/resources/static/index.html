@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>配置管理 - AI Task Center</title>
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body>
+    <div id="toast" class="toast" aria-live="polite"></div>
+    <div class="app-shell">
+      <aside class="side-tabs">
+        <h1>配置管理</h1>
+        <button class="tab-button active" data-tab="project">
+          <span class="tab-icon">P</span>
+          <span>项目配置</span>
+        </button>
+        <button class="tab-button" data-tab="database">
+          <span class="tab-icon">D</span>
+          <span>数据库配置</span>
+        </button>
+        <button class="tab-button" data-tab="ai">
+          <span class="tab-icon">AI</span>
+          <span>AI配置</span>
+        </button>
+      </aside>
+
+      <main class="content-card">
+        <section id="project-view" class="view active">
+          <header class="view-header">
+            <div>
+              <h2>核心项目配置</h2>
+              <p>创建并选择当前活跃项目，选中项将作为全局环境隔离标识。</p>
+            </div>
+            <form id="project-create-form" class="header-form">
+              <input id="new-project-name" placeholder="新项目名称..." autocomplete="off" />
+              <input id="new-project-desc" placeholder="项目介绍 (可选)..." autocomplete="off" />
+              <button type="submit" class="primary-button">新增</button>
+            </form>
+          </header>
+          <div id="project-list" class="project-grid"></div>
+        </section>
+
+        <section id="database-view" class="view">
+          <header class="view-header">
+            <div>
+              <h2>环境数据库配置</h2>
+            </div>
+            <div class="header-form">
+              <select id="env-filter">
+                <option value="">全部环境</option>
+              </select>
+              <button id="show-connection-form" class="primary-button" type="button">新增数据源</button>
+            </div>
+          </header>
+
+          <div id="database-empty-project" class="empty-state">
+            <div class="empty-icon">P</div>
+            <p>请先在「项目配置」中选择一个活跃项目</p>
+          </div>
+
+          <div id="database-workspace" class="database-workspace hidden">
+            <form id="connection-form" class="connection-form hidden">
+              <div class="form-title"><span id="connection-form-title">新增数据源连接</span></div>
+              <div class="connection-grid">
+                <input id="connection-name" placeholder="连接名称 (如: 测试环境主库)" autocomplete="off" />
+                <input id="connection-env" list="env-options" placeholder="部署环境 (选择或新建)" autocomplete="off" />
+                <datalist id="env-options"></datalist>
+                <select id="connection-type">
+                  <option value="mysql">mysql</option>
+                  <option value="pgsql">pgsql</option>
+                  <option value="mssql">mssql</option>
+                  <option value="oracle">oracle</option>
+                  <option value="sqlite">sqlite</option>
+                </select>
+                <input id="connection-host" placeholder="Host地址 (如: 127.0.0.1)" autocomplete="off" />
+                <input id="connection-port" type="number" placeholder="端口 (如: 3306)" />
+                <input id="connection-database" placeholder="数据库名" autocomplete="off" />
+                <input id="connection-user" placeholder="用户名" autocomplete="off" />
+                <div class="password-row">
+                  <input id="connection-password" type="password" placeholder="密码" autocomplete="off" />
+                  <button id="toggle-db-password" type="button" title="查看密码">显示</button>
+                </div>
+              </div>
+              <div class="form-actions">
+                <button class="primary-button" type="submit">确认添加</button>
+                <button id="test-connection" class="success-button" type="button">测试连接</button>
+                <button id="cancel-connection" class="secondary-button" type="button">取消</button>
+              </div>
+            </form>
+            <div id="connection-list" class="connection-grid-list"></div>
+          </div>
+        </section>
+
+        <section id="ai-view" class="view">
+          <header class="view-header">
+            <div>
+              <h2>AI 配置</h2>
+              <p>管理右上角 AI 下拉框可切换的模型厂商与默认选项。</p>
+            </div>
+            <div class="header-form">
+              <button id="add-ai-provider" class="secondary-button" type="button">添加 AI</button>
+              <button id="save-ai-config" class="primary-button" type="button">保存配置</button>
+            </div>
+          </header>
+
+          <div id="ai-empty" class="empty-state hidden">
+            <h3>暂无 AI 配置</h3>
+            <p>添加一个模型配置后，右上角 AI 下拉框就可以选择它。</p>
+            <button id="add-ai-provider-empty" class="dark-button" type="button">添加 AI</button>
+          </div>
+
+          <div id="ai-workspace" class="ai-workspace hidden">
+            <div id="ai-provider-list" class="ai-list"></div>
+            <form id="ai-form" class="ai-form">
+              <div class="ai-form-head">
+                <div>
+                  <h3 id="ai-form-name">未命名 AI</h3>
+                  <p>保存后会同步写入后端数据库。</p>
+                </div>
+                <div class="form-actions compact">
+                  <button id="set-active-ai" class="soft-button" type="button">设为默认</button>
+                  <button id="delete-ai-provider" class="danger-icon-button" type="button" title="删除 AI 配置">删除</button>
+                </div>
+              </div>
+              <div class="ai-fields">
+                <label>
+                  <span>配置 ID</span>
+                  <input id="ai-id" class="mono" placeholder="omlx" />
+                </label>
+                <label>
+                  <span>显示名称</span>
+                  <input id="ai-label" placeholder="oMLX 本地" />
+                </label>
+                <label>
+                  <span>接口类型</span>
+                  <select id="ai-type">
+                    <option value="openai-compatible">openai-compatible</option>
+                    <option value="anthropic-compatible">anthropic-compatible</option>
+                  </select>
+                </label>
+                <label>
+                  <span>模型名称</span>
+                  <input id="ai-model" class="mono" placeholder="qwen3-coder-plus" />
+                </label>
+                <label class="wide">
+                  <span>Base URL</span>
+                  <input id="ai-base-url" class="mono" placeholder="https://api.example.com" />
+                </label>
+                <label>
+                  <span>API Key</span>
+                  <input id="ai-api-key" type="password" class="mono" placeholder="sk-..." autocomplete="off" />
+                </label>
+                <label>
+                  <span>最大 Tokens</span>
+                  <input id="ai-max-tokens" type="number" min="1" class="mono" placeholder="4096" />
+                </label>
+              </div>
+            </form>
+          </div>
+        </section>
+      </main>
+    </div>
+
+    <dialog id="confirm-dialog">
+      <form method="dialog" class="confirm-card">
+        <h3 id="confirm-title">确认操作</h3>
+        <p id="confirm-message"></p>
+        <div class="form-actions end">
+          <button id="confirm-cancel" class="secondary-button" value="cancel">取消</button>
+          <button id="confirm-ok" class="danger-button" value="ok">确定</button>
+        </div>
+      </form>
+    </dialog>
+    <script src="/app.js"></script>
+  </body>
+</html>

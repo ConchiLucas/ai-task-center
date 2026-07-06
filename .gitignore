@@ -1,0 +1,19 @@
+.DS_Store
+
+# Java
+backend/target/
+
+# Frontend
+frontend/node_modules/
+frontend/dist/
+frontend/tsconfig.tsbuildinfo
+
+# Environment
+.env
+*.local
+.DS_Store
+target/
+.idea/
+*.iml
+.env
+*.log
