@@ -18,26 +18,31 @@ import org.springframework.web.bind.annotation.RestController;
 public class ProjectConfigController {
     private final ProjectConfigService service;
 
+    // 方法：ProjectConfigController
     public ProjectConfigController(ProjectConfigService service) {
         this.service = service;
     }
 
     @GetMapping("/getTbInterfaceProjectList")
+    // 方法：list
     public ApiResponse<List<ProjectConfig>> list() {
         return ApiResponse.ok(service.list());
     }
 
     @PostMapping("/createTbInterfaceProject")
+    // 方法：create
     public ApiResponse<ProjectConfig> create(@RequestBody ProjectConfig input) {
         return ApiResponse.ok(service.create(input), "项目创建成功");
     }
 
     @PutMapping("/updateTbInterfaceProject")
+    // 方法：update
     public ApiResponse<ProjectConfig> update(@RequestBody ProjectConfig input) {
         return ApiResponse.ok(service.update(input.getId(), input), "项目更新成功");
     }
 
     @DeleteMapping("/deleteTbInterfaceProject")
+    // 方法：delete
     public ApiResponse<Void> delete(@RequestBody DeleteByIdRequest request) {
         service.delete(request.getId());
         return ApiResponse.ok(null, "项目删除成功");

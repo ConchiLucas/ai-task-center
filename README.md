@@ -1,6 +1,6 @@
 # AI Task Center
 
-配置管理功能的 Java + PostgreSQL 实现，参考 `vibecoding-utils` 的配置管理页，保留：
+配置管理功能的 Java + PostgreSQL + React 实现，参考 `vibecoding-utils` 的配置管理页，保留：
 
 - 项目配置
 - 数据库配置
@@ -22,16 +22,32 @@ user: conchi
 password: conchi123456
 ```
 
-## 启动后端与页面
+## 启动后端
 
 ```bash
 mvn spring-boot:run
 ```
 
+后端默认端口：
+
+```text
+http://localhost:18743
+```
+
+## 启动前端
+
+前端使用 React + Ant Design：
+
+```bash
+cd web-react
+npm install
+npm run dev
+```
+
 打开：
 
 ```text
-http://localhost:8080
+http://localhost:19637
 ```
 
 Spring Boot 会通过 JPA 自动创建本地表：

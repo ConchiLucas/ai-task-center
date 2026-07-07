@@ -4,11 +4,16 @@ import com.aitaskcenter.dto.PageResult;
 import com.aitaskcenter.model.ConnectionConfig;
 import com.aitaskcenter.repository.ConnectionConfigRepository;
 import java.sql.Connection;
+import java.sql.DatabaseMetaData;
 import java.sql.DriverManager;
+import java.sql.ResultSet;
 import java.time.Duration;
+import java.util.ArrayList;
+import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Locale;
 import java.util.Properties;
+import java.util.Set;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -17,10 +22,12 @@ import org.springframework.util.StringUtils;
 public class ConnectionConfigService {
     private final ConnectionConfigRepository repository;
 
+    // 方法：ConnectionConfigService
     public ConnectionConfigService(ConnectionConfigRepository repository) {
         this.repository = repository;
     }
 
+    // 方法：list
     public PageResult<ConnectionConfig> list(int page, int pageSize, String connectionGroup, String envName) {
         List<ConnectionConfig> all = StringUtils.hasText(connectionGroup)
                 ? repository.findByConnectionGroupOrderByCreatedAtDesc(connectionGroup.trim())
@@ -36,6 +43,7 @@ public class ConnectionConfigService {
     }
 
     @Transactional
+    // 方法：create
     public ConnectionConfig create(ConnectionConfig input) {
         ConnectionConfig config = new ConnectionConfig();
         copyAndValidate(input, config);
@@ -43,6 +51,7 @@ public class ConnectionConfigService {
     }
 
     @Transactional
+    // 方法：update
     public ConnectionConfig update(Long id, ConnectionConfig input) {
         ConnectionConfig config = repository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("数据库配置不存在"));
@@ -50,6 +59,7 @@ public class ConnectionConfigService {
         return repository.save(config);
     }
 
+    // 方法：delete
     public void delete(Long id) {
         if (id == null) {
             throw new IllegalArgumentException("缺少数据库配置 ID");
@@ -57,6 +67,7 @@ public class ConnectionConfigService {
         repository.deleteById(id);
     }
 
+    // 方法：test
     public void test(ConnectionConfig input) {
         String jdbcUrl = jdbcUrl(input);
         Properties properties = new Properties();
@@ -69,12 +80,40 @@ public class ConnectionConfigService {
         }
     }
 
+    // 方法：testById
     public void testById(Long id) {
         ConnectionConfig config = repository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("数据库配置不存在"));
         test(config);
     }
 
+    // 方法：listTables
+    public List<String> listTables(Long id) {
+        ConnectionConfig config = repository.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("数据库配置不存在"));
+        Properties properties = new Properties();
+        properties.put("user", clean(config.getDbLoginName()));
+        properties.put("password", config.getDbLoginPassword() == null ? "" : config.getDbLoginPassword());
+        DriverManager.setLoginTimeout((int) Duration.ofSeconds(5).toSeconds());
+        try (Connection connection = DriverManager.getConnection(jdbcUrl(config), properties)) {
+            DatabaseMetaData metaData = connection.getMetaData();
+            Set<String> tables = new LinkedHashSet<>();
+            try (ResultSet rs = metaData.getTables(connection.getCatalog(), null, "%", new String[] {"TABLE"})) {
+                while (rs.next()) {
+                    String schema = rs.getString("TABLE_SCHEM");
+                    String tableName = rs.getString("TABLE_NAME");
+                    if (isUserTableSchema(schema) && StringUtils.hasText(tableName)) {
+                        tables.add(StringUtils.hasText(schema) ? schema + "." + tableName : tableName);
+                    }
+                }
+            }
+            return new ArrayList<>(tables);
+        } catch (Exception ex) {
+            throw new IllegalArgumentException("读取表列表失败: " + ex.getMessage());
+        }
+    }
+
+    // 方法：copyAndValidate
     private static void copyAndValidate(ConnectionConfig input, ConnectionConfig target) {
         target.setConnectionName(require(input.getConnectionName(), "请填写连接名称"));
         target.setConnectionType(defaultText(input.getConnectionType(), "mysql").toLowerCase(Locale.ROOT));
@@ -88,6 +127,7 @@ public class ConnectionConfigService {
         target.setUserName(defaultText(input.getUserName(), "local"));
     }
 
+    // 方法：jdbcUrl
     private static String jdbcUrl(ConnectionConfig input) {
         String type = defaultText(input.getConnectionType(), "mysql").toLowerCase(Locale.ROOT);
         String host = require(input.getConnectionUrl(), "请填写 Host 地址");
@@ -103,6 +143,7 @@ public class ConnectionConfigService {
         };
     }
 
+    // 方法：defaultPort
     private static int defaultPort(String type) {
         return switch (type) {
             case "pgsql", "postgres", "postgresql" -> 5432;
@@ -113,6 +154,7 @@ public class ConnectionConfigService {
         };
     }
 
+    // 方法：require
     private static String require(String value, String message) {
         if (!StringUtils.hasText(value)) {
             throw new IllegalArgumentException(message);
@@ -120,11 +162,26 @@ public class ConnectionConfigService {
         return value.trim();
     }
 
+    // 方法：clean
     private static String clean(String value) {
         return value == null ? "" : value.trim();
     }
 
+    // 方法：defaultText
     private static String defaultText(String value, String defaultValue) {
         return StringUtils.hasText(value) ? value.trim() : defaultValue;
+    }
+
+    // 方法：isUserTableSchema
+    private static boolean isUserTableSchema(String schema) {
+        if (!StringUtils.hasText(schema)) {
+            return true;
+        }
+        String value = schema.toLowerCase(Locale.ROOT);
+        return !value.equals("information_schema")
+                && !value.equals("pg_catalog")
+                && !value.equals("mysql")
+                && !value.equals("performance_schema")
+                && !value.equals("sys");
     }
 }

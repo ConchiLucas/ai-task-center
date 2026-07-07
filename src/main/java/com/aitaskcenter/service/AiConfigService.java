@@ -2,6 +2,8 @@ package com.aitaskcenter.service;
 
 import com.aitaskcenter.dto.AiConfigRequest;
 import com.aitaskcenter.dto.AiProviderConfigItem;
+import com.aitaskcenter.dto.LocalCliConfigItem;
+import com.aitaskcenter.dto.LocalCliConfigRequest;
 import com.aitaskcenter.model.AiConfig;
 import com.aitaskcenter.repository.AiConfigRepository;
 import com.fasterxml.jackson.core.type.TypeReference;
@@ -24,24 +26,35 @@ public class AiConfigService {
     private final AiConfigRepository repository;
     private final ObjectMapper objectMapper;
 
+    // 方法：AiConfigService
     public AiConfigService(AiConfigRepository repository, ObjectMapper objectMapper) {
         this.repository = repository;
         this.objectMapper = objectMapper;
     }
 
+    // 方法：getConfig
     public AiConfigRequest getConfig() {
         return repository.findByConfigKey(DEFAULT_KEY)
                 .map(this::toRequest)
                 .orElseGet(AiConfigRequest::new);
     }
 
+    // 方法：getProviders
     public AiConfigRequest getProviders() {
         AiConfigRequest request = getConfig();
         request.getProviders().forEach(provider -> provider.setApiKey(null));
         return request;
     }
 
+    // 方法：getLocalCliConfig
+    public LocalCliConfigRequest getLocalCliConfig() {
+        return repository.findByConfigKey(DEFAULT_KEY)
+                .map(this::toLocalCliConfig)
+                .orElseGet(this::defaultLocalCliConfig);
+    }
+
     @Transactional
+    // 方法：save
     public List<AiProviderConfigItem> save(AiConfigRequest request) {
         AiConfigRequest normalized = normalize(request);
         String providersJson = toJson(toProviderMap(normalized.getProviders()));
@@ -54,6 +67,7 @@ public class AiConfigService {
     }
 
     @Transactional
+    // 方法：saveActive
     public List<AiProviderConfigItem> saveActive(String active) {
         AiConfigRequest current = getConfig();
         if (!StringUtils.hasText(active)) {
@@ -68,6 +82,21 @@ public class AiConfigService {
         return save(current);
     }
 
+    @Transactional
+    // 方法：saveLocalCliConfig
+    public LocalCliConfigRequest saveLocalCliConfig(LocalCliConfigRequest request) {
+        LocalCliConfigRequest normalized = normalizeLocalCliConfigRequest(request);
+        AiConfig config = repository.findByConfigKey(DEFAULT_KEY).orElseGet(AiConfig::new);
+        config.setConfigKey(DEFAULT_KEY);
+        if (!StringUtils.hasText(config.getProviders())) {
+            config.setProviders("{}");
+        }
+        config.setLocalCliConfig(toJson(normalized));
+        repository.save(config);
+        return normalized;
+    }
+
+    // 方法：toRequest
     private AiConfigRequest toRequest(AiConfig config) {
         Map<String, AiProviderConfigItem> map = fromJson(config.getProviders());
         List<AiProviderConfigItem> providers = new ArrayList<>(map.values());
@@ -80,6 +109,27 @@ public class AiConfigService {
         return request;
     }
 
+    // 方法：toLocalCliConfig
+    private LocalCliConfigRequest toLocalCliConfig(AiConfig config) {
+        if (!StringUtils.hasText(config.getLocalCliConfig())) {
+            return defaultLocalCliConfig();
+        }
+        try {
+            return normalizeLocalCliConfigRequest(objectMapper.readValue(config.getLocalCliConfig(), LocalCliConfigRequest.class));
+        } catch (Exception ex) {
+            try {
+                LocalCliConfigItem legacy = objectMapper.readValue(config.getLocalCliConfig(), LocalCliConfigItem.class);
+                LocalCliConfigRequest migrated = new LocalCliConfigRequest();
+                migrated.setActive(defaultText(legacy.getId(), "codex"));
+                migrated.setConfigs(List.of(legacy));
+                return normalizeLocalCliConfigRequest(migrated);
+            } catch (Exception legacyEx) {
+                throw new IllegalArgumentException("本地 CLI 配置 JSON 解析失败: " + ex.getMessage());
+            }
+        }
+    }
+
+    // 方法：normalize
     private AiConfigRequest normalize(AiConfigRequest request) {
         if (request == null || request.getProviders() == null || request.getProviders().isEmpty()) {
             throw new IllegalArgumentException("请至少保留一个 AI 配置");
@@ -120,6 +170,7 @@ public class AiConfigService {
         return normalized;
     }
 
+    // 方法：toProviderMap
     private Map<String, AiProviderConfigItem> toProviderMap(List<AiProviderConfigItem> providers) {
         Map<String, AiProviderConfigItem> map = new LinkedHashMap<>();
         for (AiProviderConfigItem provider : providers) {
@@ -128,6 +179,65 @@ public class AiConfigService {
         return map;
     }
 
+    // 方法：normalizeLocalCliConfigRequest
+    private LocalCliConfigRequest normalizeLocalCliConfigRequest(LocalCliConfigRequest request) {
+        LocalCliConfigRequest source = request == null ? defaultLocalCliConfig() : request;
+        List<LocalCliConfigItem> sourceConfigs = source.getConfigs() == null ? new ArrayList<>() : source.getConfigs();
+        if (sourceConfigs.isEmpty()) {
+            sourceConfigs = defaultLocalCliConfig().getConfigs();
+        }
+
+        Map<String, LocalCliConfigItem> byId = new LinkedHashMap<>();
+        for (LocalCliConfigItem item : sourceConfigs) {
+            LocalCliConfigItem normalized = normalizeLocalCliConfigItem(item);
+            if (byId.containsKey(normalized.getId())) {
+                throw new IllegalArgumentException("CLI 配置 ID「" + normalized.getId() + "」重复");
+            }
+            byId.put(normalized.getId(), normalized);
+        }
+
+        String active = clean(source.getActive());
+        if (!StringUtils.hasText(active) || !byId.containsKey(active)) {
+            active = byId.keySet().iterator().next();
+        }
+
+        String activeId = active;
+        byId.values().forEach(item -> item.setActive(item.getId().equals(activeId)));
+
+        LocalCliConfigRequest normalized = new LocalCliConfigRequest();
+        normalized.setActive(active);
+        normalized.setConfigs(new ArrayList<>(byId.values()));
+        return normalized;
+    }
+
+    // 方法：normalizeLocalCliConfigItem
+    private LocalCliConfigItem normalizeLocalCliConfigItem(LocalCliConfigItem source) {
+        LocalCliConfigItem item = source == null ? new LocalCliConfigItem() : source;
+        LocalCliConfigItem normalized = new LocalCliConfigItem();
+        normalized.setEnabled(item.isEnabled());
+        normalized.setId(require(defaultText(item.getId(), "codex"), "请填写 CLI 配置 ID"));
+        normalized.setLabel(defaultText(item.getLabel(), normalized.getId()));
+        normalized.setCommand(require(item.getCommand(), "请填写 CLI 命令路径"));
+        normalized.setDefaultArgs(item.getDefaultArgs() == null ? new ArrayList<>() : item.getDefaultArgs().stream()
+                .map(AiConfigService::clean)
+                .filter(StringUtils::hasText)
+                .toList());
+        normalized.setWorkingDirectory(defaultText(item.getWorkingDirectory(), "/Users/conchi/workforce/python_workforce/ai-task-center"));
+        normalized.setTimeoutSeconds(item.getTimeoutSeconds() == null || item.getTimeoutSeconds() <= 0 ? 300 : item.getTimeoutSeconds());
+        return normalized;
+    }
+
+    // 方法：defaultLocalCliConfig
+    private LocalCliConfigRequest defaultLocalCliConfig() {
+        LocalCliConfigRequest request = new LocalCliConfigRequest();
+        LocalCliConfigItem codex = new LocalCliConfigItem();
+        codex.setActive(true);
+        request.setActive("codex");
+        request.setConfigs(List.of(codex));
+        return request;
+    }
+
+    // 方法：fromJson
     private Map<String, AiProviderConfigItem> fromJson(String json) {
         if (!StringUtils.hasText(json)) {
             return new LinkedHashMap<>();
@@ -140,6 +250,7 @@ public class AiConfigService {
         }
     }
 
+    // 方法：toJson
     private String toJson(Map<String, AiProviderConfigItem> map) {
         try {
             return objectMapper.writeValueAsString(map);
@@ -148,6 +259,16 @@ public class AiConfigService {
         }
     }
 
+    // 方法：toJson
+    private String toJson(LocalCliConfigRequest config) {
+        try {
+            return objectMapper.writeValueAsString(config);
+        } catch (Exception ex) {
+            throw new IllegalArgumentException("本地 CLI 配置 JSON 序列化失败: " + ex.getMessage());
+        }
+    }
+
+    // 方法：firstExistingActive
     private static String firstExistingActive(String active, List<AiProviderConfigItem> providers) {
         String cleaned = clean(active);
         if (StringUtils.hasText(cleaned)) {
@@ -160,6 +281,7 @@ public class AiConfigService {
         return providers.isEmpty() ? "" : providers.get(0).getId();
     }
 
+    // 方法：require
     private static String require(String value, String message) {
         if (!StringUtils.hasText(value)) {
             throw new IllegalArgumentException(message);
@@ -167,14 +289,17 @@ public class AiConfigService {
         return value.trim();
     }
 
+    // 方法：clean
     private static String clean(String value) {
         return value == null ? "" : value.trim();
     }
 
+    // 方法：defaultText
     private static String defaultText(String value, String defaultValue) {
         return StringUtils.hasText(value) ? value.trim() : defaultValue;
     }
 
+    // 方法：trimTrailingSlash
     private static String trimTrailingSlash(String value) {
         String result = value.trim();
         while (result.endsWith("/")) {

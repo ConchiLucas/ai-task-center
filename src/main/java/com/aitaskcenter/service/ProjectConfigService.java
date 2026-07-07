@@ -11,15 +11,18 @@ import org.springframework.util.StringUtils;
 public class ProjectConfigService {
     private final ProjectConfigRepository repository;
 
+    // 方法：ProjectConfigService
     public ProjectConfigService(ProjectConfigRepository repository) {
         this.repository = repository;
     }
 
+    // 方法：list
     public List<ProjectConfig> list() {
         return repository.findAllByOrderByCreatedAtDesc();
     }
 
     @Transactional
+    // 方法：create
     public ProjectConfig create(ProjectConfig input) {
         String name = clean(input.getProjectName());
         if (!StringUtils.hasText(name)) {
@@ -36,6 +39,7 @@ public class ProjectConfigService {
     }
 
     @Transactional
+    // 方法：update
     public ProjectConfig update(Long id, ProjectConfig input) {
         ProjectConfig project = repository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("项目不存在"));
@@ -53,6 +57,7 @@ public class ProjectConfigService {
         return repository.save(project);
     }
 
+    // 方法：delete
     public void delete(Long id) {
         if (id == null) {
             throw new IllegalArgumentException("缺少项目 ID");
@@ -60,10 +65,12 @@ public class ProjectConfigService {
         repository.deleteById(id);
     }
 
+    // 方法：clean
     private static String clean(String value) {
         return value == null ? "" : value.trim();
     }
 
+    // 方法：defaultText
     private static String defaultText(String value, String defaultValue) {
         return StringUtils.hasText(value) ? value.trim() : defaultValue;
     }

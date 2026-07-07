@@ -13,11 +13,13 @@ public class ApiExceptionHandler {
             HttpMessageNotReadableException.class,
             MethodArgumentNotValidException.class
     })
+    // 方法：badRequest
     public ApiResponse<Void> badRequest(Exception ex) {
         return ApiResponse.error(ex.getMessage());
     }
 
     @ExceptionHandler(Exception.class)
+    // 方法：serverError
     public ApiResponse<Void> serverError(Exception ex) {
         return ApiResponse.error("服务异常: " + ex.getMessage());
     }

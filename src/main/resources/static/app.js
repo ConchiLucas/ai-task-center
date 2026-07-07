@@ -12,6 +12,8 @@ const state = {
   selectedProviderId: '',
 };
 
+const API_BASE = window.API_BASE || 'http://127.0.0.1:18743/api';
+
 const ports = {
   mysql: 3306,
   pgsql: 5432,
@@ -32,7 +34,7 @@ function toast(message) {
 }
 
 async function api(path, options = {}) {
-  const response = await fetch(`/api${path}`, {
+  const response = await fetch(`${API_BASE}${path}`, {
     ...options,
     headers: {
       'Content-Type': 'application/json',

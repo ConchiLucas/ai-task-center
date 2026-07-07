@@ -1,5 +1,5 @@
 server:
-  port: 8080
+  port: ${TASK_CENTER_SERVER_PORT:18743}
 
 spring:
   datasource:
@@ -20,3 +20,6 @@ spring:
 logging:
   level:
     org.hibernate.SQL: warn
+
+python-worker:
+  base-url: ${PYTHON_WORKER_BASE_URL:http://127.0.0.1:19186}
