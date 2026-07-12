@@ -38,7 +38,7 @@ public class TaskConfig extends BaseEntity {
     @Column(nullable = false, length = 40, columnDefinition = "varchar(40) default 'ACTIVE'")
     private String onboardingStatus = OnboardingStatus.ACTIVE.name();
 
-    @Column(nullable = false, columnDefinition = "text default '{}'")
+    @Column(nullable = false, columnDefinition = "text")
     private String onboardingContext = "{}";
 
     // 方法：getTaskName

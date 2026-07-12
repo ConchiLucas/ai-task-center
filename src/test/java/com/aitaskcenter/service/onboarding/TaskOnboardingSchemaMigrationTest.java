@@ -1,5 +1,8 @@
 package com.aitaskcenter.service.onboarding;
 
+import com.aitaskcenter.model.TaskConfig;
+import jakarta.persistence.Column;
+import java.lang.reflect.Field;
 import java.sql.Connection;
 import java.sql.DriverManager;
 import java.sql.PreparedStatement;
@@ -84,11 +87,20 @@ class TaskOnboardingSchemaMigrationTest {
         assertColumnNotNull("onboarding_step");
         assertColumnNotNull("onboarding_status");
         assertColumnNotNull("onboarding_context");
+        assertColumnDefault("onboarding_context", "'{}'::text");
 
         execute("INSERT INTO tb_task_config (id) VALUES (2)");
         assertEquals(
                 List.of("RESULT_CODE", "ACTIVE", "{}"),
                 onboardingValues(2));
+    }
+
+    @Test
+    void keepsOnboardingContextTypeInHibernateMappingWithoutEmbeddingDatabaseDefault() throws Exception {
+        Field field = TaskConfig.class.getDeclaredField("onboardingContext");
+        Column column = field.getAnnotation(Column.class);
+
+        assertEquals("text", column.columnDefinition());
     }
 
     @Test
@@ -219,6 +231,20 @@ class TaskOnboardingSchemaMigrationTest {
             try (ResultSet resultSet = statement.executeQuery()) {
                 assertTrue(resultSet.next());
                 assertEquals("NO", resultSet.getString(1));
+            }
+        }
+    }
+
+    private void assertColumnDefault(String columnName, String expectedDefault) throws SQLException {
+        String sql = "SELECT column_default FROM information_schema.columns "
+                + "WHERE table_schema = ? AND table_name = 'tb_task_config' AND column_name = ?";
+        try (Connection connection = schemaDataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, schemaName);
+            statement.setString(2, columnName);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                assertTrue(resultSet.next());
+                assertEquals(expectedDefault, resultSet.getString(1));
             }
         }
     }
