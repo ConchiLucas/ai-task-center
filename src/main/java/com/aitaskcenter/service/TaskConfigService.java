@@ -7,10 +7,16 @@ import com.aitaskcenter.repository.ConnectionConfigRepository;
 import com.aitaskcenter.repository.ProjectConfigRepository;
 import com.aitaskcenter.repository.TaskConfigRepository;
 import com.aitaskcenter.repository.TaskResultRepository;
+import com.aitaskcenter.service.onboarding.OnboardingStatus;
+import com.aitaskcenter.service.onboarding.OnboardingStep;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
+import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.time.OffsetDateTime;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -27,6 +33,7 @@ public class TaskConfigService {
     private final PythonWorkerClient pythonWorkerClient;
     private final TaskRunPromptBuilder taskRunPromptBuilder;
     private final JdbcTemplate jdbcTemplate;
+    private final ObjectMapper objectMapper;
 
     // 方法：TaskConfigService
     public TaskConfigService(
@@ -36,7 +43,8 @@ public class TaskConfigService {
             TaskResultRepository taskResultRepository,
             PythonWorkerClient pythonWorkerClient,
             TaskRunPromptBuilder taskRunPromptBuilder,
-            JdbcTemplate jdbcTemplate) {
+            JdbcTemplate jdbcTemplate,
+            ObjectMapper objectMapper) {
         this.repository = repository;
         this.projectRepository = projectRepository;
         this.connectionRepository = connectionRepository;
@@ -44,6 +52,7 @@ public class TaskConfigService {
         this.pythonWorkerClient = pythonWorkerClient;
         this.taskRunPromptBuilder = taskRunPromptBuilder;
         this.jdbcTemplate = jdbcTemplate;
+        this.objectMapper = objectMapper;
     }
 
     // 方法：list
@@ -201,7 +210,13 @@ public class TaskConfigService {
     public TaskConfig update(Long id, TaskConfig input) {
         TaskConfig task = repository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("任务配置不存在"));
+        SemanticConfig previous = SemanticConfig.from(task);
         copyAndValidate(input, task);
+        if (semanticConfigChanged(previous, task)) {
+            task.setOnboardingStep(OnboardingStep.RESULT_CODE.name());
+            task.setOnboardingStatus(OnboardingStatus.ACTIVE.name());
+            task.setOnboardingContext("{}");
+        }
         return repository.save(task);
     }
 
@@ -252,5 +267,44 @@ public class TaskConfigService {
     // 方法：clean
     private static String clean(String value) {
         return value == null ? "" : value.trim();
+    }
+
+    private boolean semanticConfigChanged(SemanticConfig previous, TaskConfig current) {
+        return !Objects.equals(previous.projectId(), current.getProjectId())
+                || !Objects.equals(previous.cliId(), current.getCliId())
+                || !Objects.equals(previous.databaseConfigId(), current.getDatabaseConfigId())
+                || !selectedTablesEqual(previous.selectedTables(), current.getSelectedTables())
+                || !clean(previous.taskDesc()).equals(clean(current.getTaskDesc()));
+    }
+
+    private boolean selectedTablesEqual(String left, String right) {
+        String normalizedLeft = clean(left);
+        String normalizedRight = clean(right);
+        try {
+            JsonNode leftJson = objectMapper.readTree(normalizedLeft);
+            JsonNode rightJson = objectMapper.readTree(normalizedRight);
+            if (leftJson != null && rightJson != null) {
+                return leftJson.equals(rightJson);
+            }
+        } catch (JsonProcessingException | IllegalArgumentException ignored) {
+            // Existing non-JSON values retain their prior string-comparison behavior.
+        }
+        return normalizedLeft.equals(normalizedRight);
+    }
+
+    private record SemanticConfig(
+            Long projectId,
+            String cliId,
+            Long databaseConfigId,
+            String selectedTables,
+            String taskDesc) {
+        private static SemanticConfig from(TaskConfig task) {
+            return new SemanticConfig(
+                    task.getProjectId(),
+                    task.getCliId(),
+                    task.getDatabaseConfigId(),
+                    task.getSelectedTables(),
+                    task.getTaskDesc());
+        }
     }
 }

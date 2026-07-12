@@ -1,14 +1,18 @@
 package com.aitaskcenter.service.onboarding;
 
+import com.aitaskcenter.dto.GenerateTaskRunBatchRequest;
 import com.aitaskcenter.dto.TaskOnboardingReportRequest;
 import com.aitaskcenter.dto.TaskOnboardingResponse;
 import com.aitaskcenter.model.TaskConfig;
 import com.aitaskcenter.repository.TaskConfigRepository;
+import com.aitaskcenter.service.TaskConfigService;
 import java.security.SecureRandom;
 import java.util.EnumMap;
 import java.util.HexFormat;
 import java.util.List;
 import java.util.Map;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.beans.factory.ObjectFactory;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -25,20 +29,47 @@ public class TaskOnboardingService {
     private final TaskOnboardingCallbackValidator callbackValidator;
     private final TaskOnboardingResponseAssembler responseAssembler;
     private final TaskOnboardingChildTableLock childTableLock;
+    private final ObjectFactory<TaskOnboardingCleanupService> cleanupServiceProvider;
+    private final ObjectFactory<TaskConfigService> taskConfigServiceProvider;
 
+    @Autowired
     public TaskOnboardingService(
             TaskConfigRepository taskConfigRepository,
             TaskOnboardingContextCodec contextCodec,
             TaskOnboardingSnapshotService snapshotService,
             TaskOnboardingCallbackValidator callbackValidator,
             TaskOnboardingResponseAssembler responseAssembler,
-            TaskOnboardingChildTableLock childTableLock) {
+            TaskOnboardingChildTableLock childTableLock,
+            ObjectFactory<TaskOnboardingCleanupService> cleanupServiceProvider,
+            ObjectFactory<TaskConfigService> taskConfigServiceProvider) {
         this.taskConfigRepository = taskConfigRepository;
         this.contextCodec = contextCodec;
         this.snapshotService = snapshotService;
         this.callbackValidator = callbackValidator;
         this.responseAssembler = responseAssembler;
         this.childTableLock = childTableLock;
+        this.cleanupServiceProvider = cleanupServiceProvider;
+        this.taskConfigServiceProvider = taskConfigServiceProvider;
+    }
+
+    TaskOnboardingService(
+            TaskConfigRepository taskConfigRepository,
+            TaskOnboardingContextCodec contextCodec,
+            TaskOnboardingSnapshotService snapshotService,
+            TaskOnboardingCallbackValidator callbackValidator,
+            TaskOnboardingResponseAssembler responseAssembler,
+            TaskOnboardingChildTableLock childTableLock,
+            TaskOnboardingCleanupService cleanupService,
+            TaskConfigService taskConfigService) {
+        this(
+                taskConfigRepository,
+                contextCodec,
+                snapshotService,
+                callbackValidator,
+                responseAssembler,
+                childTableLock,
+                () -> cleanupService,
+                () -> taskConfigService);
     }
 
     @Transactional
@@ -83,6 +114,61 @@ public class TaskOnboardingService {
     @Transactional
     public TaskOnboardingResponse confirmBatchValidation(Long taskConfigId) {
         return confirm(taskConfigId, OnboardingStep.BATCH_VALIDATION, OnboardingStep.BATCH_GENERATION);
+    }
+
+    @Transactional
+    public TaskOnboardingResponse generateResults(Long taskConfigId) {
+        TaskConfig task = loadTaskForUpdate(taskConfigId);
+        requireActiveStep(task, OnboardingStep.RESULT_GENERATION);
+        TaskOnboardingContext context = contextCodec.read(task);
+        cleanupServiceProvider.getObject()
+                .deleteResultValidation(taskConfigId, context.getResultValidationRunId());
+
+        Map<String, Object> generationResult;
+        try {
+            generationResult = taskConfigServiceProvider.getObject().generateResults(taskConfigId, false);
+        } catch (RuntimeException ex) {
+            throw new TaskOnboardingStateException("Formal result generation failed", ex);
+        }
+        if (count(generationResult, "insertedCount") <= 0) {
+            throw new TaskOnboardingStateException("Formal result generation created no results");
+        }
+
+        advance(task, OnboardingStep.RESULT_GENERATION, OnboardingStep.BATCH_CODE);
+        TaskOnboardingContext nextContext = new TaskOnboardingContext();
+        initializeCodeStep(task, nextContext);
+        saveContext(task, nextContext);
+        return responseAssembler.assemble(task, nextContext);
+    }
+
+    @Transactional
+    public TaskOnboardingResponse generateBatches(
+            Long taskConfigId, GenerateTaskRunBatchRequest request) {
+        TaskConfig task = loadTaskForUpdate(taskConfigId);
+        requireActiveStep(task, OnboardingStep.BATCH_GENERATION);
+        TaskOnboardingContext context = contextCodec.read(task);
+        cleanupServiceProvider.getObject().deleteBatchValidation(
+                taskConfigId,
+                context.getBatchValidationTaskRunId(),
+                context.getBatchValidationMarker());
+
+        Map<String, Object> generationResult;
+        try {
+            generationResult = taskConfigServiceProvider.getObject()
+                    .generateRunBatches(taskConfigId, request);
+        } catch (RuntimeException ex) {
+            throw new TaskOnboardingStateException("Formal batch generation failed", ex);
+        }
+        if (count(generationResult, "createdRunCount") <= 0
+                || count(generationResult, "linkedResultCount") <= 0) {
+            throw new TaskOnboardingStateException(
+                    "Formal batch generation must create runs and result links");
+        }
+
+        advance(task, OnboardingStep.BATCH_GENERATION, OnboardingStep.READY);
+        context.setErrorMessage("");
+        saveContext(task, context);
+        return responseAssembler.assemble(task, context);
     }
 
     private TaskOnboardingResponse confirm(
@@ -135,6 +221,15 @@ public class TaskOnboardingService {
         }
     }
 
+    private void requireActiveStep(TaskConfig task, OnboardingStep expected) {
+        requireActive(task);
+        OnboardingStep current = step(task);
+        if (current != expected) {
+            throw new TaskOnboardingStateException(
+                    "Task onboarding step must be " + expected + " for this operation");
+        }
+    }
+
     private void advance(TaskConfig task, OnboardingStep expected, OnboardingStep target) {
         OnboardingStep current = step(task);
         if (current != expected || TRANSITIONS.get(current) != target) {
@@ -163,6 +258,14 @@ public class TaskOnboardingService {
         byte[] bytes = new byte[32];
         SECURE_RANDOM.nextBytes(bytes);
         return HexFormat.of().formatHex(bytes);
+    }
+
+    private static long count(Map<String, Object> result, String key) {
+        Object value = result == null ? null : result.get(key);
+        if (!(value instanceof Number number)) {
+            throw new TaskOnboardingStateException("Generation response is missing numeric " + key);
+        }
+        return number.longValue();
     }
 
     private static Map<OnboardingStep, OnboardingStep> transitions() {

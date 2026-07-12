@@ -2,14 +2,20 @@ package com.aitaskcenter.service.onboarding;
 
 import com.aitaskcenter.dto.TaskOnboardingReportRequest;
 import com.aitaskcenter.dto.TaskOnboardingResponse;
+import com.aitaskcenter.dto.GenerateTaskRunBatchRequest;
 import com.aitaskcenter.model.TaskConfig;
 import com.aitaskcenter.model.TaskResult;
 import com.aitaskcenter.model.TaskRun;
 import com.aitaskcenter.model.TaskRunResult;
+import com.aitaskcenter.repository.ConnectionConfigRepository;
+import com.aitaskcenter.repository.ProjectConfigRepository;
 import com.aitaskcenter.repository.TaskConfigRepository;
 import com.aitaskcenter.repository.TaskResultRepository;
 import com.aitaskcenter.repository.TaskRunRepository;
 import com.aitaskcenter.repository.TaskRunResultRepository;
+import com.aitaskcenter.service.PythonWorkerClient;
+import com.aitaskcenter.service.TaskConfigService;
+import com.aitaskcenter.service.TaskRunPromptBuilder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.lang.reflect.InvocationHandler;
 import java.lang.reflect.Method;
@@ -23,6 +29,7 @@ import java.util.Optional;
 import jakarta.persistence.LockModeType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.data.jpa.repository.Lock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -32,6 +39,11 @@ import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
+import static org.mockito.Mockito.when;
 
 class TaskOnboardingServiceTest {
     private static final Long TASK_ID = 7L;
@@ -49,6 +61,8 @@ class TaskOnboardingServiceTest {
     private RepositoryStub<TaskResultRepository> taskResults;
     private RepositoryStub<TaskRunRepository> taskRuns;
     private RepositoryStub<TaskRunResultRepository> taskRunResults;
+    private TaskOnboardingCleanupService cleanupService;
+    private TaskConfigService taskConfigService;
 
     private TaskOnboardingService service;
 
@@ -63,6 +77,8 @@ class TaskOnboardingServiceTest {
         taskRunRepository = taskRuns.proxy();
         taskRunResultRepository = taskRunResults.proxy();
         promptBuilder = new TaskOnboardingPromptBuilder(OBJECT_MAPPER);
+        cleanupService = mock(TaskOnboardingCleanupService.class);
+        taskConfigService = mock(TaskConfigService.class);
         TaskOnboardingContextCodec contextCodec = new TaskOnboardingContextCodec(OBJECT_MAPPER);
         TaskOnboardingSnapshotService snapshotService = new TaskOnboardingSnapshotService(
                 taskResultRepository, taskRunRepository, taskRunResultRepository);
@@ -80,7 +96,9 @@ class TaskOnboardingServiceTest {
                 snapshotService,
                 callbackValidator,
                 responseAssembler,
-                () -> { });
+                () -> { },
+                cleanupService,
+                taskConfigService);
     }
 
     @Test
@@ -672,6 +690,169 @@ class TaskOnboardingServiceTest {
                 List.of("old-link"), List.of("old-link", "extra-link"));
     }
 
+    @Test
+    void failedCleanupDoesNotCallFormalGeneration() throws Exception {
+        TaskConfig task = resultGenerationTask("result-run-1", List.of(101L));
+        stubTask(task);
+        when(cleanupService.deleteResultValidation(TASK_ID, "result-run-1"))
+                .thenThrow(new IllegalStateException("validation row is linked"));
+
+        assertThrows(IllegalStateException.class, () -> service.generateResults(TASK_ID));
+
+        verifyNoInteractions(taskConfigService);
+        assertEquals(OnboardingStep.RESULT_GENERATION.name(), task.getOnboardingStep());
+        assertEquals(List.of(101L), context(task).getResultValidationIds());
+    }
+
+    @Test
+    void successfulResultGenerationAdvancesOnlyToBatchCode() throws Exception {
+        TaskConfig task = resultGenerationTask("result-run-1", List.of(101L));
+        stubTask(task);
+        when(cleanupService.deleteResultValidation(TASK_ID, "result-run-1")).thenReturn(1);
+        when(taskConfigService.generateResults(TASK_ID, false)).thenReturn(Map.of("insertedCount", 4));
+        taskResults.answer("findFingerprintRowsByTaskConfigId", List.of("formal-result"), TASK_ID);
+
+        TaskOnboardingResponse response = service.generateResults(TASK_ID);
+
+        TaskOnboardingContext nextContext = context(task);
+        assertEquals(OnboardingStep.BATCH_CODE.name(), task.getOnboardingStep());
+        assertEquals(OnboardingStatus.ACTIVE.name(), task.getOnboardingStatus());
+        assertEquals(OnboardingStep.BATCH_CODE.name(), response.getCurrentStep());
+        assertEquals("", nextContext.getResultValidationRunId());
+        assertEquals(List.of(), nextContext.getResultValidationIds());
+        assertFalse(nextContext.getBatchValidationMarker().isBlank());
+        assertFalse(nextContext.getBatchReportToken().isBlank());
+        assertEquals("BATCH", nextContext.getBaselineStage());
+        verify(taskConfigService).generateResults(TASK_ID, false);
+    }
+
+    @Test
+    void zeroResultInsertCountDoesNotAdvance() {
+        TaskConfig task = resultGenerationTask("result-run-1", List.of(101L));
+        stubTask(task);
+        when(cleanupService.deleteResultValidation(TASK_ID, "result-run-1")).thenReturn(1);
+        when(taskConfigService.generateResults(TASK_ID, false)).thenReturn(Map.of("insertedCount", 0));
+
+        assertThrows(TaskOnboardingStateException.class, () -> service.generateResults(TASK_ID));
+        assertEquals(OnboardingStep.RESULT_GENERATION.name(), task.getOnboardingStep());
+    }
+
+    @Test
+    void successfulBatchGenerationAdvancesReadyOnlyWhenBothCountsArePositive() {
+        TaskConfig task = batchGenerationTask("batch-run-1", 301L, List.of(201L));
+        GenerateTaskRunBatchRequest request = new GenerateTaskRunBatchRequest();
+        stubTask(task);
+        when(cleanupService.deleteBatchValidation(TASK_ID, 301L, "batch-run-1")).thenReturn(1);
+        when(taskConfigService.generateRunBatches(TASK_ID, request)).thenReturn(Map.of(
+                "createdRunCount", 1,
+                "linkedResultCount", 1));
+
+        TaskOnboardingResponse response = service.generateBatches(TASK_ID, request);
+
+        assertEquals(OnboardingStep.READY.name(), task.getOnboardingStep());
+        assertEquals(OnboardingStep.READY.name(), response.getCurrentStep());
+        verify(taskConfigService).generateRunBatches(TASK_ID, request);
+    }
+
+    @Test
+    void zeroOrPartialBatchCountsDoNotAdvance() {
+        List<Map<String, Object>> incompleteCounts = List.of(
+                Map.of("createdRunCount", 0, "linkedResultCount", 1),
+                Map.of("createdRunCount", 1, "linkedResultCount", 0),
+                Map.of("createdRunCount", 0, "linkedResultCount", 0));
+
+        for (Map<String, Object> counts : incompleteCounts) {
+            reset(cleanupService, taskConfigService);
+            TaskConfig task = batchGenerationTask("batch-run-1", 301L, List.of(201L));
+            GenerateTaskRunBatchRequest request = new GenerateTaskRunBatchRequest();
+            stubTask(task);
+            when(cleanupService.deleteBatchValidation(TASK_ID, 301L, "batch-run-1")).thenReturn(1);
+            when(taskConfigService.generateRunBatches(TASK_ID, request)).thenReturn(counts);
+
+            assertThrows(TaskOnboardingStateException.class,
+                    () -> service.generateBatches(TASK_ID, request));
+            assertEquals(OnboardingStep.BATCH_GENERATION.name(), task.getOnboardingStep());
+        }
+    }
+
+    @Test
+    void wrongStepOrStatusRejectsWithNoCleanupOrGeneration() {
+        TaskConfig wrongStep = taskAt(OnboardingStep.RESULT_VALIDATION);
+        stubTask(wrongStep);
+        assertThrows(RuntimeException.class, () -> service.generateResults(TASK_ID));
+
+        TaskConfig wrongStatus = batchGenerationTask("batch-run-1", 301L, List.of(201L));
+        wrongStatus.setOnboardingStatus(OnboardingStatus.FAILED.name());
+        stubTask(wrongStatus);
+        assertThrows(RuntimeException.class,
+                () -> service.generateBatches(TASK_ID, new GenerateTaskRunBatchRequest()));
+
+        verifyNoInteractions(cleanupService, taskConfigService);
+    }
+
+    @Test
+    void semanticConfigChangesResetOnboardingAndTaskNameOnlyChangeDoesNot() {
+        TaskConfigRepository repository = mock(TaskConfigRepository.class);
+        ProjectConfigRepository projects = mock(ProjectConfigRepository.class);
+        ConnectionConfigRepository connections = mock(ConnectionConfigRepository.class);
+        TaskConfigService configService = new TaskConfigService(
+                repository,
+                projects,
+                connections,
+                mock(TaskResultRepository.class),
+                mock(PythonWorkerClient.class),
+                mock(TaskRunPromptBuilder.class),
+                mock(JdbcTemplate.class),
+                OBJECT_MAPPER);
+        TaskConfig existing = taskAt(OnboardingStep.BATCH_VALIDATION);
+        existing.setDatabaseConfigId(5L);
+        existing.setTaskDesc("original description");
+        existing.setOnboardingStatus(OnboardingStatus.COMPLETED.name());
+        existing.setOnboardingContext("{\"preserved\":true}");
+        when(repository.findById(TASK_ID)).thenReturn(Optional.of(existing));
+        when(projects.existsById(3L)).thenReturn(true);
+        when(projects.existsById(4L)).thenReturn(true);
+        when(connections.existsById(5L)).thenReturn(true);
+        when(connections.existsById(6L)).thenReturn(true);
+
+        TaskConfig nameOnly = configInput("Renamed task", "original description", " [ \"word\" ] ");
+        configService.update(TASK_ID, nameOnly);
+
+        assertEquals(OnboardingStep.BATCH_VALIDATION.name(), existing.getOnboardingStep());
+        assertEquals(OnboardingStatus.COMPLETED.name(), existing.getOnboardingStatus());
+        assertEquals("{\"preserved\":true}", existing.getOnboardingContext());
+
+        List<TaskConfig> semanticChanges = new ArrayList<>();
+        TaskConfig projectChange = configInput("Renamed task", "original description", "[\"word\"]");
+        projectChange.setProjectId(4L);
+        semanticChanges.add(projectChange);
+        TaskConfig cliChange = configInput("Renamed task", "original description", "[\"word\"]");
+        cliChange.setCliId("other-cli");
+        semanticChanges.add(cliChange);
+        TaskConfig databaseChange = configInput("Renamed task", "original description", "[\"word\"]");
+        databaseChange.setDatabaseConfigId(6L);
+        semanticChanges.add(databaseChange);
+        semanticChanges.add(configInput("Renamed task", "original description", "[\"other\"]"));
+        semanticChanges.add(configInput("Renamed task", "changed description", "[\"word\"]"));
+
+        for (TaskConfig semanticChange : semanticChanges) {
+            existing.setProjectId(3L);
+            existing.setCliId("codex");
+            existing.setDatabaseConfigId(5L);
+            existing.setSelectedTables("[\"word\"]");
+            existing.setTaskDesc("original description");
+            existing.setOnboardingStep(OnboardingStep.BATCH_VALIDATION.name());
+            existing.setOnboardingStatus(OnboardingStatus.COMPLETED.name());
+            existing.setOnboardingContext("{\"preserved\":true}");
+
+            configService.update(TASK_ID, semanticChange);
+
+            assertEquals(OnboardingStep.RESULT_CODE.name(), existing.getOnboardingStep());
+            assertEquals(OnboardingStatus.ACTIVE.name(), existing.getOnboardingStatus());
+            assertEquals("{}", existing.getOnboardingContext());
+        }
+    }
+
     private void assertInvalidResultCallback(TaskConfig task, TaskOnboardingReportRequest request) {
         stubTask(task);
         assertRejectedWithoutMutation(task, request);
@@ -854,6 +1035,36 @@ class TaskOnboardingServiceTest {
         setEmptyBaseline(context, "BATCH");
         task.setOnboardingContext(write(context));
         return task;
+    }
+
+    private static TaskConfig resultGenerationTask(String runId, List<Long> validationIds) {
+        TaskConfig task = taskAt(OnboardingStep.RESULT_GENERATION);
+        TaskOnboardingContext context = new TaskOnboardingContext();
+        context.setResultValidationRunId(runId);
+        context.setResultValidationIds(validationIds);
+        task.setOnboardingContext(write(context));
+        return task;
+    }
+
+    private static TaskConfig batchGenerationTask(String marker, Long runId, List<Long> resultIds) {
+        TaskConfig task = taskAt(OnboardingStep.BATCH_GENERATION);
+        TaskOnboardingContext context = new TaskOnboardingContext();
+        context.setBatchValidationMarker(marker);
+        context.setBatchValidationTaskRunId(runId);
+        context.setBatchValidationResultIds(resultIds);
+        task.setOnboardingContext(write(context));
+        return task;
+    }
+
+    private static TaskConfig configInput(String name, String description, String selectedTables) {
+        TaskConfig input = new TaskConfig();
+        input.setTaskName(name);
+        input.setProjectId(3L);
+        input.setCliId("codex");
+        input.setDatabaseConfigId(5L);
+        input.setTaskDesc(description);
+        input.setSelectedTables(selectedTables);
+        return input;
     }
 
     private static void setEmptyBaseline(TaskOnboardingContext context, String stage) {
