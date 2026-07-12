@@ -48,6 +48,9 @@ END
 $task_onboarding$;
 ^^^
 DO $task_onboarding_indexes$
+DECLARE
+    expected_run_result_index regclass;
+    expected_run_result_index_valid boolean;
 BEGIN
     IF to_regclass('tb_task_result') IS NOT NULL THEN
         CREATE INDEX IF NOT EXISTS idx_task_result_onboarding_marker
@@ -59,18 +62,44 @@ BEGIN
             ON tb_task_run (task_config_id, reason, id);
     END IF;
 
-    IF to_regclass('tb_task_run_result') IS NOT NULL
-       AND to_regclass('uk_task_run_result_run_result') IS NULL THEN
-        IF EXISTS (
-            SELECT 1
-            FROM tb_task_run_result
-            GROUP BY task_run_id, task_result_id
-            HAVING count(*) > 1
-        ) THEN
-            RAISE EXCEPTION 'Cannot add uk_task_run_result_run_result: duplicate task-run/result links exist';
+    IF to_regclass('tb_task_run_result') IS NOT NULL THEN
+        expected_run_result_index := to_regclass('uk_task_run_result_run_result');
+        IF expected_run_result_index IS NOT NULL THEN
+            SELECT index_row.indisunique
+                   AND index_row.indisvalid
+                   AND index_row.indisready
+                   AND index_row.indpred IS NULL
+                   AND index_row.indexprs IS NULL
+                   AND index_row.indnkeyatts = 2
+                   AND (
+                       SELECT array_agg(attribute_row.attname ORDER BY key_row.ordinality)
+                       FROM unnest(index_row.indkey) WITH ORDINALITY
+                           AS key_row(attnum, ordinality)
+                       JOIN pg_attribute attribute_row
+                         ON attribute_row.attrelid = index_row.indrelid
+                        AND attribute_row.attnum = key_row.attnum
+                   ) = ARRAY['task_run_id', 'task_result_id']::name[]
+            INTO expected_run_result_index_valid
+            FROM pg_index index_row
+            JOIN pg_class index_class ON index_class.oid = index_row.indexrelid
+            WHERE index_class.oid = expected_run_result_index
+              AND index_class.relnamespace = current_schema()::regnamespace
+              AND index_row.indrelid = 'tb_task_run_result'::regclass;
+            IF NOT COALESCE(expected_run_result_index_valid, false) THEN
+                RAISE EXCEPTION 'uk_task_run_result_run_result has wrong definition';
+            END IF;
+        ELSE
+            IF EXISTS (
+                SELECT 1
+                FROM tb_task_run_result
+                GROUP BY task_run_id, task_result_id
+                HAVING count(*) > 1
+            ) THEN
+                RAISE EXCEPTION 'Cannot add uk_task_run_result_run_result: duplicate task-run/result links exist';
+            END IF;
+            CREATE UNIQUE INDEX uk_task_run_result_run_result
+                ON tb_task_run_result (task_run_id, task_result_id);
         END IF;
-        CREATE UNIQUE INDEX uk_task_run_result_run_result
-            ON tb_task_run_result (task_run_id, task_result_id);
     END IF;
 END
 $task_onboarding_indexes$;

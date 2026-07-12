@@ -71,6 +71,7 @@ import static org.mockito.Mockito.when;
         TaskOnboardingPromptBuilder.class,
         TaskOnboardingCleanupService.class,
         TaskOnboardingResetService.class,
+        PostgresTaskOnboardingAdvisoryLock.class,
         TaskOnboardingGenerationPhaseService.class,
         TaskConfigService.class,
         TaskRunPromptBuilder.class,
@@ -406,6 +407,250 @@ class TaskOnboardingRepositoryIntegrationTest {
                 select count(*) from tb_task_run_result link join tb_task_run run on run.id = link.task_run_id
                 where run.reason = ? and link.task_result_id = ?
                 """, Integer.class, "FORMAL_GENERATION:" + prepared.attempt(), later.getId()));
+    }
+
+    @Test
+    void semanticResetRefusesCrossTaskLinksIntoOwnedResults() throws Exception {
+        TaskResult ownedResult = taskResultRepository.saveAndFlush(batchCandidateResult("owned"));
+        TaskConfig other = saveOtherTask("other-link-owner");
+        TaskRun otherRun = run();
+        otherRun.setTaskConfigId(other.getId());
+        otherRun = taskRunRepository.saveAndFlush(otherRun);
+        TaskRunResult crossLink = taskRunResultRepository.saveAndFlush(
+                link(otherRun.getId(), ownedResult.getId()));
+        task.setOnboardingStep(OnboardingStep.READY.name());
+        taskConfigRepository.saveAndFlush(task);
+
+        assertThrows(TaskOnboardingStateException.class,
+                () -> taskConfigService.update(task.getId(), changedDescriptionInput()));
+
+        assertTrue(taskResultRepository.existsById(ownedResult.getId()));
+        assertTrue(taskRunRepository.existsById(otherRun.getId()));
+        assertTrue(taskRunResultRepository.existsById(crossLink.getId()));
+    }
+
+    @Test
+    void semanticResetRefusesOtherResultsReferencingOwnedRuns() throws Exception {
+        TaskRun ownedRun = taskRunRepository.saveAndFlush(run());
+        TaskConfig other = saveOtherTask("other-result-owner");
+        TaskResult otherResult = batchCandidateResult("other-result");
+        otherResult.setTaskConfigId(other.getId());
+        otherResult.setTaskRunId(ownedRun.getId());
+        otherResult = taskResultRepository.saveAndFlush(otherResult);
+        task.setOnboardingStep(OnboardingStep.READY.name());
+        taskConfigRepository.saveAndFlush(task);
+
+        assertThrows(TaskOnboardingStateException.class,
+                () -> taskConfigService.update(task.getId(), changedDescriptionInput()));
+
+        assertTrue(taskRunRepository.existsById(ownedRun.getId()));
+        assertTrue(taskResultRepository.existsById(otherResult.getId()));
+    }
+
+    @Test
+    void semanticResetRefusesOwnedRunsLinkedToOtherTaskResults() throws Exception {
+        TaskRun ownedRun = taskRunRepository.saveAndFlush(run());
+        TaskConfig other = saveOtherTask("other-linked-result-owner");
+        TaskResult otherResult = batchCandidateResult("other-linked-result");
+        otherResult.setTaskConfigId(other.getId());
+        otherResult = taskResultRepository.saveAndFlush(otherResult);
+        TaskRunResult crossLink = taskRunResultRepository.saveAndFlush(
+                link(ownedRun.getId(), otherResult.getId()));
+        task.setOnboardingStep(OnboardingStep.READY.name());
+        taskConfigRepository.saveAndFlush(task);
+
+        assertThrows(TaskOnboardingStateException.class,
+                () -> taskConfigService.update(task.getId(), changedDescriptionInput()));
+
+        assertTrue(taskRunRepository.existsById(ownedRun.getId()));
+        assertTrue(taskResultRepository.existsById(otherResult.getId()));
+        assertTrue(taskRunResultRepository.existsById(crossLink.getId()));
+    }
+
+    @Test
+    void resetCommitMakesWaitingStaleWorkerRejectChangedAttempt() throws Exception {
+        String attempt = "5".repeat(64);
+        TaskOnboardingContext context = new TaskOnboardingContext();
+        context.setResultValidationRunId(attempt);
+        task.setOnboardingStep(OnboardingStep.RESULT_GENERATION.name());
+        task.setOnboardingStatus(OnboardingStatus.ACTIVE.name());
+        task.setOnboardingContext(objectMapper.writeValueAsString(context));
+        taskConfigRepository.saveAndFlush(task);
+
+        long commitGateKey = Integer.toUnsignedLong((SCHEMA + "reset-worker").hashCode());
+        installTaskConfigCommitGate(commitGateKey);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try (Connection gate = directConnection("onboarding_reset_commit_gate");
+                Statement gateStatement = gate.createStatement()) {
+            gateStatement.execute("select pg_advisory_lock(" + commitGateKey + ")");
+            Future<TaskConfig> reset = executor.submit(
+                    () -> taskConfigService.update(task.getId(), changedDescriptionInput()));
+            awaitActivity("update tb_task_config", Set.of("Lock"));
+
+            Future<Integer> staleWorker = executor.submit(
+                    () -> simulateResultWorker(task.getId(), attempt));
+            awaitActivity("hashtextextended('task-onboarding:'", Set.of("Lock"));
+            assertFalse(staleWorker.isDone());
+
+            gateStatement.execute("select pg_advisory_unlock(" + commitGateKey + ")");
+            reset.get(5, TimeUnit.SECONDS);
+            assertEquals(0, staleWorker.get(5, TimeUnit.SECONDS));
+            assertEquals(0, taskResultRepository.count());
+        } finally {
+            jdbcTemplate.execute("drop trigger if exists onboarding_callback_commit_gate on tb_task_config");
+            jdbcTemplate.execute("drop function if exists onboarding_callback_commit_gate()");
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void phaseCBlocksConcurrentLinkInsertAndDeleteUntilReadyCommit() throws Exception {
+        PreparedBatch prepared = prepareBatchAttempt("6".repeat(64), 2);
+        Map<String, Object> counts = taskConfigService.generateRunBatches(
+                task.getId(), batchRequest(10), prepared.attempt(), prepared.resultIds());
+        String reason = "FORMAL_GENERATION:" + prepared.attempt();
+        TaskRun formalRun = taskRunRepository.findByTaskConfigIdAndReasonOrderByIdAsc(
+                task.getId(), reason).get(0);
+        TaskRunResult existingLink = taskRunResultRepository.findByTaskRunIdOrderByIdAsc(
+                formalRun.getId()).get(0);
+        TaskResult extra = taskResultRepository.saveAndFlush(batchCandidateResult("phase-c-extra"));
+
+        long commitGateKey = Integer.toUnsignedLong((SCHEMA + "phase-c").hashCode());
+        installTaskConfigCommitGate(commitGateKey);
+        ExecutorService executor = Executors.newFixedThreadPool(3);
+        CountDownLatch ready = new CountDownLatch(2);
+        CountDownLatch start = new CountDownLatch(1);
+        WriteAttempt insert = new WriteAttempt("onboarding_writer_phase_c_insert", """
+                /* onboarding_writer_phase_c_insert */
+                insert into tb_task_run_result
+                    (created_at, updated_at, task_run_id, task_result_id, status)
+                values (now(), now(), ?, ?, 'PENDING')
+                """, formalRun.getId(), extra.getId());
+        WriteAttempt delete = new WriteAttempt("onboarding_writer_phase_c_delete", """
+                /* onboarding_writer_phase_c_delete */
+                delete from tb_task_run_result where id = ?
+                """, existingLink.getId());
+        try (Connection gate = directConnection("onboarding_phase_c_gate");
+                Statement gateStatement = gate.createStatement()) {
+            gateStatement.execute("select pg_advisory_lock(" + commitGateKey + ")");
+            Future<TaskOnboardingResponse> completion = executor.submit(() ->
+                    generationPhaseService.completeBatch(
+                            task.getId(),
+                            prepared.attempt(),
+                            ((Number) counts.get("createdRunCount")).longValue(),
+                            ((Number) counts.get("linkedResultCount")).longValue()));
+            awaitActivity("update tb_task_config", Set.of("Lock"));
+
+            Future<Integer> insertFuture = executor.submit(() -> executeWrite(insert, ready, start));
+            Future<Integer> deleteFuture = executor.submit(() -> executeWrite(delete, ready, start));
+            assertTrue(ready.await(5, TimeUnit.SECONDS));
+            start.countDown();
+            awaitBlockedWriters(Set.of(insert.applicationName(), delete.applicationName()));
+            assertFalse(insertFuture.isDone());
+            assertFalse(deleteFuture.isDone());
+
+            gateStatement.execute("select pg_advisory_unlock(" + commitGateKey + ")");
+            assertEquals(OnboardingStep.READY.name(), completion.get(5, TimeUnit.SECONDS).getCurrentStep());
+            assertEquals(1, insertFuture.get(5, TimeUnit.SECONDS));
+            assertEquals(1, deleteFuture.get(5, TimeUnit.SECONDS));
+        } finally {
+            start.countDown();
+            jdbcTemplate.execute("drop trigger if exists onboarding_callback_commit_gate on tb_task_config");
+            jdbcTemplate.execute("drop function if exists onboarding_callback_commit_gate()");
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentResultCompletionsBothReturnCommittedSuccess() throws Exception {
+        String attempt = "7".repeat(64);
+        taskResultRepository.saveAndFlush(batchCandidateResult("formal-result"));
+        TaskOnboardingContext context = new TaskOnboardingContext();
+        context.setResultValidationRunId(attempt);
+        context.setResultCleanupCompletedFor(attempt);
+        task.setOnboardingStep(OnboardingStep.RESULT_GENERATION.name());
+        task.setOnboardingContext(objectMapper.writeValueAsString(context));
+        taskConfigRepository.saveAndFlush(task);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<TaskOnboardingResponse> first = executor.submit(() -> {
+                await(start);
+                return generationPhaseService.completeResult(task.getId(), attempt, 1);
+            });
+            Future<TaskOnboardingResponse> second = executor.submit(() -> {
+                await(start);
+                return generationPhaseService.completeResult(task.getId(), attempt, 1);
+            });
+            start.countDown();
+
+            assertEquals(OnboardingStep.BATCH_CODE.name(), first.get(5, TimeUnit.SECONDS).getCurrentStep());
+            assertEquals(OnboardingStep.BATCH_CODE.name(), second.get(5, TimeUnit.SECONDS).getCurrentStep());
+            assertEquals(attempt, onboardingContext().getCompletedResultGenerationId());
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void concurrentBatchCompletionsBothReturnCommittedSuccess() throws Exception {
+        PreparedBatch prepared = prepareBatchAttempt("8".repeat(64), 2);
+        Map<String, Object> counts = taskConfigService.generateRunBatches(
+                task.getId(), batchRequest(10), prepared.attempt(), prepared.resultIds());
+        long runCount = ((Number) counts.get("createdRunCount")).longValue();
+        long linkCount = ((Number) counts.get("linkedResultCount")).longValue();
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        CountDownLatch start = new CountDownLatch(1);
+        try {
+            Future<TaskOnboardingResponse> first = executor.submit(() -> {
+                await(start);
+                return generationPhaseService.completeBatch(
+                        task.getId(), prepared.attempt(), runCount, linkCount);
+            });
+            Future<TaskOnboardingResponse> second = executor.submit(() -> {
+                await(start);
+                return generationPhaseService.completeBatch(
+                        task.getId(), prepared.attempt(), runCount, linkCount);
+            });
+            start.countDown();
+
+            assertEquals(OnboardingStep.READY.name(), first.get(5, TimeUnit.SECONDS).getCurrentStep());
+            assertEquals(OnboardingStep.READY.name(), second.get(5, TimeUnit.SECONDS).getCurrentStep());
+            assertEquals(prepared.attempt(), onboardingContext().getCompletedBatchGenerationId());
+        } finally {
+            start.countDown();
+            executor.shutdownNow();
+        }
+    }
+
+    @Test
+    void resetWaitsForWorkerHoldingSharedTaskAdvisoryLock() throws Exception {
+        TaskResult formal = taskResultRepository.saveAndFlush(batchCandidateResult("worker-owned-formal"));
+        task.setOnboardingStep(OnboardingStep.READY.name());
+        taskConfigRepository.saveAndFlush(task);
+        ExecutorService executor = Executors.newSingleThreadExecutor();
+        try (Connection worker = directConnection("onboarding_worker_holds_task_lock")) {
+            worker.setAutoCommit(false);
+            try (PreparedStatement lock = worker.prepareStatement("""
+                    select pg_advisory_xact_lock(
+                        hashtextextended('task-onboarding:' || cast(? as text), 0))
+                    """)) {
+                lock.setLong(1, task.getId());
+                lock.execute();
+            }
+            Future<TaskConfig> reset = executor.submit(
+                    () -> taskConfigService.update(task.getId(), changedDescriptionInput()));
+            awaitActivity("hashtextextended('task-onboarding:'", Set.of("Lock"));
+            assertFalse(reset.isDone());
+            assertTrue(taskResultRepository.existsById(formal.getId()));
+
+            worker.commit();
+            reset.get(5, TimeUnit.SECONDS);
+            assertFalse(taskResultRepository.existsById(formal.getId()));
+        } finally {
+            executor.shutdownNow();
+        }
     }
 
     @Test
@@ -1112,6 +1357,67 @@ class TaskOnboardingRepositoryIntegrationTest {
         input.setSelectedTables(task.getSelectedTables());
         input.setTaskDesc("changed description");
         return input;
+    }
+
+    private TaskConfig saveOtherTask(String name) {
+        TaskConfig other = new TaskConfig();
+        other.setTaskName(name);
+        other.setProjectId(1L);
+        other.setCliId("codex");
+        other.setSelectedTables("[\"word\"]");
+        return taskConfigRepository.saveAndFlush(other);
+    }
+
+    private int simulateResultWorker(Long taskConfigId, String generationId) throws Exception {
+        try (Connection connection = directConnection("onboarding_stale_result_worker")) {
+            connection.setAutoCommit(false);
+            try (PreparedStatement lock = connection.prepareStatement("""
+                    select pg_advisory_xact_lock(
+                        hashtextextended('task-onboarding:' || cast(? as text), 0))
+                    """)) {
+                lock.setLong(1, taskConfigId);
+                lock.execute();
+            }
+            String step;
+            String status;
+            String context;
+            try (PreparedStatement state = connection.prepareStatement("""
+                    select onboarding_step, onboarding_status, onboarding_context
+                    from tb_task_config where id = ?
+                    """)) {
+                state.setLong(1, taskConfigId);
+                try (var rows = state.executeQuery()) {
+                    if (!rows.next()) {
+                        connection.rollback();
+                        return 0;
+                    }
+                    step = rows.getString(1);
+                    status = rows.getString(2);
+                    context = rows.getString(3);
+                }
+            }
+            String persistedAttempt = objectMapper.readTree(context)
+                    .path("resultValidationRunId").asText();
+            if (!OnboardingStep.RESULT_GENERATION.name().equals(step)
+                    || !(OnboardingStatus.ACTIVE.name().equals(status)
+                            || OnboardingStatus.FAILED.name().equals(status))
+                    || !generationId.equals(persistedAttempt)) {
+                connection.rollback();
+                return 0;
+            }
+            try (PreparedStatement insert = connection.prepareStatement("""
+                    insert into tb_task_result
+                        (created_at, updated_at, result_name, project_id, status,
+                         task_config_id, source_description, result_content)
+                    values (now(), now(), 'stale formal', 1, 'PENDING', ?,
+                            'word_clean_sentence_score_generation', '{}')
+                    """)) {
+                insert.setLong(1, taskConfigId);
+                int inserted = insert.executeUpdate();
+                connection.commit();
+                return inserted;
+            }
+        }
     }
 
     private GenerateTaskRunBatchRequest batchRequest(int batchSize) {

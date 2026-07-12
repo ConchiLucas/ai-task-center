@@ -8,6 +8,7 @@ from app.result_generation_idempotency import (
     merge_onboarding_generation_metadata,
     managed_connection,
     normalize_onboarding_generation_id,
+    validate_onboarding_generation_state,
 )
 
 
@@ -67,11 +68,14 @@ class ResultGenerationIdempotencyTest(unittest.TestCase):
         self.assertEqual(1, response["insertedCount"])
         self.assertEqual([(connection, [("row",)])], inserted_on)
         self.assertEqual(1, connection.commits)
-        self.assertIn("pg_advisory_xact_lock", normalized(connection.statements[0][0]))
-        self.assertEqual((advisory_lock_key(7, GENERATION_ID),), connection.statements[0][1])
-        self.assertIn("select result_content", normalized(connection.statements[1][0]))
-        self.assertIn("result_content like", normalized(connection.statements[1][0]))
-        self.assertIn(GENERATION_ID, connection.statements[1][1])
+        self.assertIn("hashtextextended", normalized(connection.statements[0][0]))
+        self.assertEqual((7,), connection.statements[0][1])
+        self.assertIn("from tb_task_config", normalized(connection.statements[1][0]))
+        self.assertIn("pg_advisory_xact_lock", normalized(connection.statements[2][0]))
+        self.assertEqual((advisory_lock_key(7, GENERATION_ID),), connection.statements[2][1])
+        self.assertIn("select result_content", normalized(connection.statements[3][0]))
+        self.assertIn("result_content like", normalized(connection.statements[3][0]))
+        self.assertIn(GENERATION_ID, connection.statements[3][1])
 
     def test_serialized_retry_recovers_without_second_insert(self) -> None:
         existing = [
@@ -95,6 +99,41 @@ class ResultGenerationIdempotencyTest(unittest.TestCase):
         self.assertEqual([], insert_calls)
         self.assertEqual(1, connection.commits)
 
+    def test_task_state_must_match_active_or_failed_result_attempt(self) -> None:
+        valid_context = json.dumps({"resultValidationRunId": GENERATION_ID})
+        validate_onboarding_generation_state(
+            ("RESULT_GENERATION", "ACTIVE", valid_context), GENERATION_ID
+        )
+        validate_onboarding_generation_state(
+            ("RESULT_GENERATION", "FAILED", valid_context), GENERATION_ID
+        )
+        invalid_rows = [
+            None,
+            ("RESULT_CODE", "ACTIVE", valid_context),
+            ("RESULT_GENERATION", "COMPLETED", valid_context),
+            ("RESULT_GENERATION", "ACTIVE", "not-json"),
+            ("RESULT_GENERATION", "ACTIVE", json.dumps({"resultValidationRunId": "c" * 64})),
+        ]
+        for row in invalid_rows:
+            with self.subTest(row=row), self.assertRaises(ValueError):
+                validate_onboarding_generation_state(row, GENERATION_ID)
+
+    def test_invalid_persisted_attempt_aborts_before_generation_lock_or_insert(self) -> None:
+        connection = FakeConnection(
+            [], state_row=("RESULT_CODE", "ACTIVE", json.dumps({"resultValidationRunId": GENERATION_ID}))
+        )
+        with self.assertRaises(ValueError):
+            execute_onboarding_generation_transaction(
+                connection,
+                7,
+                GENERATION_ID,
+                "word_clean_sentence_score_generation",
+                lambda: self.fail("invalid attempt must not build rows"),
+                lambda target, rows: self.fail("invalid attempt must not insert"),
+            )
+        self.assertEqual(2, len(connection.statements))
+        self.assertEqual(0, connection.commits)
+
     def test_managed_connection_always_closes_after_transaction_scope(self) -> None:
         connection = FakeManagedConnection()
         def factory(**kwargs):
@@ -111,8 +150,13 @@ class ResultGenerationIdempotencyTest(unittest.TestCase):
 
 
 class FakeConnection:
-    def __init__(self, result_rows):
+    def __init__(self, result_rows, state_row=None):
         self.result_rows = result_rows
+        self.state_row = state_row or (
+            "RESULT_GENERATION",
+            "ACTIVE",
+            json.dumps({"resultValidationRunId": GENERATION_ID}),
+        )
         self.statements = []
         self.commits = 0
 
@@ -138,6 +182,9 @@ class FakeCursor:
 
     def fetchall(self):
         return self.connection.result_rows
+
+    def fetchone(self):
+        return self.connection.state_row
 
 
 class FakeManagedConnection:

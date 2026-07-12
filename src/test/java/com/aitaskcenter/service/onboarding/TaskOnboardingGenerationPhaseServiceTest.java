@@ -27,18 +27,21 @@ class TaskOnboardingGenerationPhaseServiceTest {
     private final ObjectMapper objectMapper = new ObjectMapper();
     private TaskConfigRepository repository;
     private TaskOnboardingCleanupService cleanupService;
+    private TaskOnboardingChildTableLock childTableLock;
     private TaskOnboardingGenerationPhaseService service;
 
     @BeforeEach
     void setUp() {
         repository = mock(TaskConfigRepository.class);
         cleanupService = mock(TaskOnboardingCleanupService.class);
+        childTableLock = mock(TaskOnboardingChildTableLock.class);
         service = new TaskOnboardingGenerationPhaseService(
                 repository,
                 new TaskOnboardingContextCodec(objectMapper),
                 cleanupService,
                 mock(TaskOnboardingSnapshotService.class),
-                mock(TaskOnboardingResponseAssembler.class));
+                mock(TaskOnboardingResponseAssembler.class),
+                childTableLock);
     }
 
     @Test
@@ -126,6 +129,54 @@ class TaskOnboardingGenerationPhaseServiceTest {
         assertEquals(1, context(task).getBatchExpectedResultCount());
         assertEquals(TaskOnboardingGenerationPhaseService.fingerprint(List.of(201L)),
                 context(task).getBatchExpectedResultFingerprint());
+    }
+
+    @Test
+    void overlappingResultCompletionAndFailureRecordingReturnCommittedSuccess() throws Exception {
+        TaskConfig task = resultGenerationTask();
+        TaskOnboardingContext prepared = context(task);
+        prepared.setResultCleanupCompletedFor(RESULT_ATTEMPT);
+        task.setOnboardingContext(objectMapper.writeValueAsString(prepared));
+        when(repository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
+
+        service.completeResult(TASK_ID, RESULT_ATTEMPT, 2);
+        TaskOnboardingContext completed = context(task);
+        completed.setBaselineStage("BATCH");
+        completed.setBaselineResultCount(0);
+        completed.setBaselineRunCount(0);
+        completed.setBaselineLinkCount(0);
+        completed.setBaselineResultFingerprint("0".repeat(64));
+        completed.setBaselineRunFingerprint("0".repeat(64));
+        completed.setBaselineLinkFingerprint("0".repeat(64));
+        task.setOnboardingContext(objectMapper.writeValueAsString(completed));
+        service.completeResult(TASK_ID, RESULT_ATTEMPT, 2);
+        service.recordGenerationFailure(
+                TASK_ID, OnboardingStep.RESULT_GENERATION, RESULT_ATTEMPT, "late failure");
+
+        assertEquals(OnboardingStep.BATCH_CODE.name(), task.getOnboardingStep());
+        assertEquals(OnboardingStatus.ACTIVE.name(), task.getOnboardingStatus());
+        assertEquals(RESULT_ATTEMPT, context(task).getCompletedResultGenerationId());
+    }
+
+    @Test
+    void overlappingBatchCompletionIsIdempotentAndLocksChildrenBeforeCoverage() throws Exception {
+        TaskConfig task = batchGenerationTask();
+        TaskOnboardingContext prepared = context(task);
+        prepared.setBatchCleanupCompletedFor(BATCH_ATTEMPT);
+        prepared.setBatchExpectedResultCount(1);
+        prepared.setBatchExpectedResultFingerprint(
+                TaskOnboardingGenerationPhaseService.fingerprint(List.of(201L)));
+        task.setOnboardingContext(objectMapper.writeValueAsString(prepared));
+        when(repository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
+
+        service.completeBatch(TASK_ID, BATCH_ATTEMPT, 1, 1);
+        service.completeBatch(TASK_ID, BATCH_ATTEMPT, 1, 1);
+        service.recordGenerationFailure(
+                TASK_ID, OnboardingStep.BATCH_GENERATION, BATCH_ATTEMPT, "late failure");
+
+        verify(childTableLock).lockForCleanup();
+        assertEquals(OnboardingStep.READY.name(), task.getOnboardingStep());
+        assertEquals(BATCH_ATTEMPT, context(task).getCompletedBatchGenerationId());
     }
 
     private TaskConfig resultGenerationTask() {

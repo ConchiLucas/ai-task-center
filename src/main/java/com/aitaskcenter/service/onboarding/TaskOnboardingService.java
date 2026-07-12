@@ -140,8 +140,14 @@ public class TaskOnboardingService {
             return phases.completeResult(
                     taskConfigId, attempt.generationId(), count(generationResult, "insertedCount"));
         } catch (RuntimeException ex) {
-            phases.recordGenerationFailure(
-                    taskConfigId, OnboardingStep.RESULT_GENERATION, rootMessage(ex));
+            TaskOnboardingResponse winner = phases.recordGenerationFailure(
+                    taskConfigId,
+                    OnboardingStep.RESULT_GENERATION,
+                    attempt.generationId(),
+                    rootMessage(ex));
+            if (winner != null) {
+                return winner;
+            }
             throw new TaskOnboardingStateException("Formal result generation failed", ex);
         }
     }
@@ -167,8 +173,14 @@ public class TaskOnboardingService {
                     count(generationResult, "createdRunCount"),
                     count(generationResult, "linkedResultCount"));
         } catch (RuntimeException ex) {
-            phases.recordGenerationFailure(
-                    taskConfigId, OnboardingStep.BATCH_GENERATION, rootMessage(ex));
+            TaskOnboardingResponse winner = phases.recordGenerationFailure(
+                    taskConfigId,
+                    OnboardingStep.BATCH_GENERATION,
+                    attempt.generationId(),
+                    rootMessage(ex));
+            if (winner != null) {
+                return winner;
+            }
             throw new TaskOnboardingStateException("Formal batch generation failed", ex);
         }
     }

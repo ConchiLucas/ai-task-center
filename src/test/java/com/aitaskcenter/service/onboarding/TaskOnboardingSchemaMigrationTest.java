@@ -165,6 +165,23 @@ class TaskOnboardingSchemaMigrationTest {
         assertTrue(rootMessage(error).contains("duplicate task-run/result links"));
     }
 
+    @Test
+    void rejectsExpectedIndexNameWithWrongDefinitionAndAcceptsCorrectDefinition() throws Exception {
+        execute("CREATE TABLE tb_task_config (id bigint PRIMARY KEY)");
+        execute("CREATE TABLE tb_task_run_result (id bigint PRIMARY KEY, task_run_id bigint, task_result_id bigint)");
+        execute("CREATE UNIQUE INDEX uk_task_run_result_run_result "
+                + "ON tb_task_run_result (task_result_id, task_run_id)");
+
+        RuntimeException wrong = assertThrows(RuntimeException.class, () -> runMigration(schemaDataSource));
+        assertTrue(rootMessage(wrong).contains("wrong definition"));
+
+        execute("DROP INDEX uk_task_run_result_run_result");
+        execute("CREATE UNIQUE INDEX uk_task_run_result_run_result "
+                + "ON tb_task_run_result (task_run_id, task_result_id)");
+        runMigration(schemaDataSource);
+        assertIndexDefinition("uk_task_run_result_run_result", "task_run_id, task_result_id");
+    }
+
     private void runMigration(DataSource dataSource) {
         DatabaseInitializationSettings settings = new DatabaseInitializationSettings();
         settings.setMode(DatabaseInitializationMode.ALWAYS);

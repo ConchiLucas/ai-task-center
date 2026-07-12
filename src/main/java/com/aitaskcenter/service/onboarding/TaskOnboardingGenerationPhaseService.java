@@ -25,6 +25,7 @@ public class TaskOnboardingGenerationPhaseService {
     private final TaskOnboardingSnapshotService snapshotService;
     private final TaskOnboardingResponseAssembler responseAssembler;
     private final JdbcTemplate jdbcTemplate;
+    private final TaskOnboardingChildTableLock childTableLock;
 
     public TaskOnboardingGenerationPhaseService(
             TaskConfigRepository taskConfigRepository,
@@ -32,7 +33,18 @@ public class TaskOnboardingGenerationPhaseService {
             TaskOnboardingCleanupService cleanupService,
             TaskOnboardingSnapshotService snapshotService,
             TaskOnboardingResponseAssembler responseAssembler) {
-        this(taskConfigRepository, contextCodec, cleanupService, snapshotService, responseAssembler, null);
+        this(taskConfigRepository, contextCodec, cleanupService, snapshotService, responseAssembler, null, null);
+    }
+
+    TaskOnboardingGenerationPhaseService(
+            TaskConfigRepository taskConfigRepository,
+            TaskOnboardingContextCodec contextCodec,
+            TaskOnboardingCleanupService cleanupService,
+            TaskOnboardingSnapshotService snapshotService,
+            TaskOnboardingResponseAssembler responseAssembler,
+            TaskOnboardingChildTableLock childTableLock) {
+        this(taskConfigRepository, contextCodec, cleanupService, snapshotService,
+                responseAssembler, null, childTableLock);
     }
 
     @Autowired
@@ -42,13 +54,15 @@ public class TaskOnboardingGenerationPhaseService {
             TaskOnboardingCleanupService cleanupService,
             TaskOnboardingSnapshotService snapshotService,
             TaskOnboardingResponseAssembler responseAssembler,
-            JdbcTemplate jdbcTemplate) {
+            JdbcTemplate jdbcTemplate,
+            TaskOnboardingChildTableLock childTableLock) {
         this.taskConfigRepository = taskConfigRepository;
         this.contextCodec = contextCodec;
         this.cleanupService = cleanupService;
         this.snapshotService = snapshotService;
         this.responseAssembler = responseAssembler;
         this.jdbcTemplate = jdbcTemplate;
+        this.childTableLock = childTableLock;
     }
 
     @Transactional
@@ -93,8 +107,12 @@ public class TaskOnboardingGenerationPhaseService {
     @Transactional
     public TaskOnboardingResponse completeResult(
             Long taskConfigId, String generationId, long insertedCount) {
-        TaskConfig task = loadActiveTask(taskConfigId, OnboardingStep.RESULT_GENERATION);
+        TaskConfig task = loadTaskForUpdate(taskConfigId);
         TaskOnboardingContext context = contextCodec.read(task);
+        if (completedResultMatches(task, context, generationId)) {
+            return responseAssembler.assemble(task, context);
+        }
+        requireActiveStep(task, OnboardingStep.RESULT_GENERATION);
         requirePreparedAttempt(
                 generationId,
                 context.getResultValidationRunId(),
@@ -121,8 +139,12 @@ public class TaskOnboardingGenerationPhaseService {
             String generationId,
             long createdRunCount,
             long linkedResultCount) {
-        TaskConfig task = loadActiveTask(taskConfigId, OnboardingStep.BATCH_GENERATION);
+        TaskConfig task = loadTaskForUpdate(taskConfigId);
         TaskOnboardingContext context = contextCodec.read(task);
+        if (completedBatchMatches(task, context, generationId)) {
+            return responseAssembler.assemble(task, context);
+        }
+        requireActiveStep(task, OnboardingStep.BATCH_GENERATION);
         requirePreparedAttempt(
                 generationId,
                 context.getBatchValidationMarker(),
@@ -131,6 +153,9 @@ public class TaskOnboardingGenerationPhaseService {
         if (createdRunCount <= 0 || linkedResultCount <= 0) {
             throw new TaskOnboardingStateException(
                     "Formal batch generation must create runs and result links");
+        }
+        if (childTableLock != null) {
+            childTableLock.lockForCleanup();
         }
         verifyBatchCoverage(taskConfigId, generationId, context, createdRunCount, linkedResultCount);
 
@@ -183,15 +208,33 @@ public class TaskOnboardingGenerationPhaseService {
 
     @Transactional
     public void recordGenerationFailure(Long taskConfigId, OnboardingStep expectedStep, String message) {
+        recordGenerationFailure(taskConfigId, expectedStep, null, message);
+    }
+
+    @Transactional
+    public TaskOnboardingResponse recordGenerationFailure(
+            Long taskConfigId,
+            OnboardingStep expectedStep,
+            String generationId,
+            String message) {
         TaskConfig task = taskConfigRepository.findByIdForUpdate(taskConfigId)
                 .orElseThrow(() -> new IllegalArgumentException("Task configuration does not exist"));
+        TaskOnboardingContext context = contextCodec.read(task);
+        if (expectedStep == OnboardingStep.RESULT_GENERATION
+                && completedResultMatches(task, context, generationId)) {
+            return responseAssembler.assemble(task, context);
+        }
+        if (expectedStep == OnboardingStep.BATCH_GENERATION
+                && completedBatchMatches(task, context, generationId)) {
+            return responseAssembler.assemble(task, context);
+        }
         if (step(task) != expectedStep || !isGenerationStep(expectedStep)) {
             throw new TaskOnboardingStateException("Generation failure no longer matches the current attempt");
         }
-        TaskOnboardingContext context = contextCodec.read(task);
         context.setErrorMessage(sanitize(message));
         task.setOnboardingStatus(OnboardingStatus.FAILED.name());
         saveContext(task, context);
+        return null;
     }
 
     @Transactional
@@ -216,9 +259,7 @@ public class TaskOnboardingGenerationPhaseService {
         TaskConfig task = taskConfigRepository.findByIdForUpdate(taskConfigId)
                 .orElseThrow(() -> new IllegalArgumentException("Task configuration does not exist"));
         TaskOnboardingContext context = contextCodec.read(task);
-        if (step(task).ordinal() >= OnboardingStep.BATCH_CODE.ordinal()
-                && StringUtils.hasText(context.getCompletedResultGenerationId())
-                && context.getCompletedResultCount() > 0) {
+        if (completedResultMatches(task, context, context.getCompletedResultGenerationId())) {
             return responseAssembler.assemble(task, context);
         }
         return null;
@@ -229,21 +270,27 @@ public class TaskOnboardingGenerationPhaseService {
         TaskConfig task = taskConfigRepository.findByIdForUpdate(taskConfigId)
                 .orElseThrow(() -> new IllegalArgumentException("Task configuration does not exist"));
         TaskOnboardingContext context = contextCodec.read(task);
-        if (step(task) == OnboardingStep.READY
-                && StringUtils.hasText(context.getCompletedBatchGenerationId())
-                && context.getCompletedBatchRunCount() > 0
-                && context.getCompletedBatchLinkCount() > 0) {
+        if (completedBatchMatches(task, context, context.getCompletedBatchGenerationId())) {
             return responseAssembler.assemble(task, context);
         }
         return null;
     }
 
     private TaskConfig loadActiveTask(Long taskConfigId, OnboardingStep expectedStep) {
+        TaskConfig task = loadTaskForUpdate(taskConfigId);
+        requireActiveStep(task, expectedStep);
+        return task;
+    }
+
+    private TaskConfig loadTaskForUpdate(Long taskConfigId) {
         if (taskConfigId == null) {
             throw new IllegalArgumentException("Missing task configuration ID");
         }
-        TaskConfig task = taskConfigRepository.findByIdForUpdate(taskConfigId)
+        return taskConfigRepository.findByIdForUpdate(taskConfigId)
                 .orElseThrow(() -> new IllegalArgumentException("Task configuration does not exist"));
+    }
+
+    private static void requireActiveStep(TaskConfig task, OnboardingStep expectedStep) {
         if (!OnboardingStatus.ACTIVE.name().equals(task.getOnboardingStatus())) {
             throw new TaskOnboardingStateException("Task onboarding status must be ACTIVE for this operation");
         }
@@ -251,7 +298,23 @@ public class TaskOnboardingGenerationPhaseService {
             throw new TaskOnboardingStateException(
                     "Task onboarding step must be " + expectedStep + " for this operation");
         }
-        return task;
+    }
+
+    private static boolean completedResultMatches(
+            TaskConfig task, TaskOnboardingContext context, String generationId) {
+        return StringUtils.hasText(generationId)
+                && step(task).ordinal() >= OnboardingStep.BATCH_CODE.ordinal()
+                && generationId.equals(context.getCompletedResultGenerationId())
+                && context.getCompletedResultCount() > 0;
+    }
+
+    private static boolean completedBatchMatches(
+            TaskConfig task, TaskOnboardingContext context, String generationId) {
+        return StringUtils.hasText(generationId)
+                && step(task) == OnboardingStep.READY
+                && generationId.equals(context.getCompletedBatchGenerationId())
+                && context.getCompletedBatchRunCount() > 0
+                && context.getCompletedBatchLinkCount() > 0;
     }
 
     private void saveContext(TaskConfig task, TaskOnboardingContext context) {

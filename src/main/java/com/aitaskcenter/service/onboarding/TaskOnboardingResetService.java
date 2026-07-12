@@ -13,6 +13,7 @@ public class TaskOnboardingResetService {
     private final TaskConfigRepository taskConfigRepository;
     private final TaskOnboardingCleanupService cleanupService;
     private final TaskOnboardingChildTableLock childTableLock;
+    private final TaskOnboardingAdvisoryLock advisoryLock;
     private final JdbcTemplate jdbcTemplate;
     private final TaskOnboardingContextCodec contextCodec;
 
@@ -20,11 +21,13 @@ public class TaskOnboardingResetService {
             TaskConfigRepository taskConfigRepository,
             TaskOnboardingCleanupService cleanupService,
             TaskOnboardingChildTableLock childTableLock,
+            TaskOnboardingAdvisoryLock advisoryLock,
             JdbcTemplate jdbcTemplate,
             TaskOnboardingContextCodec contextCodec) {
         this.taskConfigRepository = taskConfigRepository;
         this.cleanupService = cleanupService;
         this.childTableLock = childTableLock;
+        this.advisoryLock = advisoryLock;
         this.jdbcTemplate = jdbcTemplate;
         this.contextCodec = contextCodec;
     }
@@ -34,7 +37,9 @@ public class TaskOnboardingResetService {
         TaskConfig task = taskConfigRepository.findByIdForUpdate(taskConfigId)
                 .orElseThrow(() -> new IllegalArgumentException("Task configuration does not exist"));
         TaskOnboardingContext existing = contextCodec.read(task);
+        advisoryLock.lockTask(taskConfigId);
         childTableLock.lockForCleanup();
+        refuseCrossOwnedReferences(taskConfigId);
         discoverUnreportedValidation(task, existing);
         cleanupOutstandingValidation(task, existing);
 
@@ -45,6 +50,30 @@ public class TaskOnboardingResetService {
         TaskOnboardingContext reset = new TaskOnboardingContext();
         reset.setOverwriteExistingFormalResults(formalCount != null && formalCount > 0);
         return reset;
+    }
+
+    private void refuseCrossOwnedReferences(Long taskConfigId) {
+        Long crossLinks = jdbcTemplate.queryForObject("""
+                select count(*)
+                from tb_task_run_result link
+                left join tb_task_run run on run.id = link.task_run_id
+                left join tb_task_result result on result.id = link.task_result_id
+                where (run.task_config_id = ? and result.task_config_id is distinct from ?)
+                   or (result.task_config_id = ? and run.task_config_id is distinct from ?)
+                """, Long.class, taskConfigId, taskConfigId, taskConfigId, taskConfigId);
+        Long crossDirectReferences = jdbcTemplate.queryForObject("""
+                select count(*)
+                from tb_task_result result
+                left join tb_task_run run on run.id = result.task_run_id
+                where result.task_run_id is not null
+                  and ((result.task_config_id = ? and run.task_config_id is distinct from ?)
+                    or (run.task_config_id = ? and result.task_config_id is distinct from ?))
+                """, Long.class, taskConfigId, taskConfigId, taskConfigId, taskConfigId);
+        if ((crossLinks != null && crossLinks > 0)
+                || (crossDirectReferences != null && crossDirectReferences > 0)) {
+            throw new TaskOnboardingStateException(
+                    "Cross-task references prevent safe onboarding reset");
+        }
     }
 
     private void discoverUnreportedValidation(TaskConfig task, TaskOnboardingContext context) {

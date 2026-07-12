@@ -23,6 +23,7 @@ class TaskOnboardingResetServiceTest {
         TaskConfigRepository tasks = mock(TaskConfigRepository.class);
         TaskOnboardingCleanupService cleanup = mock(TaskOnboardingCleanupService.class);
         TaskOnboardingChildTableLock locks = mock(TaskOnboardingChildTableLock.class);
+        TaskOnboardingAdvisoryLock advisoryLock = mock(TaskOnboardingAdvisoryLock.class);
         JdbcTemplate jdbc = mock(JdbcTemplate.class);
         ObjectMapper mapper = new ObjectMapper();
         TaskConfig task = new TaskConfig();
@@ -37,10 +38,11 @@ class TaskOnboardingResetServiceTest {
                 .thenReturn(2L);
 
         TaskOnboardingResetService service = new TaskOnboardingResetService(
-                tasks, cleanup, locks, jdbc, new TaskOnboardingContextCodec(mapper));
+                tasks, cleanup, locks, advisoryLock, jdbc, new TaskOnboardingContextCodec(mapper));
         TaskOnboardingContext reset = service.prepareSemanticReset(7L);
 
-        InOrder order = inOrder(cleanup, locks, jdbc);
+        InOrder order = inOrder(advisoryLock, cleanup, locks, jdbc);
+        order.verify(advisoryLock).lockTask(7L);
         order.verify(locks).lockForCleanup();
         order.verify(cleanup).deleteResultValidation(7L, "a".repeat(64));
         verify(jdbc, org.mockito.Mockito.atLeastOnce()).update(anyString(), anyLong());
@@ -52,6 +54,7 @@ class TaskOnboardingResetServiceTest {
         TaskConfigRepository tasks = mock(TaskConfigRepository.class);
         TaskOnboardingCleanupService cleanup = mock(TaskOnboardingCleanupService.class);
         TaskOnboardingChildTableLock locks = mock(TaskOnboardingChildTableLock.class);
+        TaskOnboardingAdvisoryLock advisoryLock = mock(TaskOnboardingAdvisoryLock.class);
         JdbcTemplate jdbc = mock(JdbcTemplate.class);
         ObjectMapper mapper = new ObjectMapper();
         TaskConfig task = new TaskConfig();
@@ -71,9 +74,10 @@ class TaskOnboardingResetServiceTest {
                 .thenReturn(0L);
 
         new TaskOnboardingResetService(
-                tasks, cleanup, locks, jdbc, new TaskOnboardingContextCodec(mapper))
+                tasks, cleanup, locks, advisoryLock, jdbc, new TaskOnboardingContextCodec(mapper))
                 .prepareSemanticReset(7L);
 
+        verify(advisoryLock).lockTask(7L);
         verify(locks).lockForCleanup();
         verify(cleanup).deleteResultValidation(7L, "b".repeat(64));
         assertTrue(mapper.readValue(task.getOnboardingContext(), TaskOnboardingContext.class)

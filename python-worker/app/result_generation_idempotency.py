@@ -35,6 +35,28 @@ def advisory_lock_key(task_config_id: int, generation_id: str) -> int:
     return int.from_bytes(digest[:8], byteorder="big", signed=True)
 
 
+def validate_onboarding_generation_state(
+    state_row: Optional[Sequence[Any]], generation_id: str
+) -> None:
+    normalized = normalize_onboarding_generation_id(generation_id)
+    if normalized is None or state_row is None or len(state_row) < 3:
+        raise ValueError("Task onboarding generation state is missing")
+    step, status, raw_context = state_row[0], state_row[1], state_row[2]
+    try:
+        context = json.loads(raw_context or "")
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise ValueError("Task onboarding context is invalid") from exc
+    persisted_attempt = (
+        context.get("resultValidationRunId") if isinstance(context, dict) else None
+    )
+    if (
+        step != "RESULT_GENERATION"
+        or status not in {"ACTIVE", "FAILED"}
+        or persisted_attempt != normalized
+    ):
+        raise ValueError("Task onboarding result generation attempt is no longer active")
+
+
 def execute_onboarding_generation_transaction(
     connection: Any,
     task_config_id: int,
@@ -47,6 +69,22 @@ def execute_onboarding_generation_transaction(
     if normalized is None:
         raise ValueError("onboardingGenerationId is required")
     with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            select pg_advisory_xact_lock(
+                hashtextextended('task-onboarding:' || cast(%s as text), 0))
+            """,
+            (task_config_id,),
+        )
+        cursor.execute(
+            """
+            select onboarding_step, onboarding_status, onboarding_context
+            from tb_task_config
+            where id = %s
+            """,
+            (task_config_id,),
+        )
+        validate_onboarding_generation_state(cursor.fetchone(), normalized)
         cursor.execute(
             "select pg_advisory_xact_lock(%s)",
             (advisory_lock_key(task_config_id, normalized),),

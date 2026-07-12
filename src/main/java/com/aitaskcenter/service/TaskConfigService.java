@@ -375,15 +375,30 @@ public class TaskConfigService {
         TaskConfig task = repository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("任务配置不存在"));
         SemanticConfig previous = SemanticConfig.from(task);
-        copyAndValidate(input, task);
-        if (semanticConfigChanged(previous, task)) {
+        TaskConfig validated = new TaskConfig();
+        copyAndValidate(input, validated);
+        boolean semanticChanged = semanticConfigChanged(previous, validated);
+        TaskOnboardingContext resetContext = semanticChanged && onboardingResetService != null
+                ? onboardingResetService.prepareSemanticReset(id)
+                : null;
+        copyValidated(validated, task);
+        if (semanticChanged) {
             task.setOnboardingStep(OnboardingStep.RESULT_CODE.name());
             task.setOnboardingStatus(OnboardingStatus.ACTIVE.name());
-            task.setOnboardingContext(onboardingResetService == null
+            task.setOnboardingContext(resetContext == null
                     ? "{}"
-                    : writeContext(onboardingResetService.prepareSemanticReset(id)));
+                    : writeContext(resetContext));
         }
         return repository.save(task);
+    }
+
+    private static void copyValidated(TaskConfig source, TaskConfig target) {
+        target.setTaskName(source.getTaskName());
+        target.setProjectId(source.getProjectId());
+        target.setCliId(source.getCliId());
+        target.setDatabaseConfigId(source.getDatabaseConfigId());
+        target.setTaskDesc(source.getTaskDesc());
+        target.setSelectedTables(source.getSelectedTables());
     }
 
     private List<TaskResult> exactCandidates(
