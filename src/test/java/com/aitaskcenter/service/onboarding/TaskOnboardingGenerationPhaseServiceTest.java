@@ -23,6 +23,8 @@ class TaskOnboardingGenerationPhaseServiceTest {
     private static final Long TASK_ID = 7L;
     private static final String RESULT_ATTEMPT = "a".repeat(64);
     private static final String BATCH_ATTEMPT = "b".repeat(64);
+    private static final String NEW_RESULT_ATTEMPT = "c".repeat(64);
+    private static final String NEW_BATCH_ATTEMPT = "d".repeat(64);
 
     private final ObjectMapper objectMapper = new ObjectMapper();
     private TaskConfigRepository repository;
@@ -103,10 +105,16 @@ class TaskOnboardingGenerationPhaseServiceTest {
     @Test
     void failureIsSanitizedPersistedAndRetryReactivatesSameAttempt() throws Exception {
         TaskConfig task = resultGenerationTask();
+        TaskOnboardingContext prepared = context(task);
+        prepared.setResultCleanupCompletedFor(RESULT_ATTEMPT);
+        task.setOnboardingContext(objectMapper.writeValueAsString(prepared));
         when(repository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
 
         service.recordGenerationFailure(
-                TASK_ID, OnboardingStep.RESULT_GENERATION, "worker secret\n" + "x".repeat(1200));
+                TASK_ID,
+                OnboardingStep.RESULT_GENERATION,
+                RESULT_ATTEMPT,
+                "worker secret\n" + "x".repeat(1200));
 
         assertEquals(OnboardingStatus.FAILED.name(), task.getOnboardingStatus());
         assertTrue(context(task).getErrorMessage().startsWith("worker secret x"));
@@ -116,6 +124,75 @@ class TaskOnboardingGenerationPhaseServiceTest {
         assertEquals(OnboardingStatus.ACTIVE.name(), task.getOnboardingStatus());
         assertEquals(RESULT_ATTEMPT, context(task).getResultValidationRunId());
         assertEquals("", context(task).getErrorMessage());
+    }
+
+    @Test
+    void delayedResultFailureAndCompletionCannotMutateNewerAttempt() throws Exception {
+        TaskConfig task = resultGenerationTask();
+        TaskOnboardingContext newer = context(task);
+        newer.setResultValidationRunId(NEW_RESULT_ATTEMPT);
+        newer.setResultCleanupCompletedFor(NEW_RESULT_ATTEMPT);
+        task.setOnboardingContext(objectMapper.writeValueAsString(newer));
+        when(repository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
+        String unchangedContext = task.getOnboardingContext();
+
+        assertThrows(TaskOnboardingStateException.class, () -> service.recordGenerationFailure(
+                TASK_ID, OnboardingStep.RESULT_GENERATION, RESULT_ATTEMPT, "delayed failure"));
+        assertThrows(TaskOnboardingStateException.class,
+                () -> service.completeResult(TASK_ID, RESULT_ATTEMPT, 2));
+
+        assertEquals(OnboardingStep.RESULT_GENERATION.name(), task.getOnboardingStep());
+        assertEquals(OnboardingStatus.ACTIVE.name(), task.getOnboardingStatus());
+        assertEquals(unchangedContext, task.getOnboardingContext());
+    }
+
+    @Test
+    void delayedBatchFailureAndCompletionCannotMutateNewerAttempt() throws Exception {
+        TaskConfig task = batchGenerationTask();
+        TaskOnboardingContext newer = context(task);
+        newer.setBatchValidationMarker(NEW_BATCH_ATTEMPT);
+        newer.setBatchCleanupCompletedFor(NEW_BATCH_ATTEMPT);
+        newer.setBatchExpectedResultCount(1);
+        newer.setBatchExpectedResultFingerprint(
+                TaskOnboardingGenerationPhaseService.fingerprint(List.of(201L)));
+        task.setOnboardingContext(objectMapper.writeValueAsString(newer));
+        when(repository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
+        String unchangedContext = task.getOnboardingContext();
+
+        assertThrows(TaskOnboardingStateException.class, () -> service.recordGenerationFailure(
+                TASK_ID, OnboardingStep.BATCH_GENERATION, BATCH_ATTEMPT, "delayed failure"));
+        assertThrows(TaskOnboardingStateException.class,
+                () -> service.completeBatch(TASK_ID, BATCH_ATTEMPT, 1, 1));
+
+        assertEquals(OnboardingStep.BATCH_GENERATION.name(), task.getOnboardingStep());
+        assertEquals(OnboardingStatus.ACTIVE.name(), task.getOnboardingStatus());
+        assertEquals(unchangedContext, task.getOnboardingContext());
+    }
+
+    @Test
+    void failureRequiresCleanupMarkerForTheSuppliedAttempt() throws Exception {
+        TaskConfig resultTask = resultGenerationTask();
+        TaskOnboardingContext resultContext = context(resultTask);
+        resultContext.setResultCleanupCompletedFor(NEW_RESULT_ATTEMPT);
+        resultTask.setOnboardingContext(objectMapper.writeValueAsString(resultContext));
+        TaskConfig batchTask = batchGenerationTask();
+        TaskOnboardingContext batchContext = context(batchTask);
+        batchContext.setBatchCleanupCompletedFor(NEW_BATCH_ATTEMPT);
+        batchTask.setOnboardingContext(objectMapper.writeValueAsString(batchContext));
+        when(repository.findByIdForUpdate(TASK_ID))
+                .thenReturn(Optional.of(resultTask), Optional.of(batchTask));
+
+        assertThrows(TaskOnboardingStateException.class, () -> service.recordGenerationFailure(
+                TASK_ID, OnboardingStep.RESULT_GENERATION, RESULT_ATTEMPT, "result failure"));
+        assertThrows(TaskOnboardingStateException.class, () -> service.recordGenerationFailure(
+                TASK_ID, OnboardingStep.BATCH_GENERATION, BATCH_ATTEMPT, "batch failure"));
+
+        assertEquals(OnboardingStatus.ACTIVE.name(), resultTask.getOnboardingStatus());
+        assertEquals(OnboardingStatus.ACTIVE.name(), batchTask.getOnboardingStatus());
+        assertEquals(resultContext.getResultCleanupCompletedFor(),
+                context(resultTask).getResultCleanupCompletedFor());
+        assertEquals(batchContext.getBatchCleanupCompletedFor(),
+                context(batchTask).getBatchCleanupCompletedFor());
     }
 
     @Test

@@ -231,6 +231,19 @@ public class TaskOnboardingGenerationPhaseService {
         if (step(task) != expectedStep || !isGenerationStep(expectedStep)) {
             throw new TaskOnboardingStateException("Generation failure no longer matches the current attempt");
         }
+        if (expectedStep == OnboardingStep.RESULT_GENERATION) {
+            requirePreparedAttempt(
+                    generationId,
+                    context.getResultValidationRunId(),
+                    context.getResultCleanupCompletedFor(),
+                    "result");
+        } else {
+            requirePreparedAttempt(
+                    generationId,
+                    context.getBatchValidationMarker(),
+                    context.getBatchCleanupCompletedFor(),
+                    "batch");
+        }
         context.setErrorMessage(sanitize(message));
         task.setOnboardingStatus(OnboardingStatus.FAILED.name());
         saveContext(task, context);
