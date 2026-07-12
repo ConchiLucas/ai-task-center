@@ -868,6 +868,36 @@ class TaskOnboardingServiceTest {
     }
 
     @Test
+    void initialWorkflowRejectsBothFormalGenerationOperations() {
+        TaskConfig initial = taskAt(OnboardingStep.RESULT_CODE);
+        stubTask(initial);
+
+        assertThrows(TaskOnboardingStateException.class, () -> service.generateResults(TASK_ID));
+        assertThrows(TaskOnboardingStateException.class,
+                () -> service.generateBatches(TASK_ID, new GenerateTaskRunBatchRequest()));
+
+        verifyNoInteractions(cleanupService, taskConfigService);
+    }
+
+    @Test
+    void lockedWorkflowRejectsBothFormalGenerationOperations() {
+        TaskConfig lockedResult = resultGenerationTask(GENERATION_ID, List.of(101L));
+        lockedResult.setOnboardingStatus(OnboardingStatus.COMPLETED.name());
+        stubTask(lockedResult);
+
+        assertThrows(TaskOnboardingStateException.class, () -> service.generateResults(TASK_ID));
+
+        TaskConfig lockedBatch = batchGenerationTask("batch-run-1", 301L, List.of(201L));
+        lockedBatch.setOnboardingStatus(OnboardingStatus.COMPLETED.name());
+        stubTask(lockedBatch);
+
+        assertThrows(TaskOnboardingStateException.class,
+                () -> service.generateBatches(TASK_ID, new GenerateTaskRunBatchRequest()));
+
+        verifyNoInteractions(cleanupService, taskConfigService);
+    }
+
+    @Test
     void semanticConfigChangesResetOnboardingAndTaskNameOnlyChangeDoesNot() {
         TaskConfigRepository repository = mock(TaskConfigRepository.class);
         ProjectConfigRepository projects = mock(ProjectConfigRepository.class);

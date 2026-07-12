@@ -3,10 +3,11 @@ package com.aitaskcenter.controller;
 import com.aitaskcenter.dto.ApiResponse;
 import com.aitaskcenter.dto.DeleteByIdRequest;
 import com.aitaskcenter.dto.GenerateTaskRunBatchRequest;
+import com.aitaskcenter.dto.TaskOnboardingResponse;
 import com.aitaskcenter.model.TaskConfig;
 import com.aitaskcenter.service.TaskConfigService;
+import com.aitaskcenter.service.onboarding.TaskOnboardingService;
 import java.util.List;
-import java.util.Map;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -21,10 +22,12 @@ import org.springframework.web.bind.annotation.RestController;
 @RequestMapping("/api/task")
 public class TaskConfigController {
     private final TaskConfigService service;
+    private final TaskOnboardingService onboardingService;
 
     // 方法：TaskConfigController
-    public TaskConfigController(TaskConfigService service) {
+    public TaskConfigController(TaskConfigService service, TaskOnboardingService onboardingService) {
         this.service = service;
+        this.onboardingService = onboardingService;
     }
 
     @GetMapping("/getTaskConfigList")
@@ -41,18 +44,18 @@ public class TaskConfigController {
 
     @PostMapping("/{id}/generate-results")
     // 方法：generateResults
-    public ApiResponse<Map<String, Object>> generateResults(
+    public ApiResponse<TaskOnboardingResponse> generateResults(
             @PathVariable Long id,
             @RequestParam(defaultValue = "false") boolean overwrite) {
-        return ApiResponse.ok(service.generateResults(id, overwrite), "任务结果生成完成");
+        return ApiResponse.ok(onboardingService.generateResults(id), "任务结果生成完成");
     }
 
     @PostMapping("/{id}/generate-run-batches")
     // 方法：generateRunBatches
-    public ApiResponse<Map<String, Object>> generateRunBatches(
+    public ApiResponse<TaskOnboardingResponse> generateRunBatches(
             @PathVariable Long id,
             @RequestBody GenerateTaskRunBatchRequest request) {
-        return ApiResponse.ok(service.generateRunBatches(id, request), "执行批次生成完成");
+        return ApiResponse.ok(onboardingService.generateBatches(id, request), "执行批次生成完成");
     }
 
     @PutMapping("/updateTaskConfig")
