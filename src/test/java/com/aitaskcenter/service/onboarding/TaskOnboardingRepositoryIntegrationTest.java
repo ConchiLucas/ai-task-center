@@ -1,15 +1,20 @@
 package com.aitaskcenter.service.onboarding;
 
+import com.aitaskcenter.dto.GenerateTaskRunBatchRequest;
 import com.aitaskcenter.dto.TaskOnboardingReportRequest;
 import com.aitaskcenter.dto.TaskOnboardingResponse;
 import com.aitaskcenter.model.TaskConfig;
 import com.aitaskcenter.model.TaskResult;
 import com.aitaskcenter.model.TaskRun;
 import com.aitaskcenter.model.TaskRunResult;
+import com.aitaskcenter.repository.ConnectionConfigRepository;
 import com.aitaskcenter.repository.TaskConfigRepository;
 import com.aitaskcenter.repository.TaskResultRepository;
 import com.aitaskcenter.repository.TaskRunRepository;
 import com.aitaskcenter.repository.TaskRunResultRepository;
+import com.aitaskcenter.service.PythonWorkerClient;
+import com.aitaskcenter.service.TaskConfigService;
+import com.aitaskcenter.service.TaskRunPromptBuilder;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.sql.Connection;
 import java.sql.DriverManager;
@@ -35,6 +40,7 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.autoconfigure.jdbc.AutoConfigureTestDatabase;
 import org.springframework.boot.test.autoconfigure.orm.jpa.DataJpaTest;
 import org.springframework.boot.test.context.TestConfiguration;
+import org.springframework.boot.test.mock.mockito.MockBean;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Import;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -44,11 +50,13 @@ import org.springframework.transaction.PlatformTransactionManager;
 import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.transaction.support.TransactionTemplate;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.when;
 
 @DataJpaTest
 @AutoConfigureTestDatabase(replace = AutoConfigureTestDatabase.Replace.NONE)
@@ -60,6 +68,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
         TaskOnboardingCallbackValidator.class,
         TaskOnboardingResponseAssembler.class,
         TaskOnboardingPromptBuilder.class,
+        TaskOnboardingCleanupService.class,
+        TaskOnboardingGenerationPhaseService.class,
+        TaskConfigService.class,
+        TaskRunPromptBuilder.class,
         PostgresTaskOnboardingChildTableLock.class,
         TaskOnboardingRepositoryIntegrationTest.JsonTestConfiguration.class
 })
@@ -108,7 +120,13 @@ class TaskOnboardingRepositoryIntegrationTest {
     @Autowired
     private TaskOnboardingService onboardingService;
     @Autowired
+    private TaskConfigService taskConfigService;
+    @Autowired
     private ObjectMapper objectMapper;
+    @MockBean
+    private PythonWorkerClient pythonWorkerClient;
+    @MockBean
+    private ConnectionConfigRepository connectionConfigRepository;
 
     private TaskConfig task;
 
@@ -124,6 +142,94 @@ class TaskOnboardingRepositoryIntegrationTest {
         task.setCliId("codex");
         task.setSelectedTables("[\"word\"]");
         task = taskConfigRepository.saveAndFlush(task);
+    }
+
+    @Test
+    void batchGenerationRetryRecoversOneRunSetAndLinksEachResultOnce() throws Exception {
+        List<TaskResult> results = taskResultRepository.saveAllAndFlush(List.of(
+                batchCandidateResult("formal-1"),
+                batchCandidateResult("formal-2"),
+                batchCandidateResult("formal-3")));
+        GenerateTaskRunBatchRequest request = batchRequest(2);
+        String attempt = "d".repeat(64);
+
+        Map<String, Object> first = taskConfigService.generateRunBatches(task.getId(), request, attempt);
+        Map<String, Object> retry = taskConfigService.generateRunBatches(task.getId(), request, attempt);
+
+        assertEquals(2, first.get("createdRunCount"));
+        assertEquals(3, first.get("linkedResultCount"));
+        assertEquals(2, retry.get("createdRunCount"));
+        assertEquals(3L, ((Number) retry.get("linkedResultCount")).longValue());
+        assertEquals(true, retry.get("recovered"));
+        assertOneFormalRunSet(attempt, results);
+    }
+
+    @Test
+    void concurrentSameAttemptBatchGenerationCreatesOneRunSet() throws Exception {
+        List<TaskResult> results = taskResultRepository.saveAllAndFlush(List.of(
+                batchCandidateResult("formal-1"),
+                batchCandidateResult("formal-2"),
+                batchCandidateResult("formal-3"),
+                batchCandidateResult("formal-4")));
+        GenerateTaskRunBatchRequest request = batchRequest(2);
+        String attempt = "e".repeat(64);
+        CountDownLatch start = new CountDownLatch(1);
+        ExecutorService executor = Executors.newFixedThreadPool(2);
+        try {
+            Future<Map<String, Object>> first = executor.submit(() -> {
+                await(start);
+                return taskConfigService.generateRunBatches(task.getId(), request, attempt);
+            });
+            Future<Map<String, Object>> second = executor.submit(() -> {
+                await(start);
+                return taskConfigService.generateRunBatches(task.getId(), request, attempt);
+            });
+            start.countDown();
+
+            assertEquals(2, first.get(10, TimeUnit.SECONDS).get("createdRunCount"));
+            assertEquals(2, second.get(10, TimeUnit.SECONDS).get("createdRunCount"));
+        } finally {
+            executor.shutdownNow();
+        }
+        assertOneFormalRunSet(attempt, results);
+    }
+
+    @Test
+    void resultGenerationCommitsCleanupBeforeHttpAndSuspendsCallerTransaction() throws Exception {
+        String attempt = "f".repeat(64);
+        String marker = "RESULT_VALIDATION:" + attempt;
+        TaskResult validation = result("validation");
+        validation.setSourceDescription(marker);
+        validation.setResultContent(validationMetadata(marker));
+        validation = taskResultRepository.saveAndFlush(validation);
+        TaskOnboardingContext context = new TaskOnboardingContext();
+        context.setResultValidationRunId(attempt);
+        context.setResultValidationIds(List.of(validation.getId()));
+        task.setDatabaseConfigId(99L);
+        task.setOnboardingStep(OnboardingStep.RESULT_GENERATION.name());
+        task.setOnboardingContext(objectMapper.writeValueAsString(context));
+        taskConfigRepository.saveAndFlush(task);
+        when(connectionConfigRepository.existsById(99L)).thenReturn(true);
+        when(pythonWorkerClient.generateTaskResults(task.getId(), false, attempt)).thenAnswer(invocation -> {
+            assertFalse(TransactionSynchronizationManager.isActualTransactionActive());
+            assertEquals(0, jdbcTemplate.queryForObject(
+                    "select count(*) from tb_task_result where task_config_id = ? and source_description = ?",
+                    Integer.class,
+                    task.getId(),
+                    marker));
+            String storedContext = jdbcTemplate.queryForObject(
+                    "select onboarding_context from tb_task_config where id = ?",
+                    String.class,
+                    task.getId());
+            assertEquals(attempt, objectMapper.readTree(storedContext)
+                    .path("resultCleanupCompletedFor").asText());
+            return Map.of("insertedCount", 1);
+        });
+
+        TaskOnboardingResponse response = new TransactionTemplate(transactionManager).execute(
+                ignored -> onboardingService.generateResults(task.getId()));
+
+        assertEquals(OnboardingStep.BATCH_CODE.name(), response.getCurrentStep());
     }
 
     @AfterAll
@@ -712,6 +818,40 @@ class TaskOnboardingRepositoryIntegrationTest {
         result.setResultName(name);
         result.setResultContent("{\"value\":\"" + name + "\"}");
         return result;
+    }
+
+    private GenerateTaskRunBatchRequest batchRequest(int batchSize) {
+        GenerateTaskRunBatchRequest request = new GenerateTaskRunBatchRequest();
+        request.setBatchSize(batchSize);
+        request.setIncludeFailed(false);
+        return request;
+    }
+
+    private TaskResult batchCandidateResult(String name) {
+        TaskResult result = result(name);
+        result.setResultContent("""
+                {"word":"word","sourceTable":"public.word_clean_sentence","writeBack":{"candidateMap":{"A":{"modelName":"model","sentence":"sentence","sentenceTranslation":"translation"}}}}
+                """);
+        return result;
+    }
+
+    private void assertOneFormalRunSet(String attempt, List<TaskResult> results) throws Exception {
+        String reason = "FORMAL_GENERATION:" + attempt;
+        List<TaskRun> runs = taskRunRepository.findByTaskConfigIdAndReasonOrderByIdAsc(task.getId(), reason);
+        assertEquals(2, runs.size());
+        for (TaskRun run : runs) {
+            assertEquals(attempt, objectMapper.readTree(run.getAiPromptJson())
+                    .path("_meta").path("onboardingGenerationId").asText());
+        }
+        List<TaskRunResult> links = taskRunResultRepository.findByTaskRunIdInOrderByTaskRunIdAscIdAsc(
+                runs.stream().map(TaskRun::getId).toList());
+        assertEquals(results.size(), links.size());
+        Map<Long, Long> linkCounts = links.stream().collect(Collectors.groupingBy(
+                TaskRunResult::getTaskResultId, Collectors.counting()));
+        assertEquals(
+                results.stream().map(TaskResult::getId).collect(Collectors.toSet()),
+                linkCounts.keySet());
+        assertTrue(linkCounts.values().stream().allMatch(count -> count == 1L));
     }
 
     private TaskRun run() {

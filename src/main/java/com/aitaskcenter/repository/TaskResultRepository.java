@@ -40,6 +40,26 @@ public interface TaskResultRepository extends JpaRepository<TaskResult, Long>, J
     // 方法：findByTaskConfigIdAndStatusInOrderByIdAsc
     List<TaskResult> findByTaskConfigIdAndStatusInOrderByIdAsc(Long taskConfigId, Collection<String> statuses);
 
+    @Query("""
+            select result
+            from TaskResult result
+            where result.taskConfigId = :taskConfigId
+              and result.status in :statuses
+              and not exists (
+                  select link.id
+                  from TaskRunResult link, TaskRun run
+                  where link.taskResultId = result.id
+                    and link.taskRunId = run.id
+                    and run.taskConfigId = :taskConfigId
+                    and run.reason = :reason
+              )
+            order by result.id asc
+            """)
+    List<TaskResult> findUnlinkedForGeneration(
+            @Param("taskConfigId") Long taskConfigId,
+            @Param("statuses") Collection<String> statuses,
+            @Param("reason") String reason);
+
     // 方法：findIdsByTaskConfigIdAndStatusIn
     @Query("select item.id from TaskResult item where item.taskConfigId = :taskConfigId and item.status in :statuses order by item.id asc")
     List<Long> findIdsByTaskConfigIdAndStatusIn(

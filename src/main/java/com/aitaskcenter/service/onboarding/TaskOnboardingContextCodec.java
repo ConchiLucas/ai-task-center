@@ -68,10 +68,12 @@ public class TaskOnboardingContextCodec {
                 || context.getResultReportToken() == null
                 || context.getResultArtifactPath() == null
                 || context.getResultArtifactHash() == null
+                || context.getResultCleanupCompletedFor() == null
                 || context.getBatchValidationMarker() == null
                 || context.getBatchReportToken() == null
                 || context.getBatchArtifactPath() == null
                 || context.getBatchArtifactHash() == null
+                || context.getBatchCleanupCompletedFor() == null
                 || context.getErrorMessage() == null
                 || context.getBaselineStage() == null
                 || context.getBaselineResultFingerprint() == null

@@ -32,6 +32,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.data.jpa.repository.Lock;
+import org.springframework.transaction.annotation.Propagation;
 import org.springframework.transaction.annotation.Transactional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -750,7 +751,7 @@ class TaskOnboardingServiceTest {
         GenerateTaskRunBatchRequest request = new GenerateTaskRunBatchRequest();
         stubTask(task);
         when(cleanupService.deleteBatchValidation(TASK_ID, 301L, "batch-run-1")).thenReturn(1);
-        when(taskConfigService.generateRunBatches(TASK_ID, request)).thenReturn(Map.of(
+        when(taskConfigService.generateRunBatches(TASK_ID, request, "batch-run-1")).thenReturn(Map.of(
                 "createdRunCount", 1,
                 "linkedResultCount", 1));
 
@@ -758,7 +759,7 @@ class TaskOnboardingServiceTest {
 
         assertEquals(OnboardingStep.READY.name(), task.getOnboardingStep());
         assertEquals(OnboardingStep.READY.name(), response.getCurrentStep());
-        verify(taskConfigService).generateRunBatches(TASK_ID, request);
+        verify(taskConfigService).generateRunBatches(TASK_ID, request, "batch-run-1");
     }
 
     @Test
@@ -782,6 +783,18 @@ class TaskOnboardingServiceTest {
     }
 
     @Test
+    void generationOrchestrationSuspendsAnyCallerTransaction() throws Exception {
+        Method resultMethod = TaskOnboardingService.class.getMethod("generateResults", Long.class);
+        Method batchMethod = TaskOnboardingService.class.getMethod(
+                "generateBatches", Long.class, GenerateTaskRunBatchRequest.class);
+
+        assertEquals(Propagation.NOT_SUPPORTED,
+                resultMethod.getAnnotation(Transactional.class).propagation());
+        assertEquals(Propagation.NOT_SUPPORTED,
+                batchMethod.getAnnotation(Transactional.class).propagation());
+    }
+
+    @Test
     void zeroOrPartialBatchCountsDoNotAdvance() {
         List<Map<String, Object>> incompleteCounts = List.of(
                 Map.of("createdRunCount", 0, "linkedResultCount", 1),
@@ -794,7 +807,7 @@ class TaskOnboardingServiceTest {
             GenerateTaskRunBatchRequest request = new GenerateTaskRunBatchRequest();
             stubTask(task);
             when(cleanupService.deleteBatchValidation(TASK_ID, 301L, "batch-run-1")).thenReturn(1);
-            when(taskConfigService.generateRunBatches(TASK_ID, request)).thenReturn(counts);
+            when(taskConfigService.generateRunBatches(TASK_ID, request, "batch-run-1")).thenReturn(counts);
 
             assertThrows(TaskOnboardingStateException.class,
                     () -> service.generateBatches(TASK_ID, request));
@@ -915,7 +928,7 @@ class TaskOnboardingServiceTest {
         TaskResultRepository results = mock(TaskResultRepository.class);
         PythonWorkerClient worker = mock(PythonWorkerClient.class);
         TaskConfig task = taskAt(OnboardingStep.BATCH_GENERATION);
-        when(repository.findById(TASK_ID)).thenReturn(Optional.of(task));
+        when(repository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
         when(results.findByTaskConfigIdAndStatusInOrderByIdAsc(TASK_ID, Set.of("PENDING")))
                 .thenReturn(List.of());
         TaskConfigService configService = new TaskConfigService(

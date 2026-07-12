@@ -12,13 +12,14 @@ import com.aitaskcenter.service.onboarding.OnboardingStep;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import com.fasterxml.jackson.databind.node.ObjectNode;
+import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.time.OffsetDateTime;
 import java.util.regex.Pattern;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
@@ -28,6 +29,8 @@ import org.springframework.util.StringUtils;
 @Service
 public class TaskConfigService {
     private static final Pattern ONBOARDING_GENERATION_ID = Pattern.compile("[0-9a-f]{64}");
+    private static final String DEFAULT_BATCH_REASON = "由任务结果生成执行批次";
+    private static final String FORMAL_GENERATION_REASON_PREFIX = "FORMAL_GENERATION:";
     private final TaskConfigRepository repository;
     private final ProjectConfigRepository projectRepository;
     private final ConnectionConfigRepository connectionRepository;
@@ -102,10 +105,20 @@ public class TaskConfigService {
     @Transactional
     // 方法：generateRunBatches
     public Map<String, Object> generateRunBatches(Long id, GenerateTaskRunBatchRequest request) {
+        return generateRunBatches(id, request, null);
+    }
+
+    @Transactional
+    public Map<String, Object> generateRunBatches(
+            Long id, GenerateTaskRunBatchRequest request, String onboardingGenerationId) {
         if (id == null) {
             throw new IllegalArgumentException("缺少任务配置 ID");
         }
-        TaskConfig task = repository.findById(id)
+        String generationId = clean(onboardingGenerationId);
+        if (!generationId.isEmpty() && !ONBOARDING_GENERATION_ID.matcher(generationId).matches()) {
+            throw new IllegalArgumentException("引导生成 ID 格式无效");
+        }
+        TaskConfig task = repository.findByIdForUpdate(id)
                 .orElseThrow(() -> new IllegalArgumentException("任务配置不存在"));
         int batchSize = request.getBatchSize() == null ? 50 : request.getBatchSize();
         if (batchSize < 1 || batchSize > 1000) {
@@ -119,8 +132,19 @@ public class TaskConfigService {
                 ? request.getTaskNamePrefix().trim()
                 : task.getTaskName();
         Set<String> statuses = buildBatchStatuses(request.getIncludeFailed());
+        String reason = generationId.isEmpty()
+                ? DEFAULT_BATCH_REASON
+                : FORMAL_GENERATION_REASON_PREFIX + generationId;
 
-        List<TaskResult> candidateResults = taskResultRepository.findByTaskConfigIdAndStatusInOrderByIdAsc(id, statuses);
+        Map<String, Object> recovered = recoverGeneratedRunBatches(
+                task.getId(), reason, generationId, batchSize, request.getIncludeFailed());
+        if (recovered != null) {
+            return recovered;
+        }
+
+        List<TaskResult> candidateResults = generationId.isEmpty()
+                ? taskResultRepository.findByTaskConfigIdAndStatusInOrderByIdAsc(id, statuses)
+                : taskResultRepository.findUnlinkedForGeneration(id, statuses, reason);
         if (candidateResults.isEmpty()) {
             return Map.of(
                     "createdRunCount", 0,
@@ -139,7 +163,11 @@ public class TaskConfigService {
             String promptJson = taskRunPromptBuilder.buildBatchPromptJson(
                     new TaskRunPromptBuilder.BatchPromptContext(taskRunName, cliId, task.getSelectedTables()),
                     chunk);
-            Long taskRunId = insertTaskRunBatch(task, taskRunName, cliId, chunk.size(), promptJson, now);
+            if (!generationId.isEmpty()) {
+                promptJson = addGenerationMetadata(promptJson, generationId);
+            }
+            Long taskRunId = insertTaskRunBatch(
+                    task, taskRunName, cliId, chunk.size(), promptJson, reason, now);
             for (TaskResult taskResult : chunk) {
                 linkRows.add(new Object[]{now, now, taskRunId, taskResult.getId(), "PENDING", ""});
             }
@@ -160,6 +188,7 @@ public class TaskConfigService {
             String cliId,
             int resultCount,
             String promptJson,
+            String reason,
             OffsetDateTime now) {
         return jdbcTemplate.queryForObject(
                 """
@@ -191,7 +220,7 @@ public class TaskConfigService {
                 task.getDatabaseConfigId(),
                 task.getSelectedTables(),
                 "PENDING",
-                "由任务结果生成执行批次",
+                reason,
                 "",
                 "批次已创建，包含 " + resultCount + " 条任务结果。",
                 promptJson,
@@ -215,6 +244,89 @@ public class TaskConfigService {
                 ) values (?, ?, ?, ?, ?, ?)
                 """,
                 rows);
+    }
+
+    private Map<String, Object> recoverGeneratedRunBatches(
+            Long taskConfigId,
+            String reason,
+            String generationId,
+            int batchSize,
+            Boolean includeFailed) {
+        if (generationId.isEmpty()) {
+            return null;
+        }
+        List<Map<String, Object>> runs = jdbcTemplate.queryForList(
+                """
+                select id, ai_prompt_json
+                from tb_task_run
+                where task_config_id = ? and reason = ?
+                order by id
+                """,
+                taskConfigId,
+                reason);
+        if (runs.isEmpty()) {
+            return null;
+        }
+        for (Map<String, Object> run : runs) {
+            requireGenerationMetadata(String.valueOf(run.get("ai_prompt_json")), generationId);
+        }
+        Long linkedResultCount = jdbcTemplate.queryForObject(
+                """
+                select count(*)
+                from tb_task_run_result link
+                join tb_task_run run on run.id = link.task_run_id
+                join tb_task_result result on result.id = link.task_result_id
+                where run.task_config_id = ?
+                  and run.reason = ?
+                  and result.task_config_id = ?
+                """,
+                Long.class,
+                taskConfigId,
+                reason,
+                taskConfigId);
+        if (linkedResultCount == null || linkedResultCount <= 0) {
+            throw new IllegalStateException("Recovered formal batches have no task-result links");
+        }
+        return Map.of(
+                "createdRunCount", runs.size(),
+                "linkedResultCount", linkedResultCount,
+                "batchSize", batchSize,
+                "includeFailed", Boolean.TRUE.equals(includeFailed),
+                "recovered", true);
+    }
+
+    private String addGenerationMetadata(String promptJson, String generationId) {
+        try {
+            JsonNode parsed = objectMapper.readTree(promptJson);
+            if (!(parsed instanceof ObjectNode root)) {
+                throw new IllegalArgumentException("批次提示词必须是 JSON 对象");
+            }
+            JsonNode existingMetadata = root.get("_meta");
+            ObjectNode metadata;
+            if (existingMetadata == null) {
+                metadata = root.putObject("_meta");
+            } else if (existingMetadata instanceof ObjectNode objectMetadata) {
+                metadata = objectMetadata;
+            } else {
+                throw new IllegalArgumentException("批次提示词 _meta 必须是 JSON 对象");
+            }
+            metadata.put("onboardingGenerationId", generationId);
+            return objectMapper.writeValueAsString(root);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalArgumentException("批次提示词 JSON 无效", ex);
+        }
+    }
+
+    private void requireGenerationMetadata(String promptJson, String generationId) {
+        try {
+            JsonNode metadataId = objectMapper.readTree(promptJson)
+                    .path("_meta").path("onboardingGenerationId");
+            if (!metadataId.isTextual() || !generationId.equals(metadataId.textValue())) {
+                throw new IllegalStateException("Recovered formal batch metadata does not match the attempt");
+            }
+        } catch (JsonProcessingException | NullPointerException ex) {
+            throw new IllegalStateException("Recovered formal batch metadata is invalid", ex);
+        }
     }
 
     @Transactional

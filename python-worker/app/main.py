@@ -20,7 +20,7 @@ from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
 from app.result_generation_idempotency import (
-    build_recovered_generation_response,
+    execute_onboarding_generation_transaction,
     merge_onboarding_generation_metadata,
     normalize_onboarding_generation_id,
 )
@@ -1152,28 +1152,36 @@ if __name__ == "__main__":
 
 # 函数：load_existing_word_clean_ids
 def load_existing_word_clean_ids(task_config_id: int, source_description: str) -> set[int]:
-    existing: set[int] = set()
     settings = load_database_settings()
     with connect_database(settings) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                select result_content
-                from tb_task_result
-                where task_config_id = %s and source_description = %s
-                """,
-                (task_config_id, source_description),
-            )
-            for (content,) in cursor.fetchall():
-                try:
-                    payload = json.loads(content or "{}")
-                except json.JSONDecodeError:
-                    continue
-                word_clean_id = payload.get("wordCleanId")
-                if word_clean_id is None and isinstance(payload.get("writeBack"), dict):
-                    word_clean_id = payload["writeBack"].get("wordCleanId")
-                if isinstance(word_clean_id, int):
-                    existing.add(word_clean_id)
+        return load_existing_word_clean_ids_with_connection(
+            connection, task_config_id, source_description
+        )
+
+
+def load_existing_word_clean_ids_with_connection(
+    connection: Any, task_config_id: int, source_description: str
+) -> set[int]:
+    existing: set[int] = set()
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            select result_content
+            from tb_task_result
+            where task_config_id = %s and source_description = %s
+            """,
+            (task_config_id, source_description),
+        )
+        for (content,) in cursor.fetchall():
+            try:
+                payload = json.loads(content or "{}")
+            except json.JSONDecodeError:
+                continue
+            word_clean_id = payload.get("wordCleanId")
+            if word_clean_id is None and isinstance(payload.get("writeBack"), dict):
+                word_clean_id = payload["writeBack"].get("wordCleanId")
+            if isinstance(word_clean_id, int):
+                existing.add(word_clean_id)
     return existing
 
 
@@ -1181,17 +1189,25 @@ def load_existing_word_clean_ids(task_config_id: int, source_description: str) -
 def delete_existing_generated_results(task_config_id: int, source_description: str) -> int:
     settings = load_database_settings()
     with connect_database(settings) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                delete from tb_task_result
-                where task_config_id = %s and source_description = %s
-                """,
-                (task_config_id, source_description),
-            )
-            deleted = cursor.rowcount
+        deleted = delete_existing_generated_results_with_connection(
+            connection, task_config_id, source_description
+        )
         connection.commit()
-    return int(deleted or 0)
+    return deleted
+
+
+def delete_existing_generated_results_with_connection(
+    connection: Any, task_config_id: int, source_description: str
+) -> int:
+    with connection.cursor() as cursor:
+        cursor.execute(
+            """
+            delete from tb_task_result
+            where task_config_id = %s and source_description = %s
+            """,
+            (task_config_id, source_description),
+        )
+        return int(cursor.rowcount or 0)
 
 
 # 函数：fetch_word_clean_sentence_groups
@@ -1437,52 +1453,43 @@ def insert_task_result_rows(rows: list[tuple[Any, ...]]) -> int:
         return 0
     settings = load_database_settings()
     with connect_database(settings) as connection:
-        with connection.cursor() as cursor:
-            execute_values(
-                cursor,
-                """
-                insert into tb_task_result (
-                    result_name,
-                    task_run_id,
-                    task_config_id,
-                    project_id,
-                    cli_id,
-                    database_config_id,
-                    source_tables,
-                    source_description,
-                    status,
-                    summary,
-                    result_content,
-                    error_message,
-                    parsed_at,
-                    completed_at,
-                    created_at,
-                    updated_at
-                ) values %s
-                """,
-                rows,
-                page_size=1000,
-            )
+        inserted = insert_task_result_rows_with_connection(connection, rows)
         connection.commit()
+    return inserted
+
+
+def insert_task_result_rows_with_connection(
+    connection: Any, rows: list[tuple[Any, ...]]
+) -> int:
+    if not rows:
+        return 0
+    with connection.cursor() as cursor:
+        execute_values(
+            cursor,
+            """
+            insert into tb_task_result (
+                result_name,
+                task_run_id,
+                task_config_id,
+                project_id,
+                cli_id,
+                database_config_id,
+                source_tables,
+                source_description,
+                status,
+                summary,
+                result_content,
+                error_message,
+                parsed_at,
+                completed_at,
+                created_at,
+                updated_at
+            ) values %s
+            """,
+            rows,
+            page_size=1000,
+        )
     return len(rows)
-
-
-# 函数：load_formal_result_contents
-def load_formal_result_contents(task_config_id: int) -> list[str | None]:
-    settings = load_database_settings()
-    with connect_database(settings) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                select result_content
-                from tb_task_result
-                where task_config_id = %s
-                  and source_description = %s
-                order by id
-                """,
-                (task_config_id, SCORE_SOURCE_DESCRIPTION),
-            )
-            return [row[0] for row in cursor.fetchall()]
 
 
 # 函数：generate_word_clean_sentence_results
@@ -1492,21 +1499,66 @@ def generate_word_clean_sentence_results(
     onboarding_generation_id: str | None = None,
 ) -> dict[str, Any]:
     generation_id = normalize_onboarding_generation_id(onboarding_generation_id)
-    if generation_id is not None:
-        recovered = build_recovered_generation_response(
-            task_config_id,
-            generation_id,
-            load_formal_result_contents(task_config_id),
-        )
-        if recovered is not None:
-            return {
-                **recovered,
-                "mode": "word_clean_sentence_score",
-                "sourceTable": "public.word_clean_sentence",
-            }
     task_config = load_task_config_snapshot(task_config_id)
     tables = parse_selected_tables(task_config.selected_tables)
     ensure_word_clean_sentence_task(tables)
+    if generation_id is not None:
+        generation_state: dict[str, Any] = {}
+
+        def build_rows() -> list[tuple[Any, ...]]:
+            connection_config = load_connection_config_snapshot(task_config.database_config_id)
+            script_path = write_word_clean_sentence_score_script(task_config, connection_config)
+            deleted_count = (
+                delete_existing_generated_results_with_connection(
+                    target_connection, task_config.id, SCORE_SOURCE_DESCRIPTION
+                )
+                if overwrite
+                else 0
+            )
+            existing_ids = (
+                set()
+                if overwrite
+                else load_existing_word_clean_ids_with_connection(
+                    target_connection, task_config.id, SCORE_SOURCE_DESCRIPTION
+                )
+            )
+            groups = fetch_word_clean_sentence_groups(connection_config)
+            generation_state.update(
+                scriptPath=script_path,
+                deletedCount=deleted_count,
+                totalGroups=len(groups),
+            )
+            return build_score_result_rows(
+                task_config,
+                tables,
+                script_path,
+                groups,
+                existing_ids,
+                generation_id,
+            )
+
+        settings = load_database_settings()
+        with connect_database(settings) as target_connection:
+            generation_result = execute_onboarding_generation_transaction(
+                target_connection,
+                task_config.id,
+                generation_id,
+                SCORE_SOURCE_DESCRIPTION,
+                build_rows,
+                insert_task_result_rows_with_connection,
+            )
+        inserted_count = int(generation_result["insertedCount"])
+        total_groups = int(generation_state.get("totalGroups", inserted_count))
+        return {
+            **generation_result,
+            "mode": "word_clean_sentence_score",
+            "sourceTable": "public.word_clean_sentence",
+            "scriptPath": generation_state.get("scriptPath", ""),
+            "totalGroups": total_groups,
+            "skippedCount": total_groups - inserted_count,
+            "deletedCount": int(generation_state.get("deletedCount", 0)),
+            "overwrite": overwrite,
+        }
     connection_config = load_connection_config_snapshot(task_config.database_config_id)
     script_path = write_word_clean_sentence_score_script(task_config, connection_config)
     deleted_count = delete_existing_generated_results(task_config.id, SCORE_SOURCE_DESCRIPTION) if overwrite else 0

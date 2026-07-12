@@ -9,12 +9,14 @@ public class TaskOnboardingContext {
     private List<Long> resultValidationIds = new ArrayList<>();
     private String resultArtifactPath = "";
     private String resultArtifactHash = "";
+    private String resultCleanupCompletedFor = "";
     private String batchValidationMarker = "";
     private String batchReportToken = "";
     private Long batchValidationTaskRunId;
     private List<Long> batchValidationResultIds = new ArrayList<>();
     private String batchArtifactPath = "";
     private String batchArtifactHash = "";
+    private String batchCleanupCompletedFor = "";
     private String errorMessage = "";
     private String baselineStage = "";
     private long baselineResultCount = -1;
@@ -64,6 +66,14 @@ public class TaskOnboardingContext {
         this.resultArtifactHash = resultArtifactHash;
     }
 
+    public String getResultCleanupCompletedFor() {
+        return resultCleanupCompletedFor;
+    }
+
+    public void setResultCleanupCompletedFor(String resultCleanupCompletedFor) {
+        this.resultCleanupCompletedFor = resultCleanupCompletedFor;
+    }
+
     public String getBatchValidationMarker() {
         return batchValidationMarker;
     }
@@ -110,6 +120,14 @@ public class TaskOnboardingContext {
 
     public void setBatchArtifactHash(String batchArtifactHash) {
         this.batchArtifactHash = batchArtifactHash;
+    }
+
+    public String getBatchCleanupCompletedFor() {
+        return batchCleanupCompletedFor;
+    }
+
+    public void setBatchCleanupCompletedFor(String batchCleanupCompletedFor) {
+        this.batchCleanupCompletedFor = batchCleanupCompletedFor;
     }
 
     public String getErrorMessage() {
