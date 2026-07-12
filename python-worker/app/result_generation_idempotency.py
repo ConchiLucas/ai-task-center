@@ -1,10 +1,21 @@
 import hashlib
 import json
 import re
+from contextlib import contextmanager
 from typing import Any, Callable, Iterable, Optional, Sequence
 
 
 ONBOARDING_GENERATION_ID_PATTERN = re.compile(r"[0-9a-f]{64}")
+
+
+@contextmanager
+def managed_connection(factory: Callable[..., Any], **connect_kwargs: Any):
+    connection = factory(**connect_kwargs)
+    try:
+        with connection:
+            yield connection
+    finally:
+        connection.close()
 
 
 def normalize_onboarding_generation_id(value: Optional[str]) -> Optional[str]:
@@ -46,9 +57,11 @@ def execute_onboarding_generation_transaction(
             from tb_task_result
             where task_config_id = %s
               and source_description = %s
+              and result_content like '%"onboardingGenerationId"%'
+              and result_content like '%%' || %s || '%%'
             order by id
             """,
-            (task_config_id, source_description),
+            (task_config_id, source_description, normalized),
         )
         recovered = build_recovered_generation_response(
             task_config_id,

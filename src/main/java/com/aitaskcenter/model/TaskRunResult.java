@@ -4,10 +4,14 @@ import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Index;
 import jakarta.persistence.Table;
+import jakarta.persistence.UniqueConstraint;
 
 @Entity
 @Table(
         name = "tb_task_run_result",
+        uniqueConstraints = @UniqueConstraint(
+                name = "uk_task_run_result_run_result",
+                columnNames = {"task_run_id", "task_result_id"}),
         indexes = {
                 @Index(name = "idx_task_run_result_run", columnList = "task_run_id"),
                 @Index(name = "idx_task_run_result_result", columnList = "task_result_id"),

@@ -125,37 +125,52 @@ public class TaskOnboardingService {
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public TaskOnboardingResponse generateResults(Long taskConfigId) {
         TaskOnboardingGenerationPhaseService phases = generationPhaseServiceProvider.getObject();
+        TaskOnboardingResponse completed = phases.completedResultResponse(taskConfigId);
+        if (completed != null) {
+            return completed;
+        }
+        phases.reactivateGenerationRetry(taskConfigId, OnboardingStep.RESULT_GENERATION);
         TaskOnboardingGenerationPhaseService.GenerationAttempt attempt = phases.prepareResult(taskConfigId);
 
-        Map<String, Object> generationResult;
         try {
-            generationResult = taskConfigServiceProvider.getObject().generateResults(
-                    taskConfigId, false, attempt.generationId());
+            Map<String, Object> generationResult = taskConfigServiceProvider.getObject().generateResults(
+                    taskConfigId,
+                    attempt.overwriteExistingFormalResults(),
+                    attempt.generationId());
+            return phases.completeResult(
+                    taskConfigId, attempt.generationId(), count(generationResult, "insertedCount"));
         } catch (RuntimeException ex) {
+            phases.recordGenerationFailure(
+                    taskConfigId, OnboardingStep.RESULT_GENERATION, rootMessage(ex));
             throw new TaskOnboardingStateException("Formal result generation failed", ex);
         }
-        return phases.completeResult(
-                taskConfigId, attempt.generationId(), count(generationResult, "insertedCount"));
     }
 
     @Transactional(propagation = Propagation.NOT_SUPPORTED)
     public TaskOnboardingResponse generateBatches(
             Long taskConfigId, GenerateTaskRunBatchRequest request) {
         TaskOnboardingGenerationPhaseService phases = generationPhaseServiceProvider.getObject();
+        TaskOnboardingResponse completed = phases.completedBatchResponse(taskConfigId);
+        if (completed != null) {
+            return completed;
+        }
+        phases.reactivateGenerationRetry(taskConfigId, OnboardingStep.BATCH_GENERATION);
         TaskOnboardingGenerationPhaseService.GenerationAttempt attempt = phases.prepareBatch(taskConfigId);
 
-        Map<String, Object> generationResult;
         try {
-            generationResult = taskConfigServiceProvider.getObject()
-                    .generateRunBatches(taskConfigId, request, attempt.generationId());
+            Map<String, Object> generationResult = taskConfigServiceProvider.getObject()
+                    .generateRunBatches(
+                            taskConfigId, request, attempt.generationId(), attempt.expectedResultIds());
+            return phases.completeBatch(
+                    taskConfigId,
+                    attempt.generationId(),
+                    count(generationResult, "createdRunCount"),
+                    count(generationResult, "linkedResultCount"));
         } catch (RuntimeException ex) {
+            phases.recordGenerationFailure(
+                    taskConfigId, OnboardingStep.BATCH_GENERATION, rootMessage(ex));
             throw new TaskOnboardingStateException("Formal batch generation failed", ex);
         }
-        return phases.completeBatch(
-                taskConfigId,
-                attempt.generationId(),
-                count(generationResult, "createdRunCount"),
-                count(generationResult, "linkedResultCount"));
     }
 
     private TaskOnboardingResponse confirm(
@@ -244,6 +259,14 @@ public class TaskOnboardingService {
             throw new TaskOnboardingStateException("Generation response is missing numeric " + key);
         }
         return number.longValue();
+    }
+
+    private static String rootMessage(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null) {
+            current = current.getCause();
+        }
+        return current.getMessage();
     }
 
     private static Map<OnboardingStep, OnboardingStep> transitions() {

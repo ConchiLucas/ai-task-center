@@ -13,6 +13,7 @@ import org.springframework.transaction.annotation.Transactional;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
@@ -86,10 +87,45 @@ class TaskOnboardingGenerationPhaseServiceTest {
                 TaskOnboardingGenerationPhaseService.class.getMethod(
                         "completeResult", Long.class, String.class, long.class),
                 TaskOnboardingGenerationPhaseService.class.getMethod(
-                        "completeBatch", Long.class, String.class, long.class, long.class));
+                        "completeBatch", Long.class, String.class, long.class, long.class),
+                TaskOnboardingGenerationPhaseService.class.getMethod(
+                        "recordGenerationFailure", Long.class, OnboardingStep.class, String.class),
+                TaskOnboardingGenerationPhaseService.class.getMethod(
+                        "reactivateGenerationRetry", Long.class, OnboardingStep.class));
         for (Method method : methods) {
             assertNotNull(method.getAnnotation(Transactional.class));
         }
+    }
+
+    @Test
+    void failureIsSanitizedPersistedAndRetryReactivatesSameAttempt() throws Exception {
+        TaskConfig task = resultGenerationTask();
+        when(repository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
+
+        service.recordGenerationFailure(
+                TASK_ID, OnboardingStep.RESULT_GENERATION, "worker secret\n" + "x".repeat(1200));
+
+        assertEquals(OnboardingStatus.FAILED.name(), task.getOnboardingStatus());
+        assertTrue(context(task).getErrorMessage().startsWith("worker secret x"));
+        assertTrue(context(task).getErrorMessage().length() <= 500);
+
+        service.reactivateGenerationRetry(TASK_ID, OnboardingStep.RESULT_GENERATION);
+        assertEquals(OnboardingStatus.ACTIVE.name(), task.getOnboardingStatus());
+        assertEquals(RESULT_ATTEMPT, context(task).getResultValidationRunId());
+        assertEquals("", context(task).getErrorMessage());
+    }
+
+    @Test
+    void batchPreparationSnapshotsExactEligibleResultIdentity() throws Exception {
+        TaskConfig task = batchGenerationTask();
+        when(repository.findByIdForUpdate(TASK_ID)).thenReturn(Optional.of(task));
+
+        TaskOnboardingGenerationPhaseService.GenerationAttempt attempt = service.prepareBatch(TASK_ID);
+
+        assertEquals(List.of(201L), attempt.expectedResultIds());
+        assertEquals(1, context(task).getBatchExpectedResultCount());
+        assertEquals(TaskOnboardingGenerationPhaseService.fingerprint(List.of(201L)),
+                context(task).getBatchExpectedResultFingerprint());
     }
 
     private TaskConfig resultGenerationTask() {

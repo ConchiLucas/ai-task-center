@@ -38,6 +38,7 @@ class TaskOnboardingCleanupServiceTest {
     private TaskRunRepository taskRunRepository;
     private TaskRunResultRepository taskRunResultRepository;
     private NamedParameterJdbcTemplate jdbcTemplate;
+    private TaskOnboardingChildTableLock childTableLock;
     private TaskOnboardingCleanupService service;
 
     @BeforeEach
@@ -47,12 +48,14 @@ class TaskOnboardingCleanupServiceTest {
         taskRunRepository = mock(TaskRunRepository.class);
         taskRunResultRepository = mock(TaskRunResultRepository.class);
         jdbcTemplate = mock(NamedParameterJdbcTemplate.class);
+        childTableLock = mock(TaskOnboardingChildTableLock.class);
         service = new TaskOnboardingCleanupService(
                 taskConfigRepository,
                 taskResultRepository,
                 taskRunRepository,
                 taskRunResultRepository,
                 jdbcTemplate,
+                childTableLock,
                 new TaskOnboardingContextCodec(OBJECT_MAPPER),
                 OBJECT_MAPPER);
     }
@@ -70,6 +73,10 @@ class TaskOnboardingCleanupServiceTest {
         assertThrows(IllegalStateException.class,
                 () -> service.deleteResultValidation(TASK_ID, "result-run-1"));
 
+        InOrder lockOrder = inOrder(childTableLock, taskResultRepository);
+        lockOrder.verify(childTableLock).lockForCleanup();
+        lockOrder.verify(taskResultRepository).findByTaskConfigIdAndSourceDescriptionOrderByIdAsc(
+                TASK_ID, "RESULT_VALIDATION:result-run-1");
         verify(taskResultRepository).findByTaskConfigIdAndSourceDescriptionOrderByIdAsc(
                 TASK_ID, "RESULT_VALIDATION:result-run-1");
         verify(jdbcTemplate, never()).update(anyString(), any(MapSqlParameterSource.class));
@@ -95,6 +102,7 @@ class TaskOnboardingCleanupServiceTest {
 
         assertEquals(1, service.deleteBatchValidation(TASK_ID, 301L, "batch-run-1"));
 
+        verify(childTableLock).lockForCleanup();
         InOrder deletionOrder = inOrder(jdbcTemplate);
         deletionOrder.verify(jdbcTemplate).update(
                 argThat(sql -> normalized(sql).contains("delete from tb_task_execution_log")),

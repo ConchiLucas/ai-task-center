@@ -10,6 +10,9 @@ public class TaskOnboardingContext {
     private String resultArtifactPath = "";
     private String resultArtifactHash = "";
     private String resultCleanupCompletedFor = "";
+    private boolean overwriteExistingFormalResults;
+    private String completedResultGenerationId = "";
+    private long completedResultCount;
     private String batchValidationMarker = "";
     private String batchReportToken = "";
     private Long batchValidationTaskRunId;
@@ -17,6 +20,11 @@ public class TaskOnboardingContext {
     private String batchArtifactPath = "";
     private String batchArtifactHash = "";
     private String batchCleanupCompletedFor = "";
+    private long batchExpectedResultCount = -1;
+    private String batchExpectedResultFingerprint = "";
+    private String completedBatchGenerationId = "";
+    private long completedBatchRunCount;
+    private long completedBatchLinkCount;
     private String errorMessage = "";
     private String baselineStage = "";
     private long baselineResultCount = -1;
@@ -74,6 +82,30 @@ public class TaskOnboardingContext {
         this.resultCleanupCompletedFor = resultCleanupCompletedFor;
     }
 
+    public boolean isOverwriteExistingFormalResults() {
+        return overwriteExistingFormalResults;
+    }
+
+    public void setOverwriteExistingFormalResults(boolean overwriteExistingFormalResults) {
+        this.overwriteExistingFormalResults = overwriteExistingFormalResults;
+    }
+
+    public String getCompletedResultGenerationId() {
+        return completedResultGenerationId;
+    }
+
+    public void setCompletedResultGenerationId(String value) {
+        this.completedResultGenerationId = value;
+    }
+
+    public long getCompletedResultCount() {
+        return completedResultCount;
+    }
+
+    public void setCompletedResultCount(long value) {
+        this.completedResultCount = value;
+    }
+
     public String getBatchValidationMarker() {
         return batchValidationMarker;
     }
@@ -128,6 +160,46 @@ public class TaskOnboardingContext {
 
     public void setBatchCleanupCompletedFor(String batchCleanupCompletedFor) {
         this.batchCleanupCompletedFor = batchCleanupCompletedFor;
+    }
+
+    public long getBatchExpectedResultCount() {
+        return batchExpectedResultCount;
+    }
+
+    public void setBatchExpectedResultCount(long value) {
+        this.batchExpectedResultCount = value;
+    }
+
+    public String getBatchExpectedResultFingerprint() {
+        return batchExpectedResultFingerprint;
+    }
+
+    public void setBatchExpectedResultFingerprint(String value) {
+        this.batchExpectedResultFingerprint = value;
+    }
+
+    public String getCompletedBatchGenerationId() {
+        return completedBatchGenerationId;
+    }
+
+    public void setCompletedBatchGenerationId(String value) {
+        this.completedBatchGenerationId = value;
+    }
+
+    public long getCompletedBatchRunCount() {
+        return completedBatchRunCount;
+    }
+
+    public void setCompletedBatchRunCount(long value) {
+        this.completedBatchRunCount = value;
+    }
+
+    public long getCompletedBatchLinkCount() {
+        return completedBatchLinkCount;
+    }
+
+    public void setCompletedBatchLinkCount(long value) {
+        this.completedBatchLinkCount = value;
     }
 
     public String getErrorMessage() {

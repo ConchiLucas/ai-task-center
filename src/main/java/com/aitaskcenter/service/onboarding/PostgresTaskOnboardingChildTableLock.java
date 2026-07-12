@@ -18,8 +18,22 @@ public class PostgresTaskOnboardingChildTableLock implements TaskOnboardingChild
      */
     @Override
     public void lockForCallbackValidation() {
+        lockAllChildrenInGlobalOrder();
+    }
+
+    @Override
+    public void lockForCleanup() {
+        lockAllChildrenInGlobalOrder();
+    }
+
+    /**
+     * Global onboarding child-table lock order: result, run, run-result,
+     * execution-log. Cleanup and callback transactions must never reverse it.
+     */
+    private void lockAllChildrenInGlobalOrder() {
         jdbcTemplate.execute("LOCK TABLE tb_task_result IN SHARE MODE");
         jdbcTemplate.execute("LOCK TABLE tb_task_run IN SHARE MODE");
         jdbcTemplate.execute("LOCK TABLE tb_task_run_result IN SHARE MODE");
+        jdbcTemplate.execute("LOCK TABLE tb_task_execution_log IN SHARE MODE");
     }
 }

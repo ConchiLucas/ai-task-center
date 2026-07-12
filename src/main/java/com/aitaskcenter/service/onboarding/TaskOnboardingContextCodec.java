@@ -69,11 +69,14 @@ public class TaskOnboardingContextCodec {
                 || context.getResultArtifactPath() == null
                 || context.getResultArtifactHash() == null
                 || context.getResultCleanupCompletedFor() == null
+                || context.getCompletedResultGenerationId() == null
                 || context.getBatchValidationMarker() == null
                 || context.getBatchReportToken() == null
                 || context.getBatchArtifactPath() == null
                 || context.getBatchArtifactHash() == null
                 || context.getBatchCleanupCompletedFor() == null
+                || context.getBatchExpectedResultFingerprint() == null
+                || context.getCompletedBatchGenerationId() == null
                 || context.getErrorMessage() == null
                 || context.getBaselineStage() == null
                 || context.getBaselineResultFingerprint() == null

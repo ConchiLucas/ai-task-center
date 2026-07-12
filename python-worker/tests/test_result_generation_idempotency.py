@@ -6,6 +6,7 @@ from app.result_generation_idempotency import (
     build_recovered_generation_response,
     execute_onboarding_generation_transaction,
     merge_onboarding_generation_metadata,
+    managed_connection,
     normalize_onboarding_generation_id,
 )
 
@@ -69,6 +70,8 @@ class ResultGenerationIdempotencyTest(unittest.TestCase):
         self.assertIn("pg_advisory_xact_lock", normalized(connection.statements[0][0]))
         self.assertEqual((advisory_lock_key(7, GENERATION_ID),), connection.statements[0][1])
         self.assertIn("select result_content", normalized(connection.statements[1][0]))
+        self.assertIn("result_content like", normalized(connection.statements[1][0]))
+        self.assertIn(GENERATION_ID, connection.statements[1][1])
 
     def test_serialized_retry_recovers_without_second_insert(self) -> None:
         existing = [
@@ -91,6 +94,20 @@ class ResultGenerationIdempotencyTest(unittest.TestCase):
         self.assertTrue(response["recovered"])
         self.assertEqual([], insert_calls)
         self.assertEqual(1, connection.commits)
+
+    def test_managed_connection_always_closes_after_transaction_scope(self) -> None:
+        connection = FakeManagedConnection()
+        def factory(**kwargs):
+            connection.opened_with = kwargs
+            return connection
+
+        with managed_connection(factory, application_name="worker") as opened:
+            self.assertIs(connection, opened)
+
+        self.assertEqual({"application_name": "worker"}, connection.opened_with)
+        self.assertEqual(1, connection.enters)
+        self.assertEqual(1, connection.exits)
+        self.assertEqual(1, connection.closes)
 
 
 class FakeConnection:
@@ -121,6 +138,25 @@ class FakeCursor:
 
     def fetchall(self):
         return self.connection.result_rows
+
+
+class FakeManagedConnection:
+    def __init__(self):
+        self.opened_with = None
+        self.enters = 0
+        self.exits = 0
+        self.closes = 0
+
+    def __enter__(self):
+        self.enters += 1
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback):
+        self.exits += 1
+        return False
+
+    def close(self):
+        self.closes += 1
 
 
 def normalized(sql: str) -> str:

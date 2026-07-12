@@ -43,7 +43,9 @@ public class TaskOnboardingResponseAssembler {
         response.setCurrentStep(currentStep.name());
         response.setCurrentStatus(currentStatus.name());
         response.setNodes(nodes(currentStep, currentStatus));
-        response.setAllowedActions(active ? allowedActions(currentStep) : List.of());
+        response.setAllowedActions(active
+                ? allowedActions(currentStep)
+                : failedGenerationActions(currentStep, currentStatus));
         response.setErrorMessage(context.getErrorMessage());
 
         if (active && currentStep == OnboardingStep.RESULT_CODE) {
@@ -116,6 +118,18 @@ public class TaskOnboardingResponseAssembler {
             case BATCH_VALIDATION -> List.of("CONFIRM_BATCH_VALIDATION");
             case BATCH_GENERATION -> List.of("GENERATE_BATCHES");
             case READY -> List.of();
+        };
+    }
+
+    private static List<String> failedGenerationActions(
+            OnboardingStep step, OnboardingStatus status) {
+        if (status != OnboardingStatus.FAILED) {
+            return List.of();
+        }
+        return switch (step) {
+            case RESULT_GENERATION -> List.of("GENERATE_RESULTS");
+            case BATCH_GENERATION -> List.of("GENERATE_BATCHES");
+            default -> List.of();
         };
     }
 

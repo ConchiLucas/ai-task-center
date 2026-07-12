@@ -58,6 +58,20 @@ BEGIN
         CREATE INDEX IF NOT EXISTS idx_task_run_onboarding_marker
             ON tb_task_run (task_config_id, reason, id);
     END IF;
+
+    IF to_regclass('tb_task_run_result') IS NOT NULL
+       AND to_regclass('uk_task_run_result_run_result') IS NULL THEN
+        IF EXISTS (
+            SELECT 1
+            FROM tb_task_run_result
+            GROUP BY task_run_id, task_result_id
+            HAVING count(*) > 1
+        ) THEN
+            RAISE EXCEPTION 'Cannot add uk_task_run_result_run_result: duplicate task-run/result links exist';
+        END IF;
+        CREATE UNIQUE INDEX uk_task_run_result_run_result
+            ON tb_task_run_result (task_run_id, task_result_id);
+    END IF;
 END
 $task_onboarding_indexes$;
 ^^^

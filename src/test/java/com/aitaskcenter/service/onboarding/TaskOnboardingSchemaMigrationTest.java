@@ -20,6 +20,7 @@ import org.springframework.jdbc.datasource.SingleConnectionDataSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TaskOnboardingSchemaMigrationTest {
@@ -150,6 +151,20 @@ class TaskOnboardingSchemaMigrationTest {
                 "task_config_id, reason, id");
     }
 
+    @Test
+    void createsUniqueRunResultIndexAndRejectsLegacyDuplicatesClearly() throws Exception {
+        execute("CREATE TABLE tb_task_config (id bigint PRIMARY KEY)");
+        execute("CREATE TABLE tb_task_run_result (id bigint PRIMARY KEY, task_run_id bigint, task_result_id bigint)");
+        runMigration(schemaDataSource);
+        runMigration(schemaDataSource);
+        assertIndexDefinition("uk_task_run_result_run_result", "task_run_id, task_result_id");
+
+        execute("DROP INDEX uk_task_run_result_run_result");
+        execute("INSERT INTO tb_task_run_result VALUES (1, 10, 20), (2, 10, 20)");
+        RuntimeException error = assertThrows(RuntimeException.class, () -> runMigration(schemaDataSource));
+        assertTrue(rootMessage(error).contains("duplicate task-run/result links"));
+    }
+
     private void runMigration(DataSource dataSource) {
         DatabaseInitializationSettings settings = new DatabaseInitializationSettings();
         settings.setMode(DatabaseInitializationMode.ALWAYS);
@@ -206,6 +221,14 @@ class TaskOnboardingSchemaMigrationTest {
 
     private Connection adminConnection() throws SQLException {
         return DriverManager.getConnection(DATABASE_URL, DATABASE_USER, DATABASE_PASSWORD);
+    }
+
+    private static String rootMessage(Throwable error) {
+        Throwable current = error;
+        while (current.getCause() != null) {
+            current = current.getCause();
+        }
+        return String.valueOf(current.getMessage());
     }
 
     private static String setting(String systemProperty, String environmentVariable, String fallback) {

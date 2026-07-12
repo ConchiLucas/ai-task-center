@@ -9,6 +9,8 @@ import com.aitaskcenter.repository.TaskConfigRepository;
 import com.aitaskcenter.repository.TaskResultRepository;
 import com.aitaskcenter.service.onboarding.OnboardingStatus;
 import com.aitaskcenter.service.onboarding.OnboardingStep;
+import com.aitaskcenter.service.onboarding.TaskOnboardingContext;
+import com.aitaskcenter.service.onboarding.TaskOnboardingResetService;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -21,6 +23,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.regex.Pattern;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -39,6 +42,7 @@ public class TaskConfigService {
     private final TaskRunPromptBuilder taskRunPromptBuilder;
     private final JdbcTemplate jdbcTemplate;
     private final ObjectMapper objectMapper;
+    private final TaskOnboardingResetService onboardingResetService;
 
     // 方法：TaskConfigService
     public TaskConfigService(
@@ -50,6 +54,21 @@ public class TaskConfigService {
             TaskRunPromptBuilder taskRunPromptBuilder,
             JdbcTemplate jdbcTemplate,
             ObjectMapper objectMapper) {
+        this(repository, projectRepository, connectionRepository, taskResultRepository,
+                pythonWorkerClient, taskRunPromptBuilder, jdbcTemplate, objectMapper, null);
+    }
+
+    @Autowired
+    public TaskConfigService(
+            TaskConfigRepository repository,
+            ProjectConfigRepository projectRepository,
+            ConnectionConfigRepository connectionRepository,
+            TaskResultRepository taskResultRepository,
+            PythonWorkerClient pythonWorkerClient,
+            TaskRunPromptBuilder taskRunPromptBuilder,
+            JdbcTemplate jdbcTemplate,
+            ObjectMapper objectMapper,
+            TaskOnboardingResetService onboardingResetService) {
         this.repository = repository;
         this.projectRepository = projectRepository;
         this.connectionRepository = connectionRepository;
@@ -58,6 +77,7 @@ public class TaskConfigService {
         this.taskRunPromptBuilder = taskRunPromptBuilder;
         this.jdbcTemplate = jdbcTemplate;
         this.objectMapper = objectMapper;
+        this.onboardingResetService = onboardingResetService;
     }
 
     // 方法：list
@@ -111,6 +131,15 @@ public class TaskConfigService {
     @Transactional
     public Map<String, Object> generateRunBatches(
             Long id, GenerateTaskRunBatchRequest request, String onboardingGenerationId) {
+        return generateRunBatches(id, request, onboardingGenerationId, null);
+    }
+
+    @Transactional
+    public Map<String, Object> generateRunBatches(
+            Long id,
+            GenerateTaskRunBatchRequest request,
+            String onboardingGenerationId,
+            List<Long> expectedResultIds) {
         if (id == null) {
             throw new IllegalArgumentException("缺少任务配置 ID");
         }
@@ -136,15 +165,24 @@ public class TaskConfigService {
                 ? DEFAULT_BATCH_REASON
                 : FORMAL_GENERATION_REASON_PREFIX + generationId;
 
+        List<Long> exactExpectedIds = generationId.isEmpty()
+                ? List.of()
+                : expectedResultIds == null
+                        ? taskResultRepository.findByTaskConfigIdAndStatusInOrderByIdAsc(id, statuses)
+                                .stream().map(TaskResult::getId).sorted().toList()
+                        : requireExpectedResultIds(expectedResultIds);
+        if (!generationId.isEmpty() && exactExpectedIds.isEmpty()) {
+            throw new IllegalStateException("Missing expected formal result IDs");
+        }
         Map<String, Object> recovered = recoverGeneratedRunBatches(
-                task.getId(), reason, generationId, batchSize, request.getIncludeFailed());
+                task.getId(), reason, generationId, batchSize, request.getIncludeFailed(), exactExpectedIds);
         if (recovered != null) {
             return recovered;
         }
 
         List<TaskResult> candidateResults = generationId.isEmpty()
                 ? taskResultRepository.findByTaskConfigIdAndStatusInOrderByIdAsc(id, statuses)
-                : taskResultRepository.findUnlinkedForGeneration(id, statuses, reason);
+                : exactCandidates(id, statuses, exactExpectedIds);
         if (candidateResults.isEmpty()) {
             return Map.of(
                     "createdRunCount", 0,
@@ -251,7 +289,8 @@ public class TaskConfigService {
             String reason,
             String generationId,
             int batchSize,
-            Boolean includeFailed) {
+            Boolean includeFailed,
+            List<Long> expectedResultIds) {
         if (generationId.isEmpty()) {
             return null;
         }
@@ -270,26 +309,27 @@ public class TaskConfigService {
         for (Map<String, Object> run : runs) {
             requireGenerationMetadata(String.valueOf(run.get("ai_prompt_json")), generationId);
         }
-        Long linkedResultCount = jdbcTemplate.queryForObject(
+        List<Long> linkedResultIds = jdbcTemplate.queryForList(
                 """
-                select count(*)
+                select result.id
                 from tb_task_run_result link
                 join tb_task_run run on run.id = link.task_run_id
                 join tb_task_result result on result.id = link.task_result_id
                 where run.task_config_id = ?
                   and run.reason = ?
                   and result.task_config_id = ?
+                order by result.id
                 """,
                 Long.class,
                 taskConfigId,
                 reason,
                 taskConfigId);
-        if (linkedResultCount == null || linkedResultCount <= 0) {
-            throw new IllegalStateException("Recovered formal batches have no task-result links");
+        if (!expectedResultIds.equals(linkedResultIds)) {
+            throw new IllegalStateException("Recovered formal batches do not exactly cover expected results");
         }
         return Map.of(
                 "createdRunCount", runs.size(),
-                "linkedResultCount", linkedResultCount,
+                "linkedResultCount", linkedResultIds.size(),
                 "batchSize", batchSize,
                 "includeFailed", Boolean.TRUE.equals(includeFailed),
                 "recovered", true);
@@ -339,9 +379,43 @@ public class TaskConfigService {
         if (semanticConfigChanged(previous, task)) {
             task.setOnboardingStep(OnboardingStep.RESULT_CODE.name());
             task.setOnboardingStatus(OnboardingStatus.ACTIVE.name());
-            task.setOnboardingContext("{}");
+            task.setOnboardingContext(onboardingResetService == null
+                    ? "{}"
+                    : writeContext(onboardingResetService.prepareSemanticReset(id)));
         }
         return repository.save(task);
+    }
+
+    private List<TaskResult> exactCandidates(
+            Long taskConfigId, Set<String> statuses, List<Long> expectedResultIds) {
+        List<TaskResult> candidates = taskResultRepository.findAllById(expectedResultIds).stream()
+                .sorted(java.util.Comparator.comparing(TaskResult::getId))
+                .toList();
+        if (candidates.size() != expectedResultIds.size()
+                || candidates.stream().anyMatch(result -> !taskConfigId.equals(result.getTaskConfigId())
+                        || !statuses.contains(result.getStatus()))) {
+            throw new IllegalStateException("Formal batch candidates changed after Phase A");
+        }
+        return candidates;
+    }
+
+    private static List<Long> requireExpectedResultIds(List<Long> values) {
+        if (values == null || values.isEmpty() || values.stream().anyMatch(Objects::isNull)) {
+            throw new IllegalStateException("Missing expected formal result IDs");
+        }
+        List<Long> sorted = values.stream().sorted().toList();
+        if (sorted.stream().distinct().count() != sorted.size()) {
+            throw new IllegalStateException("Expected formal result IDs are not unique");
+        }
+        return sorted;
+    }
+
+    private String writeContext(TaskOnboardingContext context) {
+        try {
+            return objectMapper.writeValueAsString(context);
+        } catch (JsonProcessingException ex) {
+            throw new IllegalStateException("Unable to persist reset onboarding context", ex);
+        }
     }
 
     // 方法：delete

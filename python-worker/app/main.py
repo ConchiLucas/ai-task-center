@@ -22,6 +22,7 @@ from pydantic import BaseModel, Field
 from app.result_generation_idempotency import (
     execute_onboarding_generation_transaction,
     merge_onboarding_generation_metadata,
+    managed_connection,
     normalize_onboarding_generation_id,
 )
 
@@ -202,7 +203,8 @@ def load_database_settings() -> DatabaseSettings:
 
 # 函数：connect_database
 def connect_database(settings: DatabaseSettings):
-    return psycopg2.connect(
+    return managed_connection(
+        psycopg2.connect,
         host=settings.host,
         port=settings.port,
         dbname=settings.name,
@@ -638,7 +640,8 @@ def connect_source_database(config: ConnectionConfigSnapshot):
     connection_type = config.connection_type.strip().lower()
     if connection_type not in {"pgsql", "postgres", "postgresql"}:
         raise HTTPException(status_code=400, detail=f"暂不支持该任务结果来源数据库类型: {config.connection_type}")
-    return psycopg2.connect(
+    return managed_connection(
+        psycopg2.connect,
         host=config.connection_url,
         port=config.port,
         dbname=config.database_name,

@@ -107,6 +107,7 @@ public class TaskOnboardingCleanupService {
     private final TaskRunRepository taskRunRepository;
     private final TaskRunResultRepository taskRunResultRepository;
     private final NamedParameterJdbcTemplate jdbcTemplate;
+    private final TaskOnboardingChildTableLock childTableLock;
     private final TaskOnboardingContextCodec contextCodec;
     private final ObjectMapper objectMapper;
 
@@ -116,6 +117,7 @@ public class TaskOnboardingCleanupService {
             TaskRunRepository taskRunRepository,
             TaskRunResultRepository taskRunResultRepository,
             NamedParameterJdbcTemplate jdbcTemplate,
+            TaskOnboardingChildTableLock childTableLock,
             TaskOnboardingContextCodec contextCodec,
             ObjectMapper objectMapper) {
         this.taskConfigRepository = taskConfigRepository;
@@ -123,6 +125,7 @@ public class TaskOnboardingCleanupService {
         this.taskRunRepository = taskRunRepository;
         this.taskRunResultRepository = taskRunResultRepository;
         this.jdbcTemplate = jdbcTemplate;
+        this.childTableLock = childTableLock;
         this.contextCodec = contextCodec;
         this.objectMapper = objectMapper;
     }
@@ -137,6 +140,7 @@ public class TaskOnboardingCleanupService {
         MapSqlParameterSource parameters = parameters(taskConfigId, marker)
                 .addValue("resultIds", expectedIds);
 
+        childTableLock.lockForCleanup();
         jdbcTemplate.queryForList(LOCK_RESULT_ROWS, parameters, Long.class);
         List<TaskResult> results = taskResultRepository
                 .findByTaskConfigIdAndSourceDescriptionOrderByIdAsc(taskConfigId, marker);
@@ -176,7 +180,7 @@ public class TaskOnboardingCleanupService {
                 .addValue("taskRunId", taskRunId)
                 .addValue("resultIds", expectedResultIds);
 
-        // Exact row locks follow the shared child-table order without holding table SHARE locks.
+        childTableLock.lockForCleanup();
         jdbcTemplate.queryForList(LOCK_BATCH_RESULT_ROWS, parameters, Long.class);
         jdbcTemplate.queryForList(LOCK_RUN_ROW, parameters, Long.class);
         jdbcTemplate.queryForList(LOCK_LINK_ROWS, parameters, Long.class);

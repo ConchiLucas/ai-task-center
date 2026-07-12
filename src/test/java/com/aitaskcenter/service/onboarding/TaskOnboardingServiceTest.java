@@ -751,7 +751,8 @@ class TaskOnboardingServiceTest {
         GenerateTaskRunBatchRequest request = new GenerateTaskRunBatchRequest();
         stubTask(task);
         when(cleanupService.deleteBatchValidation(TASK_ID, 301L, "batch-run-1")).thenReturn(1);
-        when(taskConfigService.generateRunBatches(TASK_ID, request, "batch-run-1")).thenReturn(Map.of(
+        when(taskConfigService.generateRunBatches(
+                TASK_ID, request, "batch-run-1", List.of(201L))).thenReturn(Map.of(
                 "createdRunCount", 1,
                 "linkedResultCount", 1));
 
@@ -759,7 +760,8 @@ class TaskOnboardingServiceTest {
 
         assertEquals(OnboardingStep.READY.name(), task.getOnboardingStep());
         assertEquals(OnboardingStep.READY.name(), response.getCurrentStep());
-        verify(taskConfigService).generateRunBatches(TASK_ID, request, "batch-run-1");
+        verify(taskConfigService).generateRunBatches(
+                TASK_ID, request, "batch-run-1", List.of(201L));
     }
 
     @Test
@@ -774,12 +776,46 @@ class TaskOnboardingServiceTest {
         assertThrows(TaskOnboardingStateException.class, () -> service.generateResults(TASK_ID));
 
         assertEquals(OnboardingStep.RESULT_GENERATION.name(), task.getOnboardingStep());
+        assertEquals(OnboardingStatus.FAILED.name(), task.getOnboardingStatus());
         assertEquals(GENERATION_ID, context(task).getResultValidationRunId());
+        assertEquals(List.of("GENERATE_RESULTS"), service.get(TASK_ID).getAllowedActions());
 
         TaskOnboardingResponse recovered = service.generateResults(TASK_ID);
 
         assertEquals(OnboardingStep.BATCH_CODE.name(), recovered.getCurrentStep());
         verify(taskConfigService, times(2)).generateResults(TASK_ID, false, GENERATION_ID);
+    }
+
+    @Test
+    void successfulTerminalGenerationRetriesAreNoOps() {
+        TaskOnboardingContext resultContext = new TaskOnboardingContext();
+        resultContext.setCompletedResultGenerationId(GENERATION_ID);
+        resultContext.setCompletedResultCount(2);
+        resultContext.setBatchValidationMarker("b".repeat(64));
+        resultContext.setBatchReportToken("token");
+        setEmptyBaseline(resultContext, "BATCH");
+        TaskConfig afterResults = taskAt(OnboardingStep.BATCH_CODE);
+        afterResults.setOnboardingContext(write(resultContext));
+        stubTask(afterResults);
+
+        assertEquals(OnboardingStep.BATCH_CODE.name(), service.generateResults(TASK_ID).getCurrentStep());
+        verifyNoInteractions(cleanupService, taskConfigService);
+
+        reset(cleanupService, taskConfigService);
+        TaskOnboardingContext batchContext = new TaskOnboardingContext();
+        batchContext.setCompletedResultGenerationId(GENERATION_ID);
+        batchContext.setCompletedResultCount(2);
+        batchContext.setCompletedBatchGenerationId("c".repeat(64));
+        batchContext.setCompletedBatchRunCount(1);
+        batchContext.setCompletedBatchLinkCount(2);
+        TaskConfig ready = taskAt(OnboardingStep.READY);
+        ready.setOnboardingContext(write(batchContext));
+        stubTask(ready);
+
+        assertEquals(OnboardingStep.READY.name(), service.generateBatches(
+                TASK_ID, new GenerateTaskRunBatchRequest()).getCurrentStep());
+        assertEquals(OnboardingStep.READY.name(), service.generateResults(TASK_ID).getCurrentStep());
+        verifyNoInteractions(cleanupService, taskConfigService);
     }
 
     @Test
@@ -807,7 +843,8 @@ class TaskOnboardingServiceTest {
             GenerateTaskRunBatchRequest request = new GenerateTaskRunBatchRequest();
             stubTask(task);
             when(cleanupService.deleteBatchValidation(TASK_ID, 301L, "batch-run-1")).thenReturn(1);
-            when(taskConfigService.generateRunBatches(TASK_ID, request, "batch-run-1")).thenReturn(counts);
+            when(taskConfigService.generateRunBatches(
+                    TASK_ID, request, "batch-run-1", List.of(201L))).thenReturn(counts);
 
             assertThrows(TaskOnboardingStateException.class,
                     () -> service.generateBatches(TASK_ID, request));
@@ -822,7 +859,7 @@ class TaskOnboardingServiceTest {
         assertThrows(RuntimeException.class, () -> service.generateResults(TASK_ID));
 
         TaskConfig wrongStatus = batchGenerationTask("batch-run-1", 301L, List.of(201L));
-        wrongStatus.setOnboardingStatus(OnboardingStatus.FAILED.name());
+        wrongStatus.setOnboardingStatus(OnboardingStatus.COMPLETED.name());
         stubTask(wrongStatus);
         assertThrows(RuntimeException.class,
                 () -> service.generateBatches(TASK_ID, new GenerateTaskRunBatchRequest()));
