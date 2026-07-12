@@ -10,6 +10,7 @@ import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
 import java.nio.charset.StandardCharsets;
+import java.util.List;
 import java.util.Map;
 import java.util.stream.Collectors;
 import org.springframework.beans.factory.annotation.Value;
@@ -46,6 +47,106 @@ public class PythonWorkerClient {
                 + "&taskRunIds=" + encode(taskRunIds);
         HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(uri))
                 .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+        try {
+            HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 400) {
+                throw new IllegalArgumentException("Python Worker 调用失败: " + response.body());
+            }
+            return objectMapper.readValue(response.body(), Map.class);
+        } catch (IOException ex) {
+            throw new IllegalArgumentException("Python Worker 响应解析失败: " + ex.getMessage());
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new IllegalArgumentException("Python Worker 调用被中断");
+        }
+    }
+
+    // 方法：generateTaskResults
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> generateTaskResults(Long taskConfigId, boolean overwrite) {
+        String uri = baseUrl
+                + "/api/result-generation/from-task-config-simple?taskConfigId=" + taskConfigId
+                + "&overwrite=" + overwrite;
+        HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(uri))
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+        try {
+            HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 400) {
+                throw new IllegalArgumentException("Python Worker 调用失败: " + response.body());
+            }
+            return objectMapper.readValue(response.body(), Map.class);
+        } catch (IOException ex) {
+            throw new IllegalArgumentException("Python Worker 响应解析失败: " + ex.getMessage());
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new IllegalArgumentException("Python Worker 调用被中断");
+        }
+    }
+
+    // 方法：processTaskResult
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> processTaskResult(Long taskResultId, String cliId) {
+        String uri = baseUrl
+                + "/api/task-result/process-simple?taskResultId=" + taskResultId
+                + "&cliId=" + encode(cliId);
+        HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(uri))
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+        try {
+            HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 400) {
+                throw new IllegalArgumentException("Python Worker 调用失败: " + response.body());
+            }
+            return objectMapper.readValue(response.body(), Map.class);
+        } catch (IOException ex) {
+            throw new IllegalArgumentException("Python Worker 响应解析失败: " + ex.getMessage());
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new IllegalArgumentException("Python Worker 调用被中断");
+        }
+    }
+
+    // 方法：processTaskResults
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> processTaskResults(List<Long> taskResultIds, String cliId, Integer workerCount) {
+        String ids = taskResultIds.stream()
+                .map(String::valueOf)
+                .collect(Collectors.joining(","));
+        String uri = baseUrl
+                + "/api/task-result/process-batch-simple?taskResultIds=" + encode(ids)
+                + "&cliId=" + encode(cliId)
+                + "&workerCount=" + (workerCount == null ? 4 : workerCount);
+        HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(uri))
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.noBody())
+                .build();
+        try {
+            HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 400) {
+                throw new IllegalArgumentException("Python Worker 调用失败: " + response.body());
+            }
+            return objectMapper.readValue(response.body(), Map.class);
+        } catch (IOException ex) {
+            throw new IllegalArgumentException("Python Worker 响应解析失败: " + ex.getMessage());
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new IllegalArgumentException("Python Worker 调用被中断");
+        }
+    }
+
+    // 方法：processTaskRunBatch
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> processTaskRunBatch(Long taskRunId, String cliId) {
+        String uri = baseUrl
+                + "/api/task-run/process-batch-json-simple?taskRunId=" + taskRunId
+                + "&cliId=" + encode(cliId);
+        HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(uri))
                 .header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.noBody())
                 .build();

@@ -2,11 +2,14 @@ package com.aitaskcenter.controller;
 
 import com.aitaskcenter.dto.ApiResponse;
 import com.aitaskcenter.dto.DeleteByIdRequest;
+import com.aitaskcenter.dto.GenerateTaskRunBatchRequest;
 import com.aitaskcenter.model.TaskConfig;
 import com.aitaskcenter.service.TaskConfigService;
 import java.util.List;
+import java.util.Map;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
 import org.springframework.web.bind.annotation.PutMapping;
 import org.springframework.web.bind.annotation.PostMapping;
 import org.springframework.web.bind.annotation.RequestBody;
@@ -34,6 +37,22 @@ public class TaskConfigController {
     // 方法：create
     public ApiResponse<TaskConfig> create(@RequestBody TaskConfig input) {
         return ApiResponse.ok(service.create(input), "任务配置创建成功");
+    }
+
+    @PostMapping("/{id}/generate-results")
+    // 方法：generateResults
+    public ApiResponse<Map<String, Object>> generateResults(
+            @PathVariable Long id,
+            @RequestParam(defaultValue = "false") boolean overwrite) {
+        return ApiResponse.ok(service.generateResults(id, overwrite), "任务结果生成完成");
+    }
+
+    @PostMapping("/{id}/generate-run-batches")
+    // 方法：generateRunBatches
+    public ApiResponse<Map<String, Object>> generateRunBatches(
+            @PathVariable Long id,
+            @RequestBody GenerateTaskRunBatchRequest request) {
+        return ApiResponse.ok(service.generateRunBatches(id, request), "执行批次生成完成");
     }
 
     @PutMapping("/updateTaskConfig")

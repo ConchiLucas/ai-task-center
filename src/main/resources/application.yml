@@ -3,7 +3,7 @@ server:
 
 spring:
   datasource:
-    url: ${TASK_CENTER_DB_URL:jdbc:postgresql://localhost:55432/ai_task_center}
+    url: ${TASK_CENTER_DB_URL:jdbc:postgresql://localhost:5432/ai_task_center}
     username: ${TASK_CENTER_DB_USER:conchi}
     password: ${TASK_CENTER_DB_PASSWORD:conchi123456}
     driver-class-name: org.postgresql.Driver

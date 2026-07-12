@@ -222,6 +222,10 @@ public class AiConfigService {
                 .map(AiConfigService::clean)
                 .filter(StringUtils::hasText)
                 .toList());
+        boolean codex = "codex".equalsIgnoreCase(normalized.getId())
+                || normalized.getCommand().toLowerCase().contains("codex");
+        normalized.setModel(codex ? defaultText(item.getModel(), "gpt-5.6-sol") : clean(item.getModel()));
+        normalized.setReasoningEffort(codex ? defaultText(item.getReasoningEffort(), "low") : clean(item.getReasoningEffort()));
         normalized.setWorkingDirectory(defaultText(item.getWorkingDirectory(), "/Users/conchi/workforce/python_workforce/ai-task-center"));
         normalized.setTimeoutSeconds(item.getTimeoutSeconds() == null || item.getTimeoutSeconds() <= 0 ? 300 : item.getTimeoutSeconds());
         return normalized;

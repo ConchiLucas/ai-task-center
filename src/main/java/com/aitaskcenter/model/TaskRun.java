@@ -2,11 +2,18 @@ package com.aitaskcenter.model;
 
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.Index;
 import jakarta.persistence.Table;
 import java.time.OffsetDateTime;
 
 @Entity
-@Table(name = "tb_task_run")
+@Table(
+        name = "tb_task_run",
+        indexes = {
+                @Index(name = "idx_task_run_queue", columnList = "status,next_retry_at,created_at"),
+                @Index(name = "idx_task_run_dispatch_group", columnList = "dispatch_group_id,status"),
+                @Index(name = "idx_task_run_lease", columnList = "status,lease_until")
+        })
 public class TaskRun extends BaseEntity {
     @Column(nullable = false)
     // 字段：任务执行名称
@@ -52,6 +59,50 @@ public class TaskRun extends BaseEntity {
     @Column(length = 4000)
     // 字段：任务执行日志内容
     private String runLog;
+
+    @Column(columnDefinition = "text")
+    // 字段：批次级发送给 AI 的 JSON 提示词
+    private String aiPromptJson;
+
+    @Column(columnDefinition = "text")
+    // 字段：批次级 AI 原始响应 JSON
+    private String aiResponseJson;
+
+    // 字段：Python Worker 使用的执行模式
+    private String executionMode = "thread";
+
+    // 字段：本次提交允许的最大并发数量
+    private Integer requestedWorkerCount = 1;
+
+    @Column(length = 64)
+    // 字段：同一次批量提交生成的调度组 ID
+    private String dispatchGroupId;
+
+    // 字段：已经领取执行的次数
+    private Integer attemptNo = 0;
+
+    // 字段：允许自动执行的最大次数
+    private Integer maxAttempts = 3;
+
+    // 字段：失败任务允许再次领取的时间
+    private OffsetDateTime nextRetryAt;
+
+    // 字段：当前 Worker 对任务的租约到期时间
+    private OffsetDateTime leaseUntil;
+
+    @Column(length = 64)
+    // 字段：当前领取任务的唯一令牌
+    private String claimToken;
+
+    @Column(length = 128)
+    // 字段：当前执行任务的 Worker 标识
+    private String workerId;
+
+    // 字段：当前 Worker 最近一次续租心跳时间
+    private OffsetDateTime heartbeatAt;
+
+    // 字段：批次预期包含的任务结果数量
+    private Integer expectedResultCount = 0;
 
     // 方法：getTaskName
     public String getTaskName() {
@@ -181,5 +232,135 @@ public class TaskRun extends BaseEntity {
     // 方法：setRunLog
     public void setRunLog(String runLog) {
         this.runLog = runLog;
+    }
+
+    // 方法：getAiPromptJson
+    public String getAiPromptJson() {
+        return aiPromptJson;
+    }
+
+    // 方法：setAiPromptJson
+    public void setAiPromptJson(String aiPromptJson) {
+        this.aiPromptJson = aiPromptJson;
+    }
+
+    // 方法：getAiResponseJson
+    public String getAiResponseJson() {
+        return aiResponseJson;
+    }
+
+    // 方法：setAiResponseJson
+    public void setAiResponseJson(String aiResponseJson) {
+        this.aiResponseJson = aiResponseJson;
+    }
+
+    // 方法：getExecutionMode
+    public String getExecutionMode() {
+        return executionMode;
+    }
+
+    // 方法：setExecutionMode
+    public void setExecutionMode(String executionMode) {
+        this.executionMode = executionMode;
+    }
+
+    // 方法：getRequestedWorkerCount
+    public Integer getRequestedWorkerCount() {
+        return requestedWorkerCount;
+    }
+
+    // 方法：setRequestedWorkerCount
+    public void setRequestedWorkerCount(Integer requestedWorkerCount) {
+        this.requestedWorkerCount = requestedWorkerCount;
+    }
+
+    // 方法：getDispatchGroupId
+    public String getDispatchGroupId() {
+        return dispatchGroupId;
+    }
+
+    // 方法：setDispatchGroupId
+    public void setDispatchGroupId(String dispatchGroupId) {
+        this.dispatchGroupId = dispatchGroupId;
+    }
+
+    // 方法：getAttemptNo
+    public Integer getAttemptNo() {
+        return attemptNo;
+    }
+
+    // 方法：setAttemptNo
+    public void setAttemptNo(Integer attemptNo) {
+        this.attemptNo = attemptNo;
+    }
+
+    // 方法：getMaxAttempts
+    public Integer getMaxAttempts() {
+        return maxAttempts;
+    }
+
+    // 方法：setMaxAttempts
+    public void setMaxAttempts(Integer maxAttempts) {
+        this.maxAttempts = maxAttempts;
+    }
+
+    // 方法：getNextRetryAt
+    public OffsetDateTime getNextRetryAt() {
+        return nextRetryAt;
+    }
+
+    // 方法：setNextRetryAt
+    public void setNextRetryAt(OffsetDateTime nextRetryAt) {
+        this.nextRetryAt = nextRetryAt;
+    }
+
+    // 方法：getLeaseUntil
+    public OffsetDateTime getLeaseUntil() {
+        return leaseUntil;
+    }
+
+    // 方法：setLeaseUntil
+    public void setLeaseUntil(OffsetDateTime leaseUntil) {
+        this.leaseUntil = leaseUntil;
+    }
+
+    // 方法：getClaimToken
+    public String getClaimToken() {
+        return claimToken;
+    }
+
+    // 方法：setClaimToken
+    public void setClaimToken(String claimToken) {
+        this.claimToken = claimToken;
+    }
+
+    // 方法：getWorkerId
+    public String getWorkerId() {
+        return workerId;
+    }
+
+    // 方法：setWorkerId
+    public void setWorkerId(String workerId) {
+        this.workerId = workerId;
+    }
+
+    // 方法：getHeartbeatAt
+    public OffsetDateTime getHeartbeatAt() {
+        return heartbeatAt;
+    }
+
+    // 方法：setHeartbeatAt
+    public void setHeartbeatAt(OffsetDateTime heartbeatAt) {
+        this.heartbeatAt = heartbeatAt;
+    }
+
+    // 方法：getExpectedResultCount
+    public Integer getExpectedResultCount() {
+        return expectedResultCount;
+    }
+
+    // 方法：setExpectedResultCount
+    public void setExpectedResultCount(Integer expectedResultCount) {
+        this.expectedResultCount = expectedResultCount;
     }
 }

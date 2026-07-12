@@ -1,9 +1,13 @@
 package com.aitaskcenter.model;
 
+import com.aitaskcenter.dto.TaskRunReference;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Table;
+import jakarta.persistence.Transient;
 import java.time.OffsetDateTime;
+import java.util.ArrayList;
+import java.util.List;
 
 @Entity
 @Table(name = "tb_task_result")
@@ -54,6 +58,10 @@ public class TaskResult extends BaseEntity {
     private OffsetDateTime parsedAt;
     // 字段：结果完成时间
     private OffsetDateTime completedAt;
+
+    @Transient
+    // 字段：通过批次关联表查询到的真实关联任务列表
+    private List<TaskRunReference> relatedTaskRuns = new ArrayList<>();
 
     // 方法：getResultName
     public String getResultName() {
@@ -193,5 +201,15 @@ public class TaskResult extends BaseEntity {
     // 方法：setCompletedAt
     public void setCompletedAt(OffsetDateTime completedAt) {
         this.completedAt = completedAt;
+    }
+
+    // 方法：getRelatedTaskRuns
+    public List<TaskRunReference> getRelatedTaskRuns() {
+        return relatedTaskRuns;
+    }
+
+    // 方法：setRelatedTaskRuns
+    public void setRelatedTaskRuns(List<TaskRunReference> relatedTaskRuns) {
+        this.relatedTaskRuns = relatedTaskRuns == null ? new ArrayList<>() : relatedTaskRuns;
     }
 }

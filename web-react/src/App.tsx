@@ -20,6 +20,7 @@ import {
   App as AntApp,
   Button,
   Card,
+  Collapse,
   Col,
   Empty,
   Form,
@@ -45,10 +46,12 @@ import {
   LocalCliConfigItem,
   ProjectConfig,
   TaskConfig,
+  TaskExecutionLog,
   TaskResult,
   TaskResultStatus,
   TaskRun,
   TaskRunStatus,
+  batchProcessTaskResults,
   batchDeleteTaskRuns,
   cancelTaskRun,
   createConnection,
@@ -66,16 +69,18 @@ import {
   getProjects,
   getTaskResult,
   getTaskResults,
-  getTaskRunLog,
+  getTaskRunDetail,
   getTaskRuns,
   getTaskConfigs,
+  generateTaskResults,
+  generateTaskRunBatches,
   listConnectionTables,
+  processTaskResult,
   saveAIActiveProvider,
   saveAIConfig,
   saveLocalCliConfig,
   startTaskRuns,
   testConnectionPayload,
-  retryTaskRun,
   updateConnection,
   updateProject,
   updateTaskConfig,
@@ -97,7 +102,9 @@ const defaultPorts: Record<string, number> = {
 
 const taskRunStatusOptions: { value: TaskRunStatus; label: string; color: string }[] = [
   { value: 'PENDING', label: '待执行', color: 'default' },
+  { value: 'QUEUED', label: '排队中', color: 'cyan' },
   { value: 'RUNNING', label: '执行中', color: 'processing' },
+  { value: 'RETRY_WAIT', label: '等待重试', color: 'gold' },
   { value: 'SUCCESS', label: '处理成功', color: 'blue' },
   { value: 'FAILED', label: '处理失败', color: 'red' },
   { value: 'CANCELLED', label: '已取消', color: 'orange' },
@@ -108,6 +115,25 @@ const taskResultStatusOptions: { value: TaskResultStatus; label: string; color: 
   { value: 'RUNNING', label: '处理中', color: 'processing' },
   { value: 'SUCCESS', label: '处理成功', color: 'blue' },
   { value: 'FAILED', label: '处理失败', color: 'red' },
+];
+
+const tablePageSizeOptions = ['10', '20', '50', '100', '200', '500'];
+
+const codexModelOptions = [
+  { value: 'gpt-5.6-sol', label: '5.6 Sol' },
+  { value: 'gpt-5.6-terra', label: '5.6 Terra' },
+  { value: 'gpt-5.6-luna', label: '5.6 Luna' },
+  { value: 'gpt-5.5', label: '5.5' },
+  { value: 'gpt-5.4', label: '5.4' },
+  { value: 'gpt-5.4-mini', label: '5.4 Mini' },
+  { value: 'gpt-5.3-codex-spark', label: '5.3 Codex Spark' },
+];
+
+const codexReasoningOptions = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'xhigh', label: 'XHigh' },
 ];
 
 const createEmptyProvider = (index: number): AIProviderConfigItem => ({
@@ -126,6 +152,8 @@ const createEmptyCliConfig = (index: number): LocalCliConfigItem => ({
   label: '',
   command: '',
   defaultArgs: [],
+  model: 'gpt-5.6-sol',
+  reasoningEffort: 'low',
   workingDirectory: '/Users/conchi/workforce/python_workforce/ai-task-center',
   timeoutSeconds: 300,
 });
@@ -177,6 +205,12 @@ export default function App() {
   const [selectedTables, setSelectedTables] = useState<string[]>([]);
   const [tableLoading, setTableLoading] = useState(false);
   const [savingTables, setSavingTables] = useState(false);
+  const [generatingResultId, setGeneratingResultId] = useState<number | null>(null);
+  const [runBatchModalOpen, setRunBatchModalOpen] = useState(false);
+  const [runBatchTask, setRunBatchTask] = useState<TaskConfig | null>(null);
+  const [runBatchForm] = Form.useForm();
+  const [generatingRunBatches, setGeneratingRunBatches] = useState(false);
+  const [taskTablePageSize, setTaskTablePageSize] = useState(10);
   const [taskFilters, setTaskFilters] = useState<{
     taskName?: string;
     projectId?: number;
@@ -192,14 +226,47 @@ export default function App() {
   const [selectedTaskRunIds, setSelectedTaskRunIds] = useState<number[]>([]);
   const [logModalOpen, setLogModalOpen] = useState(false);
   const [currentLogRun, setCurrentLogRun] = useState<TaskRun | null>(null);
+  const [currentLogResults, setCurrentLogResults] = useState<TaskResult[]>([]);
+  const [currentExecutions, setCurrentExecutions] = useState<TaskExecutionLog[]>([]);
+  const [promptModalOpen, setPromptModalOpen] = useState(false);
+  const [currentPromptRun, setCurrentPromptRun] = useState<TaskRun | null>(null);
+  const [currentPromptResults, setCurrentPromptResults] = useState<TaskResult[]>([]);
+  const [promptLoadingRunId, setPromptLoadingRunId] = useState<number | null>(null);
   const [taskRunStartForm] = Form.useForm();
   const [startingTaskRuns, setStartingTaskRuns] = useState(false);
+  const [taskRunTablePageSize, setTaskRunTablePageSize] = useState(10);
+  const executableSelectedTaskRunIds = useMemo(
+    () => selectedTaskRunIds.filter((id) => {
+      const run = taskRuns.find((item) => item.ID === id);
+      return run ? isTaskRunExecutable(run.status) : false;
+    }),
+    [selectedTaskRunIds, taskRuns],
+  );
+  const executableFilteredTaskRunIds = useMemo(
+    () => taskRuns
+      .filter((run) => run.ID && isTaskRunExecutable(run.status))
+      .map((run) => Number(run.ID)),
+    [taskRuns],
+  );
+  const startableTaskRunIds = selectedTaskRunIds.length > 0
+    ? executableSelectedTaskRunIds
+    : executableFilteredTaskRunIds;
+  const hasActiveTaskRuns = useMemo(
+    () => taskRuns.some((run) => ['QUEUED', 'RUNNING', 'RETRY_WAIT'].includes(run.status)),
+    [taskRuns],
+  );
 
   const [taskResultLoading, setTaskResultLoading] = useState(false);
   const [taskResults, setTaskResults] = useState<TaskResult[]>([]);
   const [taskResultSearchForm] = Form.useForm();
   const [resultDetailOpen, setResultDetailOpen] = useState(false);
   const [currentResult, setCurrentResult] = useState<TaskResult | null>(null);
+  const [processingResultId, setProcessingResultId] = useState<number | null>(null);
+  const [selectedTaskResultIds, setSelectedTaskResultIds] = useState<number[]>([]);
+  const [taskResultBatchOpen, setTaskResultBatchOpen] = useState(false);
+  const [taskResultBatchForm] = Form.useForm();
+  const [batchProcessingResults, setBatchProcessingResults] = useState(false);
+  const [taskResultTablePageSize, setTaskResultTablePageSize] = useState(10);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.ID === activeProjectId) || null,
@@ -263,6 +330,19 @@ export default function App() {
       void loadTaskResultPageData();
     }
   }, [activeModule]);
+
+  useEffect(() => {
+    if (activeModule !== 'taskRun' || !hasActiveTaskRuns) return undefined;
+    const timer = window.setInterval(() => {
+      void getTaskRuns(taskRunSearchForm.getFieldsValue())
+        .then((runList) => {
+          setTaskRuns(runList);
+          setSelectedTaskRunIds((current) => current.filter((id) => runList.some((run) => run.ID === id)));
+        })
+        .catch(() => undefined);
+    }, 3000);
+    return () => window.clearInterval(timer);
+  }, [activeModule, hasActiveTaskRuns, taskRunSearchForm]);
 
   useEffect(() => {
     if (activeTab === 'database') {
@@ -618,6 +698,8 @@ export default function App() {
         id: config.id.trim(),
         label: config.label.trim(),
         command: config.command.trim(),
+        model: config.model?.trim() || '',
+        reasoningEffort: config.reasoningEffort?.trim() || '',
         workingDirectory: config.workingDirectory.trim(),
         timeoutSeconds: Number(config.timeoutSeconds) || 300,
       })),
@@ -823,6 +905,64 @@ export default function App() {
     }
   };
 
+  // 函数：generateResultsForTask
+  const generateResultsForTask = (task: TaskConfig) => {
+    if (!task.ID) return;
+    modal.confirm({
+      title: '生成任务结果',
+      content: `将根据「${task.taskName}」的已选表生成任务结果。第一版仅支持 public.word_clean_sentence 评分任务，重复数据会自动跳过。`,
+      okText: '生成',
+      cancelText: '取消',
+      async onOk() {
+        setGeneratingResultId(task.ID!);
+        try {
+          const result = await generateTaskResults(task.ID!, false);
+          message.success(`生成完成：新增 ${result.insertedCount} 条，跳过 ${result.skippedCount} 条`);
+          await loadTaskResultPageData(taskResultSearchForm.getFieldsValue());
+        } catch (error) {
+          message.error(errorMessage(error, '生成任务结果失败'));
+        } finally {
+          setGeneratingResultId(null);
+        }
+      },
+    });
+  };
+
+  // 函数：openRunBatchModal
+  const openRunBatchModal = (task: TaskConfig) => {
+    if (!task.ID) return;
+    setRunBatchTask(task);
+    runBatchForm.setFieldsValue({
+      batchSize: 50,
+      cliId: task.cliId || activeCliId || cliConfigs[0]?.id,
+      taskNamePrefix: task.taskName,
+      includeFailed: false,
+    });
+    setRunBatchModalOpen(true);
+  };
+
+  // 函数：createRunBatches
+  const createRunBatches = async () => {
+    if (!runBatchTask?.ID) return;
+    const values = await runBatchForm.validateFields();
+    setGeneratingRunBatches(true);
+    try {
+      const result = await generateTaskRunBatches(runBatchTask.ID, {
+        batchSize: Number(values.batchSize) || 50,
+        cliId: values.cliId,
+        taskNamePrefix: values.taskNamePrefix || runBatchTask.taskName,
+        includeFailed: values.includeFailed === true,
+      });
+      message.success(`生成完成：创建 ${result.createdRunCount} 个批次，关联 ${result.linkedResultCount} 条结果`);
+      setRunBatchModalOpen(false);
+      await loadTaskRunPageData(taskRunSearchForm.getFieldsValue());
+    } catch (error) {
+      message.error(errorMessage(error, '生成执行批次失败'));
+    } finally {
+      setGeneratingRunBatches(false);
+    }
+  };
+
   const loadTaskRunPageData = async (filters?: {
     taskName?: string;
     projectId?: number;
@@ -863,14 +1003,35 @@ export default function App() {
 
   // 函数：openTaskRunStartModal
   const openTaskRunStartModal = () => {
-    if (selectedTaskRunIds.length === 0) {
-      message.warning('请选择要开始执行的任务记录');
+    if (startableTaskRunIds.length === 0) {
+      message.warning('当前查询结果中没有可执行或可调整并发的任务');
       return;
     }
+    const filteredCount = selectedTaskRunIds.length > 0
+      ? selectedTaskRunIds.length - executableSelectedTaskRunIds.length
+      : 0;
+    if (filteredCount > 0) {
+      message.info(`已过滤 ${filteredCount} 条成功任务`);
+    }
+    const currentWorkerCount = taskRuns
+      .filter((run) => run.ID && startableTaskRunIds.includes(run.ID))
+      .reduce((maximum, run) => Math.max(maximum, Number(run.requestedWorkerCount) || 0), 0);
     taskRunStartForm.setFieldsValue({
       cliId: activeCliId || cliConfigs[0]?.id,
       executionMode: 'thread',
-      workerCount: 1,
+      workerCount: currentWorkerCount || 1,
+    });
+    setTaskRunStartOpen(true);
+  };
+
+  // 函数：openSingleTaskRunStartModal
+  const openSingleTaskRunStartModal = (run: TaskRun) => {
+    if (!run.ID) return;
+    setSelectedTaskRunIds([run.ID]);
+    taskRunStartForm.setFieldsValue({
+      cliId: run.cliId || activeCliId || cliConfigs[0]?.id,
+      executionMode: 'thread',
+      workerCount: Number(run.requestedWorkerCount) || 1,
     });
     setTaskRunStartOpen(true);
   };
@@ -891,16 +1052,26 @@ export default function App() {
   // 函数：startSelectedTaskRuns
   const startSelectedTaskRuns = async () => {
     const values = await taskRunStartForm.validateFields();
+    if (startableTaskRunIds.length === 0) {
+      message.warning('没有可执行的任务');
+      return;
+    }
     setStartingTaskRuns(true);
     try {
-      await startTaskRuns({
-        taskRunIds: selectedTaskRunIds,
+      const response = await startTaskRuns({
+        taskRunIds: startableTaskRunIds,
         cliId: values.cliId,
         executionMode: values.executionMode,
         workerCount: Number(values.workerCount) || 1,
       });
-      message.success('任务已提交 Python Worker');
+      const queuedCount = Number(response?.queuedCount || 0);
+      message.success(
+        queuedCount > 0
+          ? `已入队 ${queuedCount} 条任务，并将相关调度组并发调整为 ${Number(values.workerCount) || 1}`
+          : `已将相关调度组并发调整为 ${Number(values.workerCount) || 1}`,
+      );
       setTaskRunStartOpen(false);
+      setSelectedTaskRunIds([]);
       await loadTaskRunPageData(taskRunSearchForm.getFieldsValue());
     } catch (error) {
       message.error(errorMessage(error, '开始执行失败'));
@@ -947,18 +1118,6 @@ export default function App() {
     });
   };
 
-  // 函数：retryRun
-  const retryRun = async (run: TaskRun) => {
-    if (!run.ID) return;
-    try {
-      await retryTaskRun(run.ID);
-      message.success('已创建重试任务');
-      await loadTaskRunPageData(taskRunSearchForm.getFieldsValue());
-    } catch (error) {
-      message.error(errorMessage(error, '重试任务失败'));
-    }
-  };
-
   // 函数：cancelRun
   const cancelRun = async (run: TaskRun) => {
     if (!run.ID) return;
@@ -975,17 +1134,36 @@ export default function App() {
   const showRunLog = async (run: TaskRun) => {
     if (!run.ID) return;
     try {
-      const data = await getTaskRunLog(run.ID);
-      setCurrentLogRun(data);
+      const data = await getTaskRunDetail(run.ID);
+      setCurrentLogRun(data.taskRun || run);
+      setCurrentLogResults(data.taskResults || []);
+      setCurrentExecutions(data.executions || []);
       setLogModalOpen(true);
     } catch (error) {
       message.error(errorMessage(error, '读取日志失败'));
     }
   };
 
+  // 函数：showRunPrompt
+  const showRunPrompt = async (run: TaskRun) => {
+    if (!run.ID) return;
+    setPromptLoadingRunId(run.ID);
+    try {
+      const data = await getTaskRunDetail(run.ID);
+      setCurrentPromptRun(data.taskRun || run);
+      setCurrentPromptResults(data.taskResults || []);
+      setPromptModalOpen(true);
+    } catch (error) {
+      message.error(errorMessage(error, '读取 AI 提示词失败'));
+    } finally {
+      setPromptLoadingRunId(null);
+    }
+  };
+
   const loadTaskResultPageData = async (filters?: {
     resultName?: string;
     projectId?: number;
+    taskConfigId?: number;
     status?: string;
   }) => {
     setTaskResultLoading(true);
@@ -1004,6 +1182,7 @@ export default function App() {
       setTaskConnections(connectionData.list || []);
       setProjects(projectList);
       setCliConfigs(cliConfig.configs || []);
+      setSelectedTaskResultIds((current) => current.filter((id) => resultList.some((result) => result.ID === id)));
     } catch (error) {
       message.error(errorMessage(error, '加载任务结果失败'));
     } finally {
@@ -1020,6 +1199,73 @@ export default function App() {
       setResultDetailOpen(true);
     } catch (error) {
       message.error(errorMessage(error, '读取任务结果失败'));
+    }
+  };
+
+  // 函数：processResult
+  const processResult = (result: TaskResult) => {
+    if (!result.ID) return;
+    const resultId = result.ID;
+    modal.confirm({
+      title: '执行评分并回填',
+      content: `将调用「${result.cliId || '未配置 CLI'}」处理「${result.resultName}」，成功后会回填源数据库并把最高分句子设为 TTS 待生成。`,
+      okText: '执行',
+      cancelText: '取消',
+      async onOk() {
+        setProcessingResultId(resultId);
+        try {
+          const response = await processTaskResult(resultId, result.cliId);
+          const summary = typeof response?.summary === 'string' ? response.summary : '任务结果处理完成';
+          message.success(summary);
+          await loadTaskResultPageData(taskResultSearchForm.getFieldsValue());
+          if (currentResult?.ID === resultId) {
+            const nextResult = await getTaskResult(resultId);
+            setCurrentResult(nextResult);
+          }
+        } catch (error) {
+          message.error(errorMessage(error, '执行评分回填失败'));
+          await loadTaskResultPageData(taskResultSearchForm.getFieldsValue());
+        } finally {
+          setProcessingResultId(null);
+        }
+      },
+    });
+  };
+
+  // 函数：openBatchProcessResults
+  const openBatchProcessResults = () => {
+    if (selectedTaskResultIds.length === 0) {
+      message.warning('请选择要批量执行的任务结果');
+      return;
+    }
+    taskResultBatchForm.setFieldsValue({
+      cliId: activeCliId || cliConfigs[0]?.id,
+      workerCount: 4,
+    });
+    setTaskResultBatchOpen(true);
+  };
+
+  // 函数：startBatchProcessResults
+  const startBatchProcessResults = async () => {
+    const values = await taskResultBatchForm.validateFields();
+    setBatchProcessingResults(true);
+    try {
+      const response = await batchProcessTaskResults({
+        taskResultIds: selectedTaskResultIds,
+        cliId: values.cliId,
+        workerCount: Number(values.workerCount) || 4,
+      });
+      const successCount = Number(response?.successCount || 0);
+      const failedCount = Number(response?.failedCount || 0);
+      message.success(`批量执行完成：成功 ${successCount} 条，失败 ${failedCount} 条`);
+      setTaskResultBatchOpen(false);
+      setSelectedTaskResultIds([]);
+      await loadTaskResultPageData(taskResultSearchForm.getFieldsValue());
+    } catch (error) {
+      message.error(errorMessage(error, '批量执行评分回填失败'));
+      await loadTaskResultPageData(taskResultSearchForm.getFieldsValue());
+    } finally {
+      setBatchProcessingResults(false);
     }
   };
 
@@ -1356,6 +1602,20 @@ export default function App() {
                         <Input className="mono" placeholder="exec" />
                       </Form.Item>
                     </Col>
+                    {isCodexCliConfig(selectedCliConfig) && (
+                      <>
+                        <Col xs={24} lg={12}>
+                          <Form.Item label="模型" name="model" rules={[{ required: true, message: '请选择 Codex 模型' }]}>
+                            <Select options={codexModelOptions} placeholder="请选择模型" />
+                          </Form.Item>
+                        </Col>
+                        <Col xs={24} lg={12}>
+                          <Form.Item label="推理强度" name="reasoningEffort" rules={[{ required: true, message: '请选择推理强度' }]}>
+                            <Select options={codexReasoningOptions} placeholder="请选择推理强度" />
+                          </Form.Item>
+                        </Col>
+                      </>
+                    )}
                     <Col xs={24} lg={16}>
                       <Form.Item label="默认工作目录" name="workingDirectory" rules={[{ required: true, message: '请填写默认工作目录' }]}>
                         <Input className="mono" placeholder="/Users/conchi/workforce/python_workforce/ai-task-center" />
@@ -1449,8 +1709,10 @@ export default function App() {
             onClick: () => setSelectedTaskId(record.ID || null),
           })}
           pagination={{
-            pageSize: 10,
+            pageSize: taskTablePageSize,
             showSizeChanger: true,
+            pageSizeOptions: tablePageSizeOptions,
+            onChange: (_, pageSize) => setTaskTablePageSize(pageSize),
             showTotal: (total) => `共 ${total} 条`,
           }}
           locale={{ emptyText: <Empty description="暂无任务配置" /> }}
@@ -1506,10 +1768,31 @@ export default function App() {
             {
               title: '操作',
               key: 'action',
-              width: 150,
+              width: 300,
               fixed: 'right',
               render: (_, record) => (
                 <Space split={<span className="table-action-split" />}>
+                  <Button
+                    type="link"
+                    size="small"
+                    loading={generatingResultId === record.ID}
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      generateResultsForTask(record);
+                    }}
+                  >
+                    生成结果
+                  </Button>
+                  <Button
+                    type="link"
+                    size="small"
+                    onClick={(event) => {
+                      event.stopPropagation();
+                      openRunBatchModal(record);
+                    }}
+                  >
+                    生成批次
+                  </Button>
                   <Button type="link" size="small" onClick={() => openTaskModal(record)}>
                     编辑
                   </Button>
@@ -1520,7 +1803,7 @@ export default function App() {
               ),
             },
           ]}
-          scroll={{ x: 1180 }}
+          scroll={{ x: 1360 }}
         />
       </Spin>
     </section>
@@ -1587,7 +1870,7 @@ export default function App() {
           <Button type="primary" icon={<PlusOutlined />} onClick={openTaskRunCreateModal}>
             新增任务
           </Button>
-          <Button icon={<RobotOutlined />} disabled={selectedTaskRunIds.length === 0} onClick={openTaskRunStartModal}>
+          <Button icon={<RobotOutlined />} disabled={startableTaskRunIds.length === 0} onClick={openTaskRunStartModal}>
             开始执行
           </Button>
           <Button danger icon={<DeleteOutlined />} disabled={selectedTaskRunIds.length === 0} onClick={removeSelectedTaskRuns}>
@@ -1608,8 +1891,10 @@ export default function App() {
             onChange: (keys) => setSelectedTaskRunIds(keys.map((key) => Number(key)).filter(Boolean)),
           }}
           pagination={{
-            pageSize: 10,
+            pageSize: taskRunTablePageSize,
             showSizeChanger: true,
+            pageSizeOptions: tablePageSizeOptions,
+            onChange: (_, pageSize) => setTaskRunTablePageSize(pageSize),
             showTotal: (total) => `共 ${total} 条`,
           }}
           locale={{ emptyText: <Empty description="暂无任务记录" /> }}
@@ -1626,6 +1911,22 @@ export default function App() {
               dataIndex: 'taskName',
               width: 220,
               render: (value: string) => <Text strong>{value}</Text>,
+            },
+            {
+              title: '状态',
+              dataIndex: 'status',
+              width: 130,
+              render: (value: TaskRunStatus) => renderTaskRunStatus(value),
+            },
+            {
+              title: '执行次数',
+              key: 'attempts',
+              width: 120,
+              render: (_, record) => (
+                record.attemptNo == null
+                  ? <Text type="secondary">-</Text>
+                  : `${record.attemptNo}/${record.maxAttempts || record.attemptNo + 3}`
+              ),
             },
             {
               title: '所属项目',
@@ -1657,10 +1958,19 @@ export default function App() {
               },
             },
             {
-              title: '状态',
-              dataIndex: 'status',
+              title: 'AI 提示词',
+              key: 'aiPrompt',
               width: 130,
-              render: (value: TaskRunStatus) => renderTaskRunStatus(value),
+              render: (_, record) => (
+                <Button
+                  type="link"
+                  size="small"
+                  loading={promptLoadingRunId === record.ID}
+                  onClick={() => void showRunPrompt(record)}
+                >
+                  查看
+                </Button>
+              ),
             },
             {
               title: '开始执行时间',
@@ -1689,21 +1999,28 @@ export default function App() {
             {
               title: '操作',
               key: 'action',
-              width: 220,
+              width: 280,
               fixed: 'right',
               render: (_, record) => (
                 <Space split={<span className="table-action-split" />}>
+                  {(record.status === 'PENDING' || record.status === 'CANCELLED') && (
+                    <Button type="link" size="small" onClick={() => openSingleTaskRunStartModal(record)}>
+                      执行
+                    </Button>
+                  )}
+                  {record.status === 'FAILED' && (
+                    <Button type="link" size="small" onClick={() => openSingleTaskRunStartModal(record)}>
+                      重试
+                    </Button>
+                  )}
                   <Button type="link" size="small" onClick={() => void showRunLog(record)}>
                     日志
                   </Button>
-                  {(record.status === 'PENDING' || record.status === 'RUNNING') && (
+                  {(['PENDING', 'QUEUED', 'RETRY_WAIT', 'RUNNING'] as TaskRunStatus[]).includes(record.status) && (
                     <Button type="link" size="small" onClick={() => void cancelRun(record)}>
                       取消
                     </Button>
                   )}
-                  <Button type="link" size="small" onClick={() => void retryRun(record)}>
-                    重试
-                  </Button>
                   <Button type="link" size="small" danger onClick={() => removeTaskRun(record)}>
                     删除
                   </Button>
@@ -1711,7 +2028,7 @@ export default function App() {
               ),
             },
           ]}
-          scroll={{ x: 1580 }}
+          scroll={{ x: 1770 }}
         />
       </Spin>
     </section>
@@ -1730,13 +2047,16 @@ export default function App() {
           <Form.Item label="结果名称" name="resultName">
             <Input allowClear placeholder="请输入结果名称" />
           </Form.Item>
-          <Form.Item label="所属项目" name="projectId">
+          <Form.Item label="任务配置" name="taskConfigId">
             <Select
               allowClear
               showSearch
-              placeholder="请选择项目"
+              placeholder="请选择任务配置"
               optionFilterProp="label"
-              options={projects.map((project) => ({ value: project.ID, label: project.projectName }))}
+              options={tasks.map((task) => ({
+                value: task.ID,
+                label: `${task.taskName} / ${projectMap.get(task.projectId) || '未找到项目'}`,
+              }))}
             />
           </Form.Item>
           <Form.Item label="状态" name="status">
@@ -1764,14 +2084,30 @@ export default function App() {
           </Form.Item>
         </Form>
       </div>
+      <div className="task-table-head">
+        <Space>
+          <Button icon={<RobotOutlined />} disabled={selectedTaskResultIds.length === 0} onClick={openBatchProcessResults}>
+            批量执行
+          </Button>
+          <Button icon={<ReloadOutlined />} onClick={() => void loadTaskResultPageData(taskResultSearchForm.getFieldsValue())}>
+            刷新
+          </Button>
+        </Space>
+      </div>
       <Spin spinning={taskResultLoading}>
         <Table<TaskResult>
           rowKey={(record) => String(record.ID)}
           dataSource={taskResults}
           className="task-table"
+          rowSelection={{
+            selectedRowKeys: selectedTaskResultIds,
+            onChange: (keys) => setSelectedTaskResultIds(keys.map((key) => Number(key))),
+          }}
           pagination={{
-            pageSize: 10,
+            pageSize: taskResultTablePageSize,
             showSizeChanger: true,
+            pageSizeOptions: tablePageSizeOptions,
+            onChange: (_, pageSize) => setTaskResultTablePageSize(pageSize),
             showTotal: (total) => `共 ${total} 条`,
           }}
           locale={{ emptyText: <Empty description="暂无任务结果" /> }}
@@ -1797,9 +2133,30 @@ export default function App() {
             },
             {
               title: '关联任务',
-              dataIndex: 'taskRunId',
-              width: 130,
-              render: (value?: number) => value ? <Tag color="blue">#{value}</Tag> : <Text type="secondary">未关联</Text>,
+              key: 'relatedTaskRuns',
+              width: 230,
+              render: (_, record) => {
+                const relatedRuns = record.relatedTaskRuns || [];
+                if (relatedRuns.length === 0) {
+                  return record.taskRunId
+                    ? <Tag color="blue">#{record.taskRunId}</Tag>
+                    : <Text type="secondary">未关联</Text>;
+                }
+                return (
+                  <Space size={[4, 4]} wrap>
+                    {relatedRuns.slice(0, 2).map((run) => (
+                      <Tag
+                        key={run.ID}
+                        color={taskRunStatusColor(run.status)}
+                        title={`#${run.ID} ${run.taskName} / ${taskRunStatusLabel(run.status)}`}
+                      >
+                        {taskRunReferenceLabel(run.ID, run.taskName)}
+                      </Tag>
+                    ))}
+                    {relatedRuns.length > 2 && <Tag>+{relatedRuns.length - 2}</Tag>}
+                  </Space>
+                );
+              },
             },
             {
               title: '数据源',
@@ -1845,10 +2202,18 @@ export default function App() {
             {
               title: '操作',
               key: 'action',
-              width: 150,
+              width: 210,
               fixed: 'right',
               render: (_, record) => (
                 <Space split={<span className="table-action-split" />}>
+                  <Button
+                    type="link"
+                    size="small"
+                    loading={processingResultId === record.ID}
+                    onClick={() => processResult(record)}
+                  >
+                    执行
+                  </Button>
                   <Button type="link" size="small" onClick={() => void showTaskResultDetail(record)}>
                     详情
                   </Button>
@@ -1859,11 +2224,17 @@ export default function App() {
               ),
             },
           ]}
-          scroll={{ x: 1460 }}
+          scroll={{ x: 1520 }}
         />
       </Spin>
     </section>
   );
+
+  const resultDetailPayload = parseResultPayload(currentResult?.resultContent);
+  const resultAiPrompt = extractResultAiPrompt(resultDetailPayload, currentResult?.resultContent);
+  const resultAiResponseText = formatResultAiResponse(resultDetailPayload);
+  const resultWriteBackText = formatResultWriteBack(resultDetailPayload);
+  const currentBatchAiPrompt = buildTaskRunBatchAiPrompt(currentPromptRun, currentPromptResults);
 
   return (
     <Layout className="app-shell">
@@ -2098,6 +2469,52 @@ export default function App() {
       </Modal>
 
       <Modal
+        title="生成执行批次"
+        open={runBatchModalOpen}
+        onCancel={() => setRunBatchModalOpen(false)}
+        onOk={() => void createRunBatches()}
+        okText="生成批次"
+        cancelText="取消"
+        width={720}
+        confirmLoading={generatingRunBatches}
+      >
+        <Form layout="vertical" form={runBatchForm}>
+          <div className="table-picker-meta">
+            <Text strong>{runBatchTask?.taskName || '未选择任务配置'}</Text>
+            <Text type="secondary">默认只将待处理任务结果拆分成执行批次，成功结果不会加入批次。</Text>
+          </div>
+          <Row gutter={16}>
+            <Col xs={24} md={12}>
+              <Form.Item label="每个批次数量" name="batchSize" rules={[{ required: true, message: '请填写每批数量' }]}>
+                <InputNumber min={1} max={1000} className="full-field" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="失败结果" name="includeFailed" valuePropName="checked">
+                <Switch checkedChildren="包含失败结果" unCheckedChildren="只处理待处理" />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Form.Item label="默认执行 CLI" name="cliId" rules={[{ required: true, message: '请选择执行 CLI' }]}>
+            <Select
+              showSearch
+              placeholder="选择 Codex 或 Antigravity"
+              optionFilterProp="label"
+              options={cliConfigs
+                .filter((config) => config.enabled)
+                .map((config) => ({ value: config.id, label: config.label || config.id }))}
+            />
+          </Form.Item>
+          <Form.Item label="任务名称前缀" name="taskNamePrefix" rules={[{ required: true, message: '请填写任务名称前缀' }]}>
+            <Input placeholder="单词评分任务" />
+          </Form.Item>
+          <Text type="secondary">
+            生成后可到任务列表选择这些批次开始执行，执行时仍可调整 CLI 和并发数量。
+          </Text>
+        </Form>
+      </Modal>
+
+      <Modal
         title="选择数据表"
         open={tableModalOpen}
         onCancel={() => setTableModalOpen(false)}
@@ -2190,22 +2607,79 @@ export default function App() {
               <Form.Item label="执行方式" name="executionMode" rules={[{ required: true, message: '请选择执行方式' }]}>
                 <Select
                   options={[
-                    { value: 'thread', label: '多线程' },
-                    { value: 'process', label: '多进程' },
+                    { value: 'thread', label: '多线程（独立 CLI 子进程）' },
                   ]}
                 />
               </Form.Item>
             </Col>
             <Col xs={24} md={12}>
               <Form.Item label="线程/进程数量" name="workerCount" rules={[{ required: true, message: '请填写数量' }]}>
-                <InputNumber min={1} max={32} className="full-field" />
+                <InputNumber min={1} max={8} className="full-field" />
               </Form.Item>
             </Col>
           </Row>
           <Text type="secondary">
-            将提交 {selectedTaskRunIds.length} 条任务给 Python Worker，Worker 会根据这里选择的 CLI 和并发数量决定执行方式。
+            {selectedTaskRunIds.length === 0
+              ? `将处理当前查询结果中的 ${startableTaskRunIds.length} 条任务：新任务进入队列，已入队任务调整并发`
+              : `将处理已勾选的 ${startableTaskRunIds.length} 条任务：新任务进入队列，已入队任务调整并发`}
+            {selectedTaskRunIds.length > executableSelectedTaskRunIds.length
+              ? `，已过滤 ${selectedTaskRunIds.length - executableSelectedTaskRunIds.length} 条成功任务`
+              : ''}
+            。并发按调度组统一更新，正在执行的任务不会中断，Python Worker 会自动补足并发。
           </Text>
         </Form>
+      </Modal>
+
+      <Modal
+        title="批量执行任务结果"
+        open={taskResultBatchOpen}
+        onCancel={() => setTaskResultBatchOpen(false)}
+        onOk={() => void startBatchProcessResults()}
+        okText="开始执行"
+        cancelText="取消"
+        width={680}
+        confirmLoading={batchProcessingResults}
+      >
+        <Form layout="vertical" form={taskResultBatchForm}>
+          <Form.Item label="执行 CLI" name="cliId" rules={[{ required: true, message: '请选择执行 CLI' }]}>
+            <Select
+              showSearch
+              placeholder="选择 Codex 或 Antigravity"
+              optionFilterProp="label"
+              options={cliConfigs
+                .filter((config) => config.enabled)
+                .map((config) => ({ value: config.id, label: config.label || config.id }))}
+            />
+          </Form.Item>
+          <Form.Item label="并发数量" name="workerCount" rules={[{ required: true, message: '请填写并发数量' }]}>
+            <InputNumber min={1} max={32} className="full-field" />
+          </Form.Item>
+          <Text type="secondary">
+            将并发调用 CLI 处理 {selectedTaskResultIds.length} 条任务结果，全部通过校验后按源数据库分组批量回填。
+          </Text>
+        </Form>
+      </Modal>
+
+      <Modal
+        title="批次 AI 提示词"
+        open={promptModalOpen}
+        onCancel={() => setPromptModalOpen(false)}
+        footer={<Button onClick={() => setPromptModalOpen(false)}>关闭</Button>}
+        width={980}
+      >
+        <Space direction="vertical" size={12} className="full-field">
+          <div className="table-picker-meta">
+            <Text strong>{currentPromptRun?.taskName || '未选择任务'}</Text>
+            <Text type="secondary">
+              批次 ID：{currentPromptRun?.ID || '-'}
+              {' / '}
+              任务结果：{currentPromptResults.length} 条
+              {' / '}
+              执行工具：{currentPromptRun ? cliMap.get(currentPromptRun.cliId) || currentPromptRun.cliId : '-'}
+            </Text>
+          </div>
+          <pre className="task-log-box batch-prompt-box">{currentBatchAiPrompt}</pre>
+        </Space>
       </Modal>
 
       <Modal
@@ -2218,9 +2692,85 @@ export default function App() {
         <Space direction="vertical" size={12} className="full-field">
           <div className="table-picker-meta">
             <Text strong>{currentLogRun?.taskName || '未选择任务'}</Text>
-            <Text type="secondary">状态：{currentLogRun ? taskRunStatusLabel(currentLogRun.status) : '-'}</Text>
+            <Text type="secondary">
+              最近状态：{currentLogRun ? taskRunStatusLabel(currentLogRun.status) : '-'} / 共 {currentExecutions.length} 次执行
+            </Text>
           </div>
-          <pre className="task-log-box">{currentLogRun?.runLog || '暂无日志'}</pre>
+          {currentExecutions.length > 0 ? (
+            <Collapse
+              className="result-collapse"
+              defaultActiveKey={[String(currentExecutions[0]?.ID)]}
+              items={currentExecutions.map((execution) => ({
+                key: String(execution.ID || execution.attemptNo),
+                label: (
+                  <Space wrap>
+                    <Text strong>第 {execution.attemptNo} 次执行</Text>
+                    <Tag color={taskRunStatusColor(execution.status)}>{taskRunStatusLabel(execution.status)}</Tag>
+                    <Text type="secondary">{cliMap.get(execution.cliId) || execution.cliId}</Text>
+                    <Text type="secondary">{formatDateTime(execution.startTime)}</Text>
+                    <Text type="secondary">{execution.durationSeconds ?? '-'} 秒</Text>
+                  </Space>
+                ),
+                children: (
+                  <Space direction="vertical" size={12} className="full-field">
+                    {execution.reason && <Text type="secondary">执行结果：{execution.reason}</Text>}
+                    <pre className="task-log-box">{execution.runLog || '暂无日志'}</pre>
+                    {execution.aiPromptJson && (
+                      <div className="result-detail-section">
+                        <Text strong>发送给 AI 的 JSON</Text>
+                        <pre className="task-log-box result-detail-code">{formatJsonText(execution.aiPromptJson)}</pre>
+                      </div>
+                    )}
+                    {execution.aiResponseJson && (
+                      <div className="result-detail-section">
+                        <Text strong>AI 响应 JSON</Text>
+                        <pre className="task-log-box result-detail-code">{formatJsonText(execution.aiResponseJson)}</pre>
+                      </div>
+                    )}
+                  </Space>
+                ),
+              }))}
+            />
+          ) : (
+            <Text type="secondary">暂无执行记录。</Text>
+          )}
+          {currentLogResults.length > 0 ? (
+            <Collapse
+              className="result-collapse"
+              items={currentLogResults.map((result) => {
+                const payload = parseResultPayload(result.resultContent);
+                return {
+                  key: String(result.ID || result.resultName),
+                  label: (
+                    <Space>
+                      <Text strong>{result.resultName}</Text>
+                      <Tag>{taskResultStatusLabel(result.status)}</Tag>
+                    </Space>
+                  ),
+                  children: (
+                    <Space direction="vertical" size={12} className="full-field">
+                      <div className="result-detail-section">
+                        <Text strong>AI 评分提示词</Text>
+                        <pre className="task-log-box result-detail-code">
+                          {extractResultAiPrompt(payload, result.resultContent)}
+                        </pre>
+                      </div>
+                      <div className="result-detail-section">
+                        <Text strong>AI 响应结果</Text>
+                        <pre className="task-log-box result-detail-code">{formatResultAiResponse(payload)}</pre>
+                      </div>
+                      <div className="result-detail-section">
+                        <Text strong>回填源数据库详情</Text>
+                        <pre className="task-log-box result-detail-code">{formatResultWriteBack(payload)}</pre>
+                      </div>
+                    </Space>
+                  ),
+                };
+              })}
+            />
+          ) : (
+            <Text type="secondary">暂无关联任务结果。</Text>
+          )}
         </Space>
       </Modal>
 
@@ -2229,7 +2779,7 @@ export default function App() {
         open={resultDetailOpen}
         onCancel={() => setResultDetailOpen(false)}
         footer={<Button onClick={() => setResultDetailOpen(false)}>关闭</Button>}
-        width={860}
+        width={980}
       >
         <Space direction="vertical" size={12} className="full-field">
           <div className="table-picker-meta">
@@ -2255,7 +2805,18 @@ export default function App() {
               <Text type="danger">{currentResult.errorMessage}</Text>
             </div>
           )}
-          <pre className="task-log-box">{currentResult?.resultContent || '暂无结果内容'}</pre>
+          <div className="result-detail-section">
+            <Text strong>AI 评分提示词</Text>
+            <pre className="task-log-box result-detail-code">{resultAiPrompt}</pre>
+          </div>
+          <div className="result-detail-section">
+            <Text strong>AI 响应结果</Text>
+            <pre className="task-log-box result-detail-code">{resultAiResponseText}</pre>
+          </div>
+          <div className="result-detail-section">
+            <Text strong>回填源数据库详情</Text>
+            <pre className="task-log-box result-detail-code">{resultWriteBackText}</pre>
+          </div>
         </Space>
       </Modal>
     </Layout>
@@ -2288,10 +2849,17 @@ function validateCliConfigs(configs: LocalCliConfigItem[], active: string) {
     if (ids.has(id)) return `CLI 配置 ID「${id}」重复`;
     ids.add(id);
     if (!config.command.trim()) return `请填写「${id}」的命令路径`;
+    if (isCodexCliConfig(config) && !config.model?.trim()) return `请选择「${id}」的 Codex 模型`;
+    if (isCodexCliConfig(config) && !config.reasoningEffort?.trim()) return `请选择「${id}」的推理强度`;
     if (!config.workingDirectory.trim()) return `请填写「${id}」的默认工作目录`;
   }
   if (!ids.has(active)) return '请选择默认 CLI 配置';
   return '';
+}
+
+// 函数：isCodexCliConfig
+function isCodexCliConfig(config: LocalCliConfigItem) {
+  return config.id.trim().toLowerCase() === 'codex' || config.command.trim().toLowerCase().includes('codex');
 }
 
 // 函数：errorMessage
@@ -2318,10 +2886,26 @@ function taskRunStatusLabel(status: TaskRunStatus) {
   return taskRunStatusOptions.find((item) => item.value === status)?.label || status;
 }
 
+// 函数：taskRunReferenceLabel
+function taskRunReferenceLabel(id: number, taskName: string) {
+  const segments = taskName.split(' - ');
+  const suffix = segments.length > 1 ? segments[segments.length - 1] : taskName;
+  return `#${id} ${suffix}`;
+}
+
+// 函数：isTaskRunExecutable
+function isTaskRunExecutable(status: TaskRunStatus) {
+  return ['PENDING', 'FAILED', 'CANCELLED', 'QUEUED', 'RETRY_WAIT', 'RUNNING'].includes(status);
+}
+
+// 函数：taskRunStatusColor
+function taskRunStatusColor(status: TaskRunStatus) {
+  return taskRunStatusOptions.find((item) => item.value === status)?.color || 'default';
+}
+
 // 函数：renderTaskRunStatus
 function renderTaskRunStatus(status: TaskRunStatus) {
-  const option = taskRunStatusOptions.find((item) => item.value === status);
-  return <Tag color={option?.color || 'default'}>{option?.label || status}</Tag>;
+  return <Tag color={taskRunStatusColor(status)}>{taskRunStatusLabel(status)}</Tag>;
 }
 
 // 函数：taskResultStatusLabel
@@ -2333,6 +2917,166 @@ function taskResultStatusLabel(status: TaskResultStatus) {
 function renderTaskResultStatus(status: TaskResultStatus) {
   const option = taskResultStatusOptions.find((item) => item.value === status);
   return <Tag color={option?.color || 'default'}>{option?.label || status}</Tag>;
+}
+
+// 函数：parseResultPayload
+function parseResultPayload(value?: string) {
+  if (!value) return null;
+  try {
+    const parsed = JSON.parse(value);
+    return isPlainRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// 函数：extractResultAiPrompt
+function extractResultAiPrompt(payload: Record<string, unknown> | null, raw?: string) {
+  const aiPrompt = payload?.aiPrompt;
+  if (typeof aiPrompt === 'string' && aiPrompt.trim()) {
+    return aiPrompt;
+  }
+  return raw || '暂无 AI 评分提示词';
+}
+
+// 函数：buildTaskRunBatchAiPrompt
+function buildTaskRunBatchAiPrompt(run: TaskRun | null, results: TaskResult[]) {
+  if (!run) {
+    return '暂无批次 AI 提示词';
+  }
+  if (run.aiPromptJson?.trim()) {
+    return formatJsonText(run.aiPromptJson);
+  }
+  if (results.length === 0) {
+    return formatJsonText({
+      taskType: 'word_clean_sentence_score_batch',
+      version: 1,
+      batch: {
+        taskName: run.taskName,
+        cliId: run.cliId,
+        selectedTables: run.selectedTables || '',
+        resultCount: 0,
+      },
+      items: [],
+    });
+  }
+  return formatJsonText({
+    taskType: 'word_clean_sentence_score_batch',
+    version: 1,
+    batch: {
+      taskName: run.taskName,
+      cliId: run.cliId,
+      selectedTables: run.selectedTables || '',
+      resultCount: results.length,
+    },
+    instructions: [
+      '你是英语例句质量评审助手。',
+      '请为 items 中每一个任务结果独立评分。',
+      '请只返回 JSON，不要返回 Markdown、解释性文字或数据库 ID。',
+      '返回 items 必须覆盖输入中的全部 itemKey。',
+    ],
+    rules: {
+      scoreMin: 1,
+      scoreMax: 100,
+      uniqueScorePerItem: true,
+      returnOnlyJson: true,
+      doNotReturnDatabaseIds: true,
+    },
+    items: results.map((result, index) => {
+      const payload = parseResultPayload(result.resultContent);
+      const writeBack = isPlainRecord(payload?.writeBack) ? payload.writeBack : null;
+      const candidateMap = isPlainRecord(writeBack?.candidateMap) ? writeBack.candidateMap : {};
+      return {
+        itemKey: batchItemKey(index),
+        taskType: 'word_clean_sentence_score',
+        word: promptSafeText(String(payload?.word || writeBack?.word || '')),
+        sourceTable: String(payload?.sourceTable || writeBack?.sourceTable || ''),
+        candidates: Object.entries(candidateMap).map(([candidate, value]) => {
+          const source = isPlainRecord(value) ? value : {};
+          return {
+            candidate,
+            modelName: promptSafeText(String(source.modelName || '')),
+            sentence: promptSafeText(String(source.sentence || '')),
+            sentenceTranslation: promptSafeText(String(source.sentenceTranslation || '')),
+          };
+        }),
+      };
+    }),
+    responseSchema: {
+      items: results.map((_, index) => ({
+        itemKey: batchItemKey(index),
+        scores: [{ candidate: 'A', score: 95, reason: '简短原因' }],
+        bestCandidate: 'A',
+      })),
+    },
+  });
+}
+
+// 函数：batchItemKey
+function batchItemKey(index: number) {
+  let value = index;
+  let label = '';
+  while (value >= 0) {
+    label = String.fromCharCode(65 + (value % 26)) + label;
+    value = Math.floor(value / 26) - 1;
+  }
+  return `item_${label}`;
+}
+
+// 函数：formatJsonText
+function formatJsonText(value: unknown) {
+  if (typeof value === 'string') {
+    try {
+      return JSON.stringify(JSON.parse(value), null, 2);
+    } catch {
+      return value || '暂无 JSON 内容';
+    }
+  }
+  return JSON.stringify(value, null, 2);
+}
+
+// 函数：promptSafeText
+function promptSafeText(value: string) {
+  return value
+    .replace(/0/g, '零')
+    .replace(/1/g, '一')
+    .replace(/2/g, '二')
+    .replace(/3/g, '三')
+    .replace(/4/g, '四')
+    .replace(/5/g, '五')
+    .replace(/6/g, '六')
+    .replace(/7/g, '七')
+    .replace(/8/g, '八')
+    .replace(/9/g, '九');
+}
+
+// 函数：formatResultAiResponse
+function formatResultAiResponse(payload: Record<string, unknown> | null) {
+  const rawOutput = payload?.aiRawOutput;
+  if (typeof rawOutput === 'string' && rawOutput.trim()) {
+    return rawOutput;
+  }
+  const aiResult = payload?.aiResult;
+  if (aiResult) {
+    return JSON.stringify(aiResult, null, 2);
+  }
+  return '暂无 AI 响应结果';
+}
+
+// 函数：formatResultWriteBack
+function formatResultWriteBack(payload: Record<string, unknown> | null) {
+  const writeBack = payload?.writeBack;
+  if (!writeBack) return '暂无回填源数据库详情';
+  const detail: Record<string, unknown> = { writeBack };
+  if (payload?.aiResult) detail.aiResult = payload.aiResult;
+  if (payload?.backfillResult) detail.backfillResult = payload.backfillResult;
+  if (payload?.execution) detail.execution = payload.execution;
+  return JSON.stringify(detail, null, 2);
+}
+
+// 函数：isPlainRecord
+function isPlainRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
 }
 
 // 函数：parseSelectedTables

@@ -20,3 +20,11 @@ dist/
 *.iml
 .env
 *.log
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+
+# Runtime
+.runtime/

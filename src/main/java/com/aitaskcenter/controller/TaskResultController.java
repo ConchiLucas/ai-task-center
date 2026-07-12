@@ -1,10 +1,12 @@
 package com.aitaskcenter.controller;
 
 import com.aitaskcenter.dto.ApiResponse;
+import com.aitaskcenter.dto.BatchProcessTaskResultRequest;
 import com.aitaskcenter.dto.DeleteByIdRequest;
 import com.aitaskcenter.model.TaskResult;
 import com.aitaskcenter.service.TaskResultService;
 import java.util.List;
+import java.util.Map;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -29,14 +31,29 @@ public class TaskResultController {
     public ApiResponse<List<TaskResult>> list(
             @RequestParam(required = false) String resultName,
             @RequestParam(required = false) Long projectId,
+            @RequestParam(required = false) Long taskConfigId,
             @RequestParam(required = false) String status) {
-        return ApiResponse.ok(service.list(resultName, projectId, status));
+        return ApiResponse.ok(service.list(resultName, projectId, taskConfigId, status));
     }
 
     @GetMapping("/{id}")
     // 方法：get
     public ApiResponse<TaskResult> get(@PathVariable Long id) {
         return ApiResponse.ok(service.get(id));
+    }
+
+    @PostMapping("/{id}/process")
+    // 方法：process
+    public ApiResponse<Map<String, Object>> process(
+            @PathVariable Long id,
+            @RequestParam(required = false) String cliId) {
+        return ApiResponse.ok(service.process(id, cliId), "任务结果处理完成");
+    }
+
+    @PostMapping("/batch-process")
+    // 方法：batchProcess
+    public ApiResponse<Map<String, Object>> batchProcess(@RequestBody BatchProcessTaskResultRequest request) {
+        return ApiResponse.ok(service.processBatch(request), "任务结果批量处理完成");
     }
 
     @PostMapping("/create")

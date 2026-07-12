@@ -8,19 +8,25 @@
 
 已去掉左侧“服务器配置”。
 
-## 启动 PostgreSQL
+## PostgreSQL
 
-```bash
-docker compose up -d postgres
-```
+默认使用本地已有 PostgreSQL，不需要为本项目单独启动 Docker 容器。
 
-默认连接信息与 `.env.example` 一致：
+默认连接信息：
 
 ```text
-jdbc:postgresql://localhost:55432/ai_task_center
+jdbc:postgresql://localhost:5432/ai_task_center
 user: conchi
 password: conchi123456
 ```
+
+## 一键启动
+
+```bash
+./scripts/start-dev.sh
+```
+
+脚本会启动 Java 后端、Python Worker 和 React 前端。PostgreSQL 只检查本地已有服务，不会新启动 Docker 容器。
 
 ## 启动后端
 

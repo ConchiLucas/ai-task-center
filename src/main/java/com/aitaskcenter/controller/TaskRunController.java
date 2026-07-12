@@ -52,7 +52,7 @@ public class TaskRunController {
     @PostMapping("/{id}/retry")
     // 方法：retry
     public ApiResponse<TaskRun> retry(@PathVariable Long id) {
-        return ApiResponse.ok(service.retry(id), "已创建重试任务");
+        return ApiResponse.ok(service.retry(id), "已恢复为待执行");
     }
 
     @PostMapping("/{id}/cancel")
@@ -65,6 +65,12 @@ public class TaskRunController {
     // 方法：log
     public ApiResponse<TaskRun> log(@PathVariable Long id) {
         return ApiResponse.ok(service.get(id));
+    }
+
+    @GetMapping("/{id}/detail")
+    // 方法：detail
+    public ApiResponse<Map<String, Object>> detail(@PathVariable Long id) {
+        return ApiResponse.ok(service.detail(id));
     }
 
     @DeleteMapping("/delete")

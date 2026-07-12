@@ -383,6 +383,22 @@ body {
   white-space: pre-wrap;
 }
 
+.result-detail-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.result-detail-code {
+  min-height: 160px;
+  max-height: 320px;
+}
+
+.batch-prompt-box {
+  min-height: 520px;
+  max-height: 68vh;
+}
+
 @media (max-width: 920px) {
   .app-shell {
     display: block;

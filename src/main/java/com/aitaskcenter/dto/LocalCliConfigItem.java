@@ -7,8 +7,12 @@ public class LocalCliConfigItem {
     private boolean enabled = true;
     private String id = "codex";
     private String label = "Codex CLI";
-    private String command = "/usr/local/bin/codex";
+    private String command = "/opt/homebrew/bin/codex";
     private List<String> defaultArgs = new ArrayList<>(List.of("exec"));
+    // 字段：Codex CLI 显式使用的模型
+    private String model = "";
+    // 字段：Codex CLI 模型推理强度
+    private String reasoningEffort = "";
     private String workingDirectory = "/Users/conchi/workforce/python_workforce/ai-task-center";
     private Integer timeoutSeconds = 300;
     private boolean active;
@@ -61,6 +65,26 @@ public class LocalCliConfigItem {
     // 方法：setDefaultArgs
     public void setDefaultArgs(List<String> defaultArgs) {
         this.defaultArgs = defaultArgs;
+    }
+
+    // 方法：getModel
+    public String getModel() {
+        return model;
+    }
+
+    // 方法：setModel
+    public void setModel(String model) {
+        this.model = model;
+    }
+
+    // 方法：getReasoningEffort
+    public String getReasoningEffort() {
+        return reasoningEffort;
+    }
+
+    // 方法：setReasoningEffort
+    public void setReasoningEffort(String reasoningEffort) {
+        this.reasoningEffort = reasoningEffort;
     }
 
     // 方法：getWorkingDirectory

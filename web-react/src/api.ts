@@ -59,6 +59,8 @@ export interface LocalCliConfigItem {
   label: string;
   command: string;
   defaultArgs: string[];
+  model?: string;
+  reasoningEffort?: string;
   workingDirectory: string;
   timeoutSeconds: number;
   active?: boolean;
@@ -81,7 +83,7 @@ export interface TaskConfig {
   UpdatedAt?: string;
 }
 
-export type TaskRunStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED' | 'CANCELLED';
+export type TaskRunStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'RETRY_WAIT' | 'SUCCESS' | 'FAILED' | 'CANCELLED';
 export type TaskResultStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED';
 
 export interface TaskRun {
@@ -99,8 +101,26 @@ export interface TaskRun {
   reason?: string;
   logPath?: string;
   runLog?: string;
+  aiPromptJson?: string;
+  aiResponseJson?: string;
+  executionMode?: string;
+  requestedWorkerCount?: number;
+  dispatchGroupId?: string;
+  attemptNo?: number;
+  maxAttempts?: number;
+  nextRetryAt?: string;
+  leaseUntil?: string;
+  workerId?: string;
+  heartbeatAt?: string;
+  expectedResultCount?: number;
   CreatedAt?: string;
   UpdatedAt?: string;
+}
+
+export interface TaskRunReference {
+  ID: number;
+  taskName: string;
+  status: TaskRunStatus;
 }
 
 export interface TaskResult {
@@ -119,13 +139,71 @@ export interface TaskResult {
   errorMessage?: string;
   parsedAt?: string;
   completedAt?: string;
+  relatedTaskRuns?: TaskRunReference[];
   CreatedAt?: string;
   UpdatedAt?: string;
 }
 
+export interface TaskRunResultLink {
+  ID?: number;
+  taskRunId: number;
+  taskResultId: number;
+  status: TaskResultStatus | TaskRunStatus | string;
+  errorMessage?: string;
+  CreatedAt?: string;
+  UpdatedAt?: string;
+}
+
+export interface TaskExecutionLog {
+  ID?: number;
+  taskRunId: number;
+  attemptNo: number;
+  cliId: string;
+  executionMode: string;
+  workerCount: number;
+  status: TaskRunStatus;
+  startTime?: string;
+  endTime?: string;
+  durationSeconds?: number;
+  reason?: string;
+  runLog?: string;
+  aiPromptJson?: string;
+  aiResponseJson?: string;
+  CreatedAt?: string;
+  UpdatedAt?: string;
+}
+
+export interface TaskRunDetail {
+  taskRun: TaskRun;
+  links: TaskRunResultLink[];
+  taskResults: TaskResult[];
+  executions: TaskExecutionLog[];
+}
+
+export interface GenerateTaskResultsResponse {
+  accepted: boolean;
+  mode: string;
+  taskConfigId: number;
+  sourceTable: string;
+  scriptPath: string;
+  totalGroups: number;
+  insertedCount: number;
+  skippedCount: number;
+  deletedCount: number;
+  overwrite: boolean;
+}
+
+export interface GenerateTaskRunBatchesResponse {
+  createdRunCount: number;
+  linkedResultCount: number;
+  batchSize: number;
+  statusCount?: number;
+  message?: string;
+}
+
 const request = axios.create({
   baseURL: import.meta.env.VITE_API_BASE || 'http://127.0.0.1:18743/api',
-  timeout: 10000,
+  timeout: 120000,
 });
 
 request.interceptors.response.use((response) => {
@@ -255,6 +333,25 @@ export async function deleteTaskConfig(id: number) {
   await request.delete<ApiResponse<void>>('/task/deleteTaskConfig', { data: { ID: id } });
 }
 
+// 函数：generateTaskResults
+export async function generateTaskResults(id: number, overwrite = false) {
+  const res = await request.post<ApiResponse<GenerateTaskResultsResponse>>(`/task/${id}/generate-results`, null, {
+    params: { overwrite },
+  });
+  return res.data.data;
+}
+
+// 函数：generateTaskRunBatches
+export async function generateTaskRunBatches(id: number, data: {
+  batchSize: number;
+  cliId: string;
+  taskNamePrefix: string;
+  includeFailed: boolean;
+}) {
+  const res = await request.post<ApiResponse<GenerateTaskRunBatchesResponse>>(`/task/${id}/generate-run-batches`, data);
+  return res.data.data;
+}
+
 // 函数：getTaskRuns
 export async function getTaskRuns(params?: {
   taskName?: string;
@@ -301,6 +398,12 @@ export async function getTaskRunLog(id: number) {
   return res.data.data;
 }
 
+// 函数：getTaskRunDetail
+export async function getTaskRunDetail(id: number) {
+  const res = await request.get<ApiResponse<TaskRunDetail>>(`/task-run/${id}/detail`);
+  return res.data.data;
+}
+
 // 函数：deleteTaskRun
 export async function deleteTaskRun(id: number) {
   await request.delete<ApiResponse<void>>('/task-run/delete', { data: { ID: id } });
@@ -315,6 +418,7 @@ export async function batchDeleteTaskRuns(ids: number[]) {
 export async function getTaskResults(params?: {
   resultName?: string;
   projectId?: number;
+  taskConfigId?: number;
   status?: string;
 }) {
   const res = await request.get<ApiResponse<TaskResult[]>>('/task-result/list', { params });
@@ -324,6 +428,24 @@ export async function getTaskResults(params?: {
 // 函数：getTaskResult
 export async function getTaskResult(id: number) {
   const res = await request.get<ApiResponse<TaskResult>>(`/task-result/${id}`);
+  return res.data.data;
+}
+
+// 函数：processTaskResult
+export async function processTaskResult(id: number, cliId?: string) {
+  const res = await request.post<ApiResponse<Record<string, unknown>>>(`/task-result/${id}/process`, null, {
+    params: { cliId },
+  });
+  return res.data.data;
+}
+
+// 函数：batchProcessTaskResults
+export async function batchProcessTaskResults(data: {
+  taskResultIds: number[];
+  cliId: string;
+  workerCount: number;
+}) {
+  const res = await request.post<ApiResponse<Record<string, unknown>>>('/task-result/batch-process', data);
   return res.data.data;
 }
 
