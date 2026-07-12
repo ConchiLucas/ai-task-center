@@ -399,6 +399,133 @@ body {
   max-height: 68vh;
 }
 
+.task-onboarding-drawer .ant-drawer-body {
+  padding: 20px 24px;
+}
+
+.onboarding-content {
+  min-width: 0;
+}
+
+.onboarding-task-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-bottom: 20px;
+}
+
+.onboarding-flow {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  width: 100%;
+  padding-bottom: 12px;
+  overflow-x: auto;
+}
+
+.onboarding-flow-item {
+  width: 320px;
+  flex: 0 0 320px;
+}
+
+.onboarding-node {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  width: 100%;
+  min-height: 54px;
+  border: 1px solid #d9d9d9;
+  border-radius: 8px;
+  padding: 10px 12px;
+  background: #fff;
+  color: #262626;
+  font-weight: 700;
+  text-align: left;
+}
+
+.onboarding-node-number {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 50%;
+  background: currentColor;
+  color: #fff;
+  font-size: 12px;
+}
+
+.onboarding-node-active {
+  border-color: #7c3aed;
+  background: #f5f3ff;
+  color: #7c3aed;
+}
+
+.onboarding-node-completed {
+  border-color: #389e0d;
+  background: #f6ffed;
+  color: #389e0d;
+}
+
+.onboarding-node-locked {
+  border-color: #d9d9d9;
+  background: #fafafa;
+  color: #8c8c8c;
+  cursor: not-allowed;
+}
+
+.onboarding-node-failed,
+.onboarding-node-stale {
+  border-color: #ff4d4f;
+  background: #fff2f0;
+  color: #cf1322;
+}
+
+.onboarding-node-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 92px;
+  padding: 14px 0 4px;
+}
+
+.onboarding-prompt {
+  max-height: 440px;
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  border: 1px solid #303030;
+  border-radius: 8px;
+  background: #141414;
+  color: #f5f5f5;
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: 12px;
+  line-height: 1.55;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.onboarding-validation-table .ant-table {
+  border: 1px solid #e7ebf3;
+  border-radius: 8px;
+  overflow: hidden;
+}
+
+.onboarding-run-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.onboarding-generation-form .ant-form-item {
+  margin-bottom: 14px;
+}
+
+.onboarding-error-state {
+  padding: 36px 0;
+}
+
 @media (max-width: 920px) {
   .app-shell {
     display: block;
@@ -450,5 +577,20 @@ body {
   .task-table-head {
     flex-direction: column;
     align-items: stretch;
+  }
+}
+
+@media (max-width: 767px) {
+  .task-onboarding-drawer .ant-drawer-content-wrapper {
+    width: 100% !important;
+  }
+
+  .task-onboarding-drawer .ant-drawer-body {
+    padding: 16px;
+  }
+
+  .onboarding-flow-item {
+    width: min(320px, calc(100vw - 48px));
+    flex-basis: min(320px, calc(100vw - 48px));
   }
 }

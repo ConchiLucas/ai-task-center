@@ -72,8 +72,6 @@ import {
   getTaskRunDetail,
   getTaskRuns,
   getTaskConfigs,
-  generateTaskResults,
-  generateTaskRunBatches,
   listConnectionTables,
   processTaskResult,
   saveAIActiveProvider,
@@ -85,6 +83,7 @@ import {
   updateProject,
   updateTaskConfig,
 } from './api';
+import TaskOnboardingDrawer from './TaskOnboardingDrawer';
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text, Paragraph } = Typography;
@@ -205,11 +204,7 @@ export default function App() {
   const [selectedTables, setSelectedTables] = useState<string[]>([]);
   const [tableLoading, setTableLoading] = useState(false);
   const [savingTables, setSavingTables] = useState(false);
-  const [generatingResultId, setGeneratingResultId] = useState<number | null>(null);
-  const [runBatchModalOpen, setRunBatchModalOpen] = useState(false);
-  const [runBatchTask, setRunBatchTask] = useState<TaskConfig | null>(null);
-  const [runBatchForm] = Form.useForm();
-  const [generatingRunBatches, setGeneratingRunBatches] = useState(false);
+  const [onboardingTask, setOnboardingTask] = useState<TaskConfig | null>(null);
   const [taskTablePageSize, setTaskTablePageSize] = useState(10);
   const [taskFilters, setTaskFilters] = useState<{
     taskName?: string;
@@ -338,8 +333,10 @@ export default function App() {
     const timer = window.setInterval(() => {
       void getTaskRuns(taskRunSearchForm.getFieldsValue())
         .then((runList) => {
-          setTaskRuns(runList);
-          setSelectedTaskRunIds((current) => current.filter((id) => runList.some((run) => run.ID === id)));
+          const taskConfigId = taskRunSearchForm.getFieldValue('taskConfigId');
+          const filteredRuns = taskConfigId ? runList.filter((run) => run.taskConfigId === taskConfigId) : runList;
+          setTaskRuns(filteredRuns);
+          setSelectedTaskRunIds((current) => current.filter((id) => filteredRuns.some((run) => run.ID === id)));
         })
         .catch(() => undefined);
     }, 3000);
@@ -907,86 +904,31 @@ export default function App() {
     }
   };
 
-  // 函数：generateResultsForTask
-  const generateResultsForTask = (task: TaskConfig) => {
-    if (!task.ID) return;
-    modal.confirm({
-      title: '生成任务结果',
-      content: `将根据「${task.taskName}」的已选表生成任务结果。第一版仅支持 public.word_clean_sentence 评分任务，重复数据会自动跳过。`,
-      okText: '生成',
-      cancelText: '取消',
-      async onOk() {
-        setGeneratingResultId(task.ID!);
-        try {
-          const result = await generateTaskResults(task.ID!, false);
-          message.success(`生成完成：新增 ${result.insertedCount} 条，跳过 ${result.skippedCount} 条`);
-          await loadTaskResultPageData(taskResultSearchForm.getFieldsValue());
-        } catch (error) {
-          message.error(errorMessage(error, '生成任务结果失败'));
-        } finally {
-          setGeneratingResultId(null);
-        }
-      },
-    });
-  };
-
-  // 函数：openRunBatchModal
-  const openRunBatchModal = (task: TaskConfig) => {
-    if (!task.ID) return;
-    setRunBatchTask(task);
-    runBatchForm.setFieldsValue({
-      batchSize: 50,
-      cliId: task.cliId || activeCliId || cliConfigs[0]?.id,
-      taskNamePrefix: task.taskName,
-      includeFailed: false,
-    });
-    setRunBatchModalOpen(true);
-  };
-
-  // 函数：createRunBatches
-  const createRunBatches = async () => {
-    if (!runBatchTask?.ID) return;
-    const values = await runBatchForm.validateFields();
-    setGeneratingRunBatches(true);
-    try {
-      const result = await generateTaskRunBatches(runBatchTask.ID, {
-        batchSize: Number(values.batchSize) || 50,
-        cliId: values.cliId,
-        taskNamePrefix: values.taskNamePrefix || runBatchTask.taskName,
-        includeFailed: values.includeFailed === true,
-      });
-      message.success(`生成完成：创建 ${result.createdRunCount} 个批次，关联 ${result.linkedResultCount} 条结果`);
-      setRunBatchModalOpen(false);
-      await loadTaskRunPageData(taskRunSearchForm.getFieldsValue());
-    } catch (error) {
-      message.error(errorMessage(error, '生成执行批次失败'));
-    } finally {
-      setGeneratingRunBatches(false);
-    }
-  };
-
   const loadTaskRunPageData = async (filters?: {
     taskName?: string;
+    taskConfigId?: number;
     projectId?: number;
     cliId?: string;
     status?: string;
   }) => {
     setTaskRunLoading(true);
     try {
+      const { taskConfigId, ...apiFilters } = filters || {};
       const [runList, taskList, connectionData, cliConfig, projectList] = await Promise.all([
-        getTaskRuns(filters),
+        getTaskRuns(apiFilters),
         getTaskConfigs(),
         getConnections({}),
         getLocalCliConfig(),
         getProjects(),
       ]);
-      setTaskRuns(runList);
+      const filteredRuns = taskConfigId ? runList.filter((run) => run.taskConfigId === taskConfigId) : runList;
+      setTaskRuns(filteredRuns);
       setTasks(taskList);
       setTaskConnections(connectionData.list || []);
       setProjects(projectList);
       const nextConfigs = cliConfig.configs || [];
       setCliConfigs(nextConfigs);
-      setSelectedTaskRunIds((current) => current.filter((id) => runList.some((run) => run.ID === id)));
+      setSelectedTaskRunIds((current) => current.filter((id) => filteredRuns.some((run) => run.ID === id)));
     } catch (error) {
       message.error(errorMessage(error, '加载任务列表失败'));
     } finally {
@@ -1777,30 +1719,15 @@ export default function App() {
             {
               title: '操作',
               key: 'action',
-              width: 300,
+              width: 220,
               fixed: 'right',
               render: (_, record) => (
                 <Space split={<span className="table-action-split" />}>
-                  <Button
-                    type="link"
-                    size="small"
-                    loading={generatingResultId === record.ID}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      generateResultsForTask(record);
-                    }}
-                  >
-                    生成结果
-                  </Button>
-                  <Button
-                    type="link"
-                    size="small"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      openRunBatchModal(record);
-                    }}
-                  >
-                    生成批次
+                  <Button type="link" size="small" onClick={(event) => {
+                    event.stopPropagation();
+                    setOnboardingTask(record);
+                  }}>
+                    详情
                   </Button>
                   <Button type="link" size="small" onClick={() => openTaskModal(record)}>
                     编辑
@@ -1830,6 +1757,15 @@ export default function App() {
         >
           <Form.Item label="任务名称" name="taskName">
             <Input allowClear placeholder="请输入任务名称" />
+          </Form.Item>
+          <Form.Item label="任务配置" name="taskConfigId">
+            <Select
+              allowClear
+              showSearch
+              placeholder="请选择任务配置"
+              optionFilterProp="label"
+              options={tasks.map((task) => ({ value: task.ID, label: task.taskName }))}
+            />
           </Form.Item>
           <Form.Item label="所属项目" name="projectId">
             <Select
@@ -2327,6 +2263,22 @@ export default function App() {
         </Layout>
       </Layout>
 
+      <TaskOnboardingDrawer
+        open={Boolean(onboardingTask)}
+        task={onboardingTask}
+        projects={projects}
+        connections={taskConnections}
+        cliConfigs={cliConfigs}
+        onClose={() => setOnboardingTask(null)}
+        onReady={(task) => {
+          const filters = { taskConfigId: task.ID };
+          taskRunSearchForm.setFieldsValue(filters);
+          setOnboardingTask(null);
+          setActiveModule('taskRun');
+          void loadTaskRunPageData(filters);
+        }}
+      />
+
       <Modal
         title={editingProject ? '编辑项目' : '新增项目'}
         open={projectModalOpen}
@@ -2478,52 +2430,6 @@ export default function App() {
           <Form.Item label="任务描述" name="taskDesc">
             <Input.TextArea rows={4} placeholder="描述这个任务要做什么、适合什么时候使用" />
           </Form.Item>
-        </Form>
-      </Modal>
-
-      <Modal
-        title="生成执行批次"
-        open={runBatchModalOpen}
-        onCancel={() => setRunBatchModalOpen(false)}
-        onOk={() => void createRunBatches()}
-        okText="生成批次"
-        cancelText="取消"
-        width={720}
-        confirmLoading={generatingRunBatches}
-      >
-        <Form layout="vertical" form={runBatchForm}>
-          <div className="table-picker-meta">
-            <Text strong>{runBatchTask?.taskName || '未选择任务配置'}</Text>
-            <Text type="secondary">默认只将待处理任务结果拆分成执行批次，成功结果不会加入批次。</Text>
-          </div>
-          <Row gutter={16}>
-            <Col xs={24} md={12}>
-              <Form.Item label="每个批次数量" name="batchSize" rules={[{ required: true, message: '请填写每批数量' }]}>
-                <InputNumber min={1} max={1000} className="full-field" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={12}>
-              <Form.Item label="失败结果" name="includeFailed" valuePropName="checked">
-                <Switch checkedChildren="包含失败结果" unCheckedChildren="只处理待处理" />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Form.Item label="默认执行 CLI" name="cliId" rules={[{ required: true, message: '请选择执行 CLI' }]}>
-            <Select
-              showSearch
-              placeholder="选择 Codex 或 Antigravity"
-              optionFilterProp="label"
-              options={cliConfigs
-                .filter((config) => config.enabled)
-                .map((config) => ({ value: config.id, label: config.label || config.id }))}
-            />
-          </Form.Item>
-          <Form.Item label="任务名称前缀" name="taskNamePrefix" rules={[{ required: true, message: '请填写任务名称前缀' }]}>
-            <Input placeholder="单词评分任务" />
-          </Form.Item>
-          <Text type="secondary">
-            生成后可到任务列表选择这些批次开始执行，执行时仍可调整 CLI 和并发数量。
-          </Text>
         </Form>
       </Modal>
 
