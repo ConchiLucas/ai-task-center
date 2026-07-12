@@ -267,6 +267,8 @@ export default function App() {
   const [taskResultBatchForm] = Form.useForm();
   const [batchProcessingResults, setBatchProcessingResults] = useState(false);
   const [taskResultTablePageSize, setTaskResultTablePageSize] = useState(10);
+  const [taskResultCurrentPage, setTaskResultCurrentPage] = useState(1);
+  const [taskResultTotal, setTaskResultTotal] = useState(0);
 
   const activeProject = useMemo(
     () => projects.find((project) => project.ID === activeProjectId) || null,
@@ -1165,24 +1167,27 @@ export default function App() {
     projectId?: number;
     taskConfigId?: number;
     status?: string;
-  }) => {
+  }, page = taskResultCurrentPage, pageSize = taskResultTablePageSize) => {
     setTaskResultLoading(true);
     try {
       const [resultList, runList, taskList, connectionData, cliConfig, projectList] = await Promise.all([
-        getTaskResults(filters),
+        getTaskResults({ ...filters, page, pageSize }),
         getTaskRuns(),
         getTaskConfigs(),
         getConnections({}),
         getLocalCliConfig(),
         getProjects(),
       ]);
-      setTaskResults(resultList);
+      setTaskResults(resultList.list);
+      setTaskResultCurrentPage(resultList.page);
+      setTaskResultTablePageSize(resultList.pageSize);
+      setTaskResultTotal(resultList.total);
       setTaskRuns(runList);
       setTasks(taskList);
       setTaskConnections(connectionData.list || []);
       setProjects(projectList);
       setCliConfigs(cliConfig.configs || []);
-      setSelectedTaskResultIds((current) => current.filter((id) => resultList.some((result) => result.ID === id)));
+      setSelectedTaskResultIds((current) => current.filter((id) => resultList.list.some((result) => result.ID === id)));
     } catch (error) {
       message.error(errorMessage(error, '加载任务结果失败'));
     } finally {
@@ -1255,14 +1260,18 @@ export default function App() {
         cliId: values.cliId,
         workerCount: Number(values.workerCount) || 4,
       });
-      const successCount = Number(response?.successCount || 0);
-      const failedCount = Number(response?.failedCount || 0);
-      message.success(`批量执行完成：成功 ${successCount} 条，失败 ${failedCount} 条`);
+      const queuedResultCount = Number(response?.queuedResultCount || 0);
+      const createdRunCount = Number(response?.createdRunCount || 0);
+      const skippedCount = Number(response?.skippedCount || 0);
+      message.success(
+        `已异步提交 ${queuedResultCount} 条结果，生成 ${createdRunCount} 个执行批次`
+        + (skippedCount > 0 ? `，过滤 ${skippedCount} 条成功或已入队结果` : ''),
+      );
       setTaskResultBatchOpen(false);
       setSelectedTaskResultIds([]);
       await loadTaskResultPageData(taskResultSearchForm.getFieldsValue());
     } catch (error) {
-      message.error(errorMessage(error, '批量执行评分回填失败'));
+      message.error(errorMessage(error, '异步提交任务结果失败'));
       await loadTaskResultPageData(taskResultSearchForm.getFieldsValue());
     } finally {
       setBatchProcessingResults(false);
@@ -2041,7 +2050,7 @@ export default function App() {
         <Form
           form={taskResultSearchForm}
           layout="inline"
-          onFinish={(values) => void loadTaskResultPageData(values)}
+          onFinish={(values) => void loadTaskResultPageData(values, 1, taskResultTablePageSize)}
           className="task-search-form"
         >
           <Form.Item label="结果名称" name="resultName">
@@ -2072,7 +2081,7 @@ export default function App() {
                 icon={<ReloadOutlined />}
                 onClick={() => {
                   taskResultSearchForm.resetFields();
-                  void loadTaskResultPageData();
+                  void loadTaskResultPageData(undefined, 1, taskResultTablePageSize);
                 }}
               >
                 重置
@@ -2104,10 +2113,14 @@ export default function App() {
             onChange: (keys) => setSelectedTaskResultIds(keys.map((key) => Number(key))),
           }}
           pagination={{
+            current: taskResultCurrentPage,
             pageSize: taskResultTablePageSize,
+            total: taskResultTotal,
             showSizeChanger: true,
             pageSizeOptions: tablePageSizeOptions,
-            onChange: (_, pageSize) => setTaskResultTablePageSize(pageSize),
+            onChange: (page, pageSize) => {
+              void loadTaskResultPageData(taskResultSearchForm.getFieldsValue(), page, pageSize);
+            },
             showTotal: (total) => `共 ${total} 条`,
           }}
           locale={{ emptyText: <Empty description="暂无任务结果" /> }}
@@ -2655,7 +2668,8 @@ export default function App() {
             <InputNumber min={1} max={32} className="full-field" />
           </Form.Item>
           <Text type="secondary">
-            将并发调用 CLI 处理 {selectedTaskResultIds.length} 条任务结果，全部通过校验后按源数据库分组批量回填。
+            提交后窗口会立即关闭。系统按所选并发数拆分异步执行批次，Python Worker 在后台调用 CLI；
+            成功或已入队结果会自动过滤。
           </Text>
         </Form>
       </Modal>

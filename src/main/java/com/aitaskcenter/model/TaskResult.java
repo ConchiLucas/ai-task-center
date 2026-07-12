@@ -3,6 +3,7 @@ package com.aitaskcenter.model;
 import com.aitaskcenter.dto.TaskRunReference;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
+import jakarta.persistence.Index;
 import jakarta.persistence.Table;
 import jakarta.persistence.Transient;
 import java.time.OffsetDateTime;
@@ -10,7 +11,13 @@ import java.util.ArrayList;
 import java.util.List;
 
 @Entity
-@Table(name = "tb_task_result")
+@Table(
+        name = "tb_task_result",
+        indexes = {
+                @Index(name = "idx_task_result_created", columnList = "created_at"),
+                @Index(name = "idx_task_result_task_status_created", columnList = "task_config_id,status,created_at"),
+                @Index(name = "idx_task_result_project_created", columnList = "project_id,created_at")
+        })
 public class TaskResult extends BaseEntity {
     @Column(nullable = false)
     // 字段：任务结果名称

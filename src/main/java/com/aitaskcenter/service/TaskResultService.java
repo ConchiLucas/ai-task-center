@@ -1,22 +1,33 @@
 package com.aitaskcenter.service;
 
 import com.aitaskcenter.dto.BatchProcessTaskResultRequest;
+import com.aitaskcenter.dto.PageResult;
 import com.aitaskcenter.dto.TaskRunReference;
 import com.aitaskcenter.model.TaskResult;
+import com.aitaskcenter.model.TaskConfig;
+import com.aitaskcenter.model.TaskExecutionLog;
 import com.aitaskcenter.model.TaskRun;
 import com.aitaskcenter.model.TaskRunResult;
 import com.aitaskcenter.repository.ProjectConfigRepository;
+import com.aitaskcenter.repository.TaskConfigRepository;
+import com.aitaskcenter.repository.TaskExecutionLogRepository;
 import com.aitaskcenter.repository.TaskResultRepository;
 import com.aitaskcenter.repository.TaskRunRepository;
 import com.aitaskcenter.repository.TaskRunResultRepository;
 import java.time.OffsetDateTime;
 import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.LinkedHashMap;
 import java.util.List;
-import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.UUID;
 import java.util.function.Function;
 import java.util.stream.Collectors;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.PageRequest;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -27,7 +38,10 @@ public class TaskResultService {
     private final ProjectConfigRepository projectRepository;
     private final TaskRunResultRepository taskRunResultRepository;
     private final TaskRunRepository taskRunRepository;
+    private final TaskConfigRepository taskConfigRepository;
+    private final TaskExecutionLogRepository taskExecutionLogRepository;
     private final PythonWorkerClient pythonWorkerClient;
+    private final TaskRunPromptBuilder taskRunPromptBuilder;
 
     // 方法：TaskResultService
     public TaskResultService(
@@ -35,25 +49,54 @@ public class TaskResultService {
             ProjectConfigRepository projectRepository,
             TaskRunResultRepository taskRunResultRepository,
             TaskRunRepository taskRunRepository,
-            PythonWorkerClient pythonWorkerClient) {
+            TaskConfigRepository taskConfigRepository,
+            TaskExecutionLogRepository taskExecutionLogRepository,
+            PythonWorkerClient pythonWorkerClient,
+            TaskRunPromptBuilder taskRunPromptBuilder) {
         this.repository = repository;
         this.projectRepository = projectRepository;
         this.taskRunResultRepository = taskRunResultRepository;
         this.taskRunRepository = taskRunRepository;
+        this.taskConfigRepository = taskConfigRepository;
+        this.taskExecutionLogRepository = taskExecutionLogRepository;
         this.pythonWorkerClient = pythonWorkerClient;
+        this.taskRunPromptBuilder = taskRunPromptBuilder;
     }
 
     // 方法：list
-    public List<TaskResult> list(String resultName, Long projectId, Long taskConfigId, String status) {
-        List<TaskResult> results = repository.findAllByOrderByCreatedAtDesc().stream()
-                .filter(item -> !StringUtils.hasText(resultName)
-                        || item.getResultName().toLowerCase(Locale.ROOT).contains(resultName.trim().toLowerCase(Locale.ROOT)))
-                .filter(item -> projectId == null || projectId.equals(item.getProjectId()))
-                .filter(item -> taskConfigId == null || taskConfigId.equals(item.getTaskConfigId()))
-                .filter(item -> !StringUtils.hasText(status) || status.trim().equals(item.getStatus()))
-                .toList();
+    public PageResult<TaskResult> list(
+            int page,
+            int pageSize,
+            String resultName,
+            Long projectId,
+            Long taskConfigId,
+            String status) {
+        int safePage = Math.max(page, 1);
+        int safePageSize = Math.max(1, Math.min(pageSize, 500));
+        Specification<TaskResult> specification = Specification.where(null);
+        if (StringUtils.hasText(resultName)) {
+            String keyword = "%" + resultName.trim().toLowerCase() + "%";
+            specification = specification.and((root, query, builder) ->
+                    builder.like(builder.lower(root.get("resultName")), keyword));
+        }
+        if (projectId != null) {
+            specification = specification.and((root, query, builder) -> builder.equal(root.get("projectId"), projectId));
+        }
+        if (taskConfigId != null) {
+            specification = specification.and((root, query, builder) -> builder.equal(root.get("taskConfigId"), taskConfigId));
+        }
+        if (StringUtils.hasText(status)) {
+            String expectedStatus = status.trim();
+            specification = specification.and((root, query, builder) -> builder.equal(root.get("status"), expectedStatus));
+        }
+        Page<TaskResult> resultPage = repository.findAll(
+                specification,
+                PageRequest.of(safePage - 1, safePageSize, Sort.by(Sort.Direction.DESC, "createdAt")));
+        List<TaskResult> results = resultPage.getContent();
         attachRelatedTaskRuns(results);
-        return results;
+        // 列表不传输体积较大的 AI 提示词和响应正文，详情接口按需加载完整内容。
+        results.forEach(result -> result.setResultContent(""));
+        return new PageResult<>(results, resultPage.getTotalElements(), safePage, safePageSize);
     }
 
     // 方法：get
@@ -78,6 +121,7 @@ public class TaskResultService {
         return pythonWorkerClient.processTaskResult(id, effectiveCliId);
     }
 
+    @Transactional
     // 方法：processBatch
     public Map<String, Object> processBatch(BatchProcessTaskResultRequest request) {
         List<Long> ids = request.getTaskResultIds();
@@ -89,11 +133,189 @@ public class TaskResultService {
         if (workerCount < 1 || workerCount > 32) {
             throw new IllegalArgumentException("并发数量需在 1 到 32 之间");
         }
-        List<TaskResult> results = repository.findAllById(ids);
-        if (results.size() != ids.size()) {
+        List<TaskResult> requestedResults = repository.findAllById(ids);
+        if (requestedResults.size() != ids.size()) {
             throw new IllegalArgumentException("部分任务结果不存在");
         }
-        return pythonWorkerClient.processTaskResults(ids, cliId, workerCount);
+        Set<Long> activeResultIds = findActiveQueuedResultIds(ids);
+        List<TaskResult> results = requestedResults.stream()
+                .filter(result -> List.of("PENDING", "FAILED").contains(result.getStatus()))
+                .filter(result -> !activeResultIds.contains(result.getId()))
+                .toList();
+        int skippedCount = requestedResults.size() - results.size();
+        if (results.isEmpty()) {
+            throw new IllegalArgumentException("没有可执行结果，成功结果或已入队结果已被过滤");
+        }
+        return enqueueTaskResults(results, cliId, workerCount, skippedCount);
+    }
+
+    // 方法：findActiveQueuedResultIds
+    private Set<Long> findActiveQueuedResultIds(List<Long> taskResultIds) {
+        List<TaskRunResult> links = taskRunResultRepository.findByTaskResultIdInOrderByIdDesc(taskResultIds);
+        if (links.isEmpty()) {
+            return Set.of();
+        }
+        Set<Long> activeRunIds = taskRunRepository.findAllById(
+                        links.stream().map(TaskRunResult::getTaskRunId).distinct().toList())
+                .stream()
+                .filter(run -> List.of("QUEUED", "RUNNING", "RETRY_WAIT").contains(run.getStatus()))
+                .map(TaskRun::getId)
+                .collect(Collectors.toSet());
+        return links.stream()
+                .filter(link -> activeRunIds.contains(link.getTaskRunId()))
+                .map(TaskRunResult::getTaskResultId)
+                .collect(Collectors.toSet());
+    }
+
+    // 方法：enqueueTaskResults
+    private Map<String, Object> enqueueTaskResults(
+            List<TaskResult> results,
+            String cliId,
+            int workerCount,
+            int skippedCount) {
+        String dispatchGroupId = UUID.randomUUID().toString();
+        OffsetDateTime queuedAt = OffsetDateTime.now();
+        Map<ResultQueueGroup, List<TaskResult>> groupedResults = results.stream()
+                .collect(Collectors.groupingBy(
+                        ResultQueueGroup::from,
+                        LinkedHashMap::new,
+                        Collectors.toList()));
+        Map<Long, String> taskConfigNames = taskConfigRepository.findAllById(
+                        results.stream().map(TaskResult::getTaskConfigId).filter(id -> id != null).distinct().toList())
+                .stream()
+                .collect(Collectors.toMap(TaskConfig::getId, TaskConfig::getTaskName));
+        List<TaskRun> runs = new ArrayList<>();
+        List<List<TaskResult>> runResults = new ArrayList<>();
+        int runSequence = 1;
+        for (Map.Entry<ResultQueueGroup, List<TaskResult>> entry : groupedResults.entrySet()) {
+            List<List<TaskResult>> partitions = partitionForConcurrency(entry.getValue(), workerCount);
+            for (List<TaskResult> partition : partitions) {
+                ResultQueueGroup group = entry.getKey();
+                String configName = taskConfigNames.getOrDefault(group.taskConfigId(), "任务结果");
+                String runName = configName + " - 异步批次 " + runSequence++;
+                TaskRun run = createQueuedTaskRun(
+                        group,
+                        partition,
+                        runName,
+                        cliId,
+                        workerCount,
+                        dispatchGroupId,
+                        queuedAt);
+                runs.add(run);
+                runResults.add(partition);
+            }
+        }
+        taskRunRepository.saveAll(runs);
+
+        List<TaskRunResult> links = new ArrayList<>();
+        List<TaskExecutionLog> executionLogs = new ArrayList<>();
+        for (int index = 0; index < runs.size(); index++) {
+            TaskRun run = runs.get(index);
+            for (TaskResult result : runResults.get(index)) {
+                TaskRunResult link = new TaskRunResult();
+                link.setTaskRunId(run.getId());
+                link.setTaskResultId(result.getId());
+                link.setStatus("PENDING");
+                link.setErrorMessage("");
+                links.add(link);
+            }
+            executionLogs.add(createQueuedExecutionLog(run, workerCount));
+        }
+        taskRunResultRepository.saveAll(links);
+        taskExecutionLogRepository.saveAll(executionLogs);
+        for (TaskResult result : results) {
+            result.setStatus("PENDING");
+            result.setSummary("已进入异步执行队列");
+            result.setErrorMessage("");
+            result.setCompletedAt(null);
+        }
+        repository.saveAll(results);
+        return Map.of(
+                "accepted", true,
+                "mode", "postgres-queue",
+                "dispatchGroupId", dispatchGroupId,
+                "queuedResultCount", results.size(),
+                "createdRunCount", runs.size(),
+                "skippedCount", skippedCount,
+                "workerCount", workerCount);
+    }
+
+    // 方法：partitionForConcurrency
+    private List<List<TaskResult>> partitionForConcurrency(List<TaskResult> results, int workerCount) {
+        int partitionCount = Math.min(workerCount, results.size());
+        List<List<TaskResult>> partitions = new ArrayList<>();
+        for (int index = 0; index < partitionCount; index++) {
+            partitions.add(new ArrayList<>());
+        }
+        for (int index = 0; index < results.size(); index++) {
+            partitions.get(index % partitionCount).add(results.get(index));
+        }
+        return partitions;
+    }
+
+    // 方法：createQueuedTaskRun
+    private TaskRun createQueuedTaskRun(
+            ResultQueueGroup group,
+            List<TaskResult> results,
+            String runName,
+            String cliId,
+            int workerCount,
+            String dispatchGroupId,
+            OffsetDateTime queuedAt) {
+        TaskRun run = new TaskRun();
+        run.setTaskName(runName);
+        run.setTaskConfigId(group.taskConfigId());
+        run.setProjectId(group.projectId());
+        run.setCliId(cliId);
+        run.setDatabaseConfigId(group.databaseConfigId());
+        run.setSelectedTables(group.sourceTables());
+        run.setStatus("QUEUED");
+        run.setReason("任务结果已进入 PostgreSQL 异步队列");
+        run.setRunLog("等待 Python Worker 领取，第 1 次执行待开始。");
+        run.setAiPromptJson(taskRunPromptBuilder.buildBatchPromptJson(
+                new TaskRunPromptBuilder.BatchPromptContext(runName, cliId, group.sourceTables()),
+                results));
+        run.setAiResponseJson("");
+        run.setExecutionMode("thread");
+        run.setRequestedWorkerCount(workerCount);
+        run.setDispatchGroupId(dispatchGroupId);
+        run.setAttemptNo(0);
+        run.setMaxAttempts(3);
+        run.setNextRetryAt(queuedAt);
+        run.setExpectedResultCount(results.size());
+        return run;
+    }
+
+    // 方法：createQueuedExecutionLog
+    private TaskExecutionLog createQueuedExecutionLog(TaskRun run, int workerCount) {
+        TaskExecutionLog execution = new TaskExecutionLog();
+        execution.setTaskRunId(run.getId());
+        execution.setAttemptNo(1);
+        execution.setCliId(run.getCliId());
+        execution.setExecutionMode("thread");
+        execution.setWorkerCount(workerCount);
+        execution.setStatus("QUEUED");
+        execution.setReason("等待 Python Worker 领取");
+        execution.setRunLog("异步任务结果批次已进入 PostgreSQL 队列。");
+        execution.setAiPromptJson(run.getAiPromptJson());
+        execution.setAiResponseJson("");
+        return execution;
+    }
+
+    // 记录：ResultQueueGroup
+    private record ResultQueueGroup(
+            Long taskConfigId,
+            Long projectId,
+            Long databaseConfigId,
+            String sourceTables) {
+        // 方法：from
+        private static ResultQueueGroup from(TaskResult result) {
+            return new ResultQueueGroup(
+                    result.getTaskConfigId(),
+                    result.getProjectId(),
+                    result.getDatabaseConfigId(),
+                    result.getSourceTables());
+        }
     }
 
     @Transactional

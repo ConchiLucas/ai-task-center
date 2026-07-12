@@ -3,6 +3,7 @@ package com.aitaskcenter.controller;
 import com.aitaskcenter.dto.ApiResponse;
 import com.aitaskcenter.dto.BatchProcessTaskResultRequest;
 import com.aitaskcenter.dto.DeleteByIdRequest;
+import com.aitaskcenter.dto.PageResult;
 import com.aitaskcenter.model.TaskResult;
 import com.aitaskcenter.service.TaskResultService;
 import java.util.List;
@@ -28,12 +29,14 @@ public class TaskResultController {
     }
 
     @GetMapping("/list")
-    public ApiResponse<List<TaskResult>> list(
+    public ApiResponse<PageResult<TaskResult>> list(
+            @RequestParam(defaultValue = "1") int page,
+            @RequestParam(defaultValue = "10") int pageSize,
             @RequestParam(required = false) String resultName,
             @RequestParam(required = false) Long projectId,
             @RequestParam(required = false) Long taskConfigId,
             @RequestParam(required = false) String status) {
-        return ApiResponse.ok(service.list(resultName, projectId, taskConfigId, status));
+        return ApiResponse.ok(service.list(page, pageSize, resultName, projectId, taskConfigId, status));
     }
 
     @GetMapping("/{id}")

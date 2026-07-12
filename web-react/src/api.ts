@@ -416,13 +416,15 @@ export async function batchDeleteTaskRuns(ids: number[]) {
 
 // 函数：getTaskResults
 export async function getTaskResults(params?: {
+  page?: number;
+  pageSize?: number;
   resultName?: string;
   projectId?: number;
   taskConfigId?: number;
   status?: string;
 }) {
-  const res = await request.get<ApiResponse<TaskResult[]>>('/task-result/list', { params });
-  return res.data.data || [];
+  const res = await request.get<ApiResponse<PageResult<TaskResult>>>('/task-result/list', { params });
+  return res.data.data || { list: [], total: 0, page: 1, pageSize: params?.pageSize || 10 };
 }
 
 // 函数：getTaskResult
