@@ -111,7 +111,7 @@ public class TaskOnboardingPromptBuilder {
                 - artifact 路径必须非空，SHA-256 hash 必须是 64 位小写十六进制字符串。
                 - task-workflow 脚本及其集成测试属于 Task 5；本任务不要创建或修改该脚本。
 
-                回填实体 ID 规则：--entity-ids 的第一个数字必须是新建 tb_task_run 的数据库 ID，其后是已关联的既有 tb_task_result 数字数据库 ID，按升序排列；全部以逗号分隔，后端按 List<Long> 顺序回填。
+                回填实体 ID 规则：--entity-ids 的第一个数字必须是新建 tb_task_run 的数据库 ID，其后是已关联的既有 tb_task_result 数字数据库 ID；全部以逗号分隔，后端会将 result ID 按升序规范化。
                 替换命令中的 REPLACE_WITH_* 安全文字后再执行。替换值必须使用 POSIX shell 单引号转义；值内每个单引号必须结束单引号、追加双引号包裹的单引号、再重新开始单引号。
 
                 ./scripts/task-workflow report \\

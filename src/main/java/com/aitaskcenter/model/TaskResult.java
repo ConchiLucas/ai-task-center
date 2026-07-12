@@ -16,7 +16,10 @@ import java.util.List;
         indexes = {
                 @Index(name = "idx_task_result_created", columnList = "created_at"),
                 @Index(name = "idx_task_result_task_status_created", columnList = "task_config_id,status,created_at"),
-                @Index(name = "idx_task_result_project_created", columnList = "project_id,created_at")
+                @Index(name = "idx_task_result_project_created", columnList = "project_id,created_at"),
+                @Index(
+                        name = "idx_task_result_onboarding_marker",
+                        columnList = "task_config_id,source_description,id")
         })
 public class TaskResult extends BaseEntity {
     @Column(nullable = false)

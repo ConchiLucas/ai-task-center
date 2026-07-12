@@ -79,7 +79,8 @@ class TaskOnboardingServiceTest {
                 contextCodec,
                 snapshotService,
                 callbackValidator,
-                responseAssembler);
+                responseAssembler,
+                () -> { });
     }
 
     @Test
@@ -257,6 +258,39 @@ class TaskOnboardingServiceTest {
         assertEquals(OnboardingStep.BATCH_VALIDATION.name(), response.getCurrentStep());
         assertEquals(0, taskResults.callCount("save"));
         assertEquals(0, taskResults.callCount("saveAll"));
+    }
+
+    @Test
+    void acceptsBatchWhenRunIdEqualsAResultId() throws Exception {
+        TaskConfig task = batchCodeTask("run", "token", List.of(9L));
+        TaskRun run = run(9L, TASK_ID, "BATCH_VALIDATION:run", "PENDING");
+        stubTask(task);
+        taskRuns.answer("findByTaskConfigIdAndReasonOrderByIdAsc",
+                List.of(run), TASK_ID, "BATCH_VALIDATION:run");
+        taskRunResults.answer("findByTaskRunIdOrderByIdAsc", List.of(link(21L, 9L, 9L)), 9L);
+        taskRunResults.answer("countLinkedResultsForRunAndTask", 1L, 9L, TASK_ID, List.of(9L));
+
+        service.report(TASK_ID, report("batch", "token", List.of(9L, 9L)));
+
+        TaskOnboardingContext savedContext = context(task);
+        assertEquals(9L, savedContext.getBatchValidationTaskRunId());
+        assertEquals(List.of(9L), savedContext.getBatchValidationResultIds());
+    }
+
+    @Test
+    void acceptsBatchLinksRegardlessOfLinkInsertionOrderAndStoresAscendingResultIds() throws Exception {
+        TaskConfig task = batchCodeTask("run", "token", List.of(11L, 12L));
+        TaskRun run = run(9L, TASK_ID, "BATCH_VALIDATION:run", "PENDING");
+        stubTask(task);
+        taskRuns.answer("findByTaskConfigIdAndReasonOrderByIdAsc",
+                List.of(run), TASK_ID, "BATCH_VALIDATION:run");
+        taskRunResults.answer("findByTaskRunIdOrderByIdAsc",
+                List.of(link(21L, 9L, 12L), link(22L, 9L, 11L)), 9L);
+        taskRunResults.answer("countLinkedResultsForRunAndTask", 2L, 9L, TASK_ID, List.of(11L, 12L));
+
+        service.report(TASK_ID, report("batch", "token", List.of(9L, 12L, 11L)));
+
+        assertEquals(List.of(11L, 12L), context(task).getBatchValidationResultIds());
     }
 
     @Test

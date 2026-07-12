@@ -79,9 +79,13 @@ public class TaskOnboardingCallbackValidator {
         Provenance provenance = provenance(request);
         requireStage(request, "batch");
         requireToken(context.getBatchReportToken(), request.getToken());
-        List<Long> entityIds = requireDistinctIds(request.getEntityIds(), 2, Integer.MAX_VALUE, "batch entity IDs");
+        List<Long> entityIds = requireIds(request.getEntityIds(), 2, Integer.MAX_VALUE, "batch entity IDs");
         Long submittedRunId = entityIds.get(0);
-        List<Long> submittedResultIds = List.copyOf(entityIds.subList(1, entityIds.size()));
+        List<Long> submittedResultIds = requireDistinctIds(
+                entityIds.subList(1, entityIds.size()), 1, Integer.MAX_VALUE, "batch result IDs")
+                .stream()
+                .sorted()
+                .toList();
         String validationRunId = requireText(
                 context.getBatchValidationMarker(), "Missing batch validation run ID");
         String marker = "BATCH_VALIDATION:" + validationRunId;
@@ -102,7 +106,10 @@ public class TaskOnboardingCallbackValidator {
         }
 
         List<TaskRunResult> links = taskRunResultRepository.findByTaskRunIdOrderByIdAsc(run.getId());
-        List<Long> linkedResultIds = links.stream().map(TaskRunResult::getTaskResultId).toList();
+        List<Long> linkedResultIds = links.stream()
+                .map(TaskRunResult::getTaskResultId)
+                .sorted()
+                .toList();
         if (links.isEmpty()
                 || !submittedResultIds.equals(linkedResultIds)
                 || links.stream().anyMatch(link -> !run.getId().equals(link.getTaskRunId()))) {
@@ -157,13 +164,19 @@ public class TaskOnboardingCallbackValidator {
 
     private static List<Long> requireDistinctIds(
             Collection<Long> values, int minimum, int maximum, String label) {
-        List<Long> ids = values == null ? List.of() : List.copyOf(values);
-        if (ids.size() < minimum || ids.size() > maximum || ids.stream().anyMatch(id -> id == null)) {
-            throw new IllegalArgumentException("Invalid " + label + " count");
-        }
+        List<Long> ids = requireIds(values, minimum, maximum, label);
         Set<Long> unique = new LinkedHashSet<>(ids);
         if (unique.size() != ids.size()) {
             throw new IllegalArgumentException("Duplicate " + label + " are not allowed");
+        }
+        return ids;
+    }
+
+    private static List<Long> requireIds(
+            Collection<Long> values, int minimum, int maximum, String label) {
+        List<Long> ids = values == null ? List.of() : List.copyOf(values);
+        if (ids.size() < minimum || ids.size() > maximum || ids.stream().anyMatch(id -> id == null)) {
+            throw new IllegalArgumentException("Invalid " + label + " count");
         }
         return ids;
     }

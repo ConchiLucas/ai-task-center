@@ -12,7 +12,8 @@ import java.time.OffsetDateTime;
         indexes = {
                 @Index(name = "idx_task_run_queue", columnList = "status,next_retry_at,created_at"),
                 @Index(name = "idx_task_run_dispatch_group", columnList = "dispatch_group_id,status"),
-                @Index(name = "idx_task_run_lease", columnList = "status,lease_until")
+                @Index(name = "idx_task_run_lease", columnList = "status,lease_until"),
+                @Index(name = "idx_task_run_onboarding_marker", columnList = "task_config_id,reason,id")
         })
 public class TaskRun extends BaseEntity {
     @Column(nullable = false)

@@ -117,8 +117,8 @@ class TaskOnboardingPromptBuilderTest {
         assertTrue(prompt.contains("--token 'token-2'"));
         assertTrue(prompt.contains("--entity-ids 'REPLACE_WITH_RUN_ID_THEN_LINKED_RESULT_IDS_ASCENDING'"));
         assertTrue(prompt.contains("第一个数字必须是新建 tb_task_run 的数据库 ID"));
-        assertTrue(prompt.contains("其后是已关联的既有 tb_task_result 数字数据库 ID，按升序排列"));
-        assertTrue(prompt.contains("按 List<Long> 顺序回填"));
+        assertTrue(prompt.contains("其后是已关联的既有 tb_task_result 数字数据库 ID"));
+        assertTrue(prompt.contains("后端会将 result ID 按升序规范化"));
     }
 
     @Test

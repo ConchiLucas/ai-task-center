@@ -36,7 +36,9 @@ public interface TaskRunResultRepository extends JpaRepository<TaskRunResult, Lo
             select cast(to_jsonb(link_row) as text)
             from tb_task_run_result link_row
             join tb_task_run run_row on run_row.id = link_row.task_run_id
+            join tb_task_result result_row on result_row.id = link_row.task_result_id
             where run_row.task_config_id = :taskConfigId
+               or result_row.task_config_id = :taskConfigId
             order by link_row.id asc
             """, nativeQuery = true)
     List<String> findFingerprintRowsByTaskConfigId(@Param("taskConfigId") Long taskConfigId);
@@ -45,7 +47,9 @@ public interface TaskRunResultRepository extends JpaRepository<TaskRunResult, Lo
             select cast(to_jsonb(link_row) as text)
             from tb_task_run_result link_row
             join tb_task_run run_row on run_row.id = link_row.task_run_id
-            where run_row.task_config_id = :taskConfigId
+            join tb_task_result result_row on result_row.id = link_row.task_result_id
+            where (run_row.task_config_id = :taskConfigId
+                or result_row.task_config_id = :taskConfigId)
               and link_row.task_run_id <> :excludedRunId
             order by link_row.id asc
             """, nativeQuery = true)

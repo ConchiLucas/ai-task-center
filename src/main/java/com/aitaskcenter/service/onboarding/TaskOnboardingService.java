@@ -24,18 +24,21 @@ public class TaskOnboardingService {
     private final TaskOnboardingSnapshotService snapshotService;
     private final TaskOnboardingCallbackValidator callbackValidator;
     private final TaskOnboardingResponseAssembler responseAssembler;
+    private final TaskOnboardingChildTableLock childTableLock;
 
     public TaskOnboardingService(
             TaskConfigRepository taskConfigRepository,
             TaskOnboardingContextCodec contextCodec,
             TaskOnboardingSnapshotService snapshotService,
             TaskOnboardingCallbackValidator callbackValidator,
-            TaskOnboardingResponseAssembler responseAssembler) {
+            TaskOnboardingResponseAssembler responseAssembler,
+            TaskOnboardingChildTableLock childTableLock) {
         this.taskConfigRepository = taskConfigRepository;
         this.contextCodec = contextCodec;
         this.snapshotService = snapshotService;
         this.callbackValidator = callbackValidator;
         this.responseAssembler = responseAssembler;
+        this.childTableLock = childTableLock;
     }
 
     @Transactional
@@ -54,6 +57,8 @@ public class TaskOnboardingService {
         requireActive(task);
         TaskOnboardingContext context = contextCodec.read(task);
         OnboardingStep step = step(task);
+
+        childTableLock.lockForCallbackValidation();
 
         if (step == OnboardingStep.RESULT_CODE) {
             callbackValidator.validateResult(task, context, request);
