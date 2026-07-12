@@ -4,6 +4,24 @@ BEGIN
         RETURN;
     END IF;
 
+    IF (
+        SELECT count(*) = 3
+        FROM information_schema.columns
+        WHERE table_schema = current_schema()
+          AND table_name = 'tb_task_config'
+          AND is_nullable = 'NO'
+          AND (
+              (column_name = 'onboarding_step'
+                  AND column_default = '''RESULT_CODE''::character varying')
+              OR (column_name = 'onboarding_status'
+                  AND column_default = '''ACTIVE''::character varying')
+              OR (column_name = 'onboarding_context'
+                  AND column_default = '''{}''::text')
+          )
+    ) THEN
+        RETURN;
+    END IF;
+
     ALTER TABLE tb_task_config
         ADD COLUMN IF NOT EXISTS onboarding_step varchar(40);
     ALTER TABLE tb_task_config
