@@ -145,14 +145,6 @@ export interface TaskOnboardingResponse {
   errorMessage: string | null;
 }
 
-export interface TaskOnboardingReportRequest {
-  stage: string;
-  token: string;
-  artifact: string;
-  artifactHash: string;
-  entityIds: number[];
-}
-
 export interface TaskOnboardingBatchRequest {
   batchSize: number;
   cliId: string;
@@ -392,12 +384,6 @@ export async function deleteTaskConfig(id: number) {
 // 函数：getTaskOnboarding
 export async function getTaskOnboarding(id: number) {
   const res = await request.get<ApiResponse<TaskOnboardingResponse>>(`/task/${id}/onboarding`);
-  return res.data.data;
-}
-
-// 函数：reportTaskOnboarding
-export async function reportTaskOnboarding(id: number, data: TaskOnboardingReportRequest) {
-  const res = await request.post<ApiResponse<TaskOnboardingResponse>>(`/task/${id}/onboarding/report`, data);
   return res.data.data;
 }
 

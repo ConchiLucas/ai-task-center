@@ -14,7 +14,7 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   ConnectionConfig,
   LocalCliConfigItem,
@@ -87,6 +87,10 @@ export default function TaskOnboardingDrawer({
   const [submitting, setSubmitting] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [batchForm] = Form.useForm();
+  const sessionRef = useRef({ open: false, taskId: null as number | null });
+  const requestGenerationRef = useRef(0);
+  const actionGenerationRef = useRef(0);
+  const submittingRef = useRef(false);
 
   const projectName = useMemo(
     () => projects.find((project) => project.ID === task?.projectId)?.projectName || '-',
@@ -97,35 +101,51 @@ export default function TaskOnboardingDrawer({
     [connections, task?.databaseConfigId],
   );
 
-  const refresh = useCallback(async () => {
-    if (!task?.ID) return;
+  const isCurrentSession = useCallback((taskId: number) => (
+    sessionRef.current.open && sessionRef.current.taskId === taskId
+  ), []);
+
+  const refresh = useCallback(async (taskId?: number) => {
+    if (!taskId || submittingRef.current || !isCurrentSession(taskId)) return;
+    const generation = ++requestGenerationRef.current;
     setLoading(true);
     setLoadError('');
     try {
-      const response = await getTaskOnboarding(task.ID);
+      const response = await getTaskOnboarding(taskId);
+      if (requestGenerationRef.current !== generation || !isCurrentSession(taskId) || response.task.id !== taskId) return;
       setState(response);
     } catch (error) {
+      if (requestGenerationRef.current !== generation || !isCurrentSession(taskId)) return;
       setLoadError(errorMessage(error, '加载任务引导失败'));
     } finally {
-      setLoading(false);
+      if (requestGenerationRef.current === generation && isCurrentSession(taskId)) {
+        setLoading(false);
+      }
     }
-  }, [task?.ID]);
+  }, [isCurrentSession]);
 
   useEffect(() => {
-    if (!open) {
-      setState(null);
-      setLoadError('');
-      return;
-    }
-    void refresh();
-  }, [open, refresh]);
+    const taskId = open ? task?.ID ?? null : null;
+    sessionRef.current = { open: Boolean(taskId), taskId };
+    requestGenerationRef.current += 1;
+    actionGenerationRef.current += 1;
+    submittingRef.current = false;
+    setState(null);
+    setLoadError('');
+    setLoading(false);
+    setSubmitting(false);
+    batchForm.resetFields();
+    if (taskId) void refresh(taskId);
+  }, [batchForm, open, refresh, task?.ID]);
 
   useEffect(() => {
     if (!open) return undefined;
-    const onFocus = () => void refresh();
+    const onFocus = () => {
+      if (task?.ID && !submittingRef.current) void refresh(task.ID);
+    };
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
-  }, [open, refresh]);
+  }, [open, refresh, task?.ID]);
 
   useEffect(() => {
     if (state?.currentStep !== 'BATCH_GENERATION' || !task) return;
@@ -138,8 +158,6 @@ export default function TaskOnboardingDrawer({
   }, [batchForm, cliConfigs, state?.currentStep, task]);
 
   const isAllowed = (action: string) => state?.allowedActions.includes(action) === true;
-  const applyResponse = (response: TaskOnboardingResponse) => setState(response);
-
   const copyPrompt = async () => {
     if (!state?.prompt || !isAllowed('COPY_PROMPT')) return;
     try {
@@ -155,19 +173,30 @@ export default function TaskOnboardingDrawer({
     fallback: string,
     navigateWhenReady = false,
   ) => {
-    if (!task?.ID) return;
+    const taskId = task?.ID;
+    if (!taskId || !isCurrentSession(taskId)) return;
+    const actionGeneration = ++actionGenerationRef.current;
+    requestGenerationRef.current += 1;
+    submittingRef.current = true;
     setSubmitting(true);
     try {
       const response = await action();
-      applyResponse(response);
+      if (!isCurrentSession(taskId) || actionGenerationRef.current !== actionGeneration || response.task.id !== taskId) return;
+      setState(response);
       if (navigateWhenReady && response.currentStep === 'READY') {
         onReady(task);
       }
     } catch (error) {
+      if (!isCurrentSession(taskId) || actionGenerationRef.current !== actionGeneration) return;
       message.error(errorMessage(error, fallback));
-      await refresh();
-    } finally {
+      submittingRef.current = false;
       setSubmitting(false);
+      await refresh(taskId);
+    } finally {
+      if (actionGenerationRef.current === actionGeneration) {
+        submittingRef.current = false;
+        setSubmitting(false);
+      }
     }
   };
 
@@ -302,15 +331,15 @@ export default function TaskOnboardingDrawer({
       onClose={onClose}
       width="min(900px, 82vw)"
       className="task-onboarding-drawer"
-      extra={<Button icon={<ReloadOutlined />} loading={loading} onClick={() => void refresh()}>刷新</Button>}
+      extra={<Button icon={<ReloadOutlined />} loading={loading} disabled={submitting} onClick={() => void refresh(task?.ID)}>刷新</Button>}
     >
       <Spin spinning={loading && !state}>
         {!task ? <Empty description="未选择任务配置" /> : loadError ? (
           <div className="onboarding-error-state">
             <Paragraph type="danger">{loadError}</Paragraph>
-            <Button type="primary" onClick={() => void refresh()}>重新加载</Button>
+            <Button type="primary" disabled={submitting} onClick={() => void refresh(task.ID)}>重新加载</Button>
           </div>
-        ) : state ? (
+        ) : state && state.task.id === task.ID ? (
           <div className="onboarding-content">
             <div className="onboarding-task-summary">
               <Text strong>{state.task.taskName}</Text>
@@ -324,7 +353,14 @@ export default function TaskOnboardingDrawer({
                   <button
                     type="button"
                     className={`onboarding-node onboarding-node-${node.state.toLowerCase()}`}
+                    aria-disabled={node.state === 'LOCKED'}
+                    title={node.state === 'LOCKED' ? '请先完成上一步' : undefined}
                     onClick={() => node.state === 'LOCKED' && message.warning('请先完成上一步')}
+                    onKeyDown={(event) => {
+                      if (node.state !== 'LOCKED' || (event.key !== 'Enter' && event.key !== ' ')) return;
+                      event.preventDefault();
+                      message.warning('请先完成上一步');
+                    }}
                   >
                     <span className="onboarding-node-number">{index + 1}</span>
                     <span>{node.label}</span>
