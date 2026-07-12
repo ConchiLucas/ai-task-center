@@ -29,7 +29,7 @@ public interface TaskResultRepository extends JpaRepository<TaskResult, Long>, J
               and run.id = :runId
               and run.taskConfigId = :taskConfigId
               and run.reason = :reason
-            order by link.id asc
+            order by result.id asc
             """)
     List<TaskResult> findValidationRunResults(
             @Param("resultIds") Collection<Long> resultIds,
