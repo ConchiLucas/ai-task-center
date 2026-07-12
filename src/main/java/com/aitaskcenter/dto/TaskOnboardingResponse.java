@@ -1,32 +1,29 @@
 package com.aitaskcenter.dto;
 
-import com.aitaskcenter.model.TaskConfig;
-import com.aitaskcenter.model.TaskResult;
-import com.aitaskcenter.model.TaskRun;
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 
 public class TaskOnboardingResponse {
-    private TaskConfig task;
+    private TaskOnboardingTaskSummary task;
     private List<TaskOnboardingNodeResponse> nodes = new ArrayList<>();
     private String currentStep;
     private String currentStatus;
     private String status;
     private String prompt;
-    private List<TaskResult> validationResults = new ArrayList<>();
-    private TaskRun validationRun;
-    private List<TaskResult> validationRunResults = new ArrayList<>();
+    private List<TaskOnboardingResultSummary> validationResults = new ArrayList<>();
+    private TaskOnboardingRunSummary validationRun;
+    private List<TaskOnboardingResultSummary> validationRunResults = new ArrayList<>();
     private Map<String, Long> counts = new LinkedHashMap<>();
     private List<String> allowedActions = new ArrayList<>();
     private String errorMessage;
 
-    public TaskConfig getTask() {
+    public TaskOnboardingTaskSummary getTask() {
         return task;
     }
 
-    public void setTask(TaskConfig task) {
+    public void setTask(TaskOnboardingTaskSummary task) {
         this.task = task;
     }
 
@@ -72,27 +69,27 @@ public class TaskOnboardingResponse {
         this.prompt = prompt;
     }
 
-    public List<TaskResult> getValidationResults() {
+    public List<TaskOnboardingResultSummary> getValidationResults() {
         return validationResults;
     }
 
-    public void setValidationResults(List<TaskResult> validationResults) {
+    public void setValidationResults(List<TaskOnboardingResultSummary> validationResults) {
         this.validationResults = validationResults == null ? new ArrayList<>() : new ArrayList<>(validationResults);
     }
 
-    public TaskRun getValidationRun() {
+    public TaskOnboardingRunSummary getValidationRun() {
         return validationRun;
     }
 
-    public void setValidationRun(TaskRun validationRun) {
+    public void setValidationRun(TaskOnboardingRunSummary validationRun) {
         this.validationRun = validationRun;
     }
 
-    public List<TaskResult> getValidationRunResults() {
+    public List<TaskOnboardingResultSummary> getValidationRunResults() {
         return validationRunResults;
     }
 
-    public void setValidationRunResults(List<TaskResult> validationRunResults) {
+    public void setValidationRunResults(List<TaskOnboardingResultSummary> validationRunResults) {
         this.validationRunResults = validationRunResults == null
                 ? new ArrayList<>()
                 : new ArrayList<>(validationRunResults);

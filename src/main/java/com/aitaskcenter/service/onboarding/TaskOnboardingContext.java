@@ -16,6 +16,13 @@ public class TaskOnboardingContext {
     private String batchArtifactPath = "";
     private String batchArtifactHash = "";
     private String errorMessage = "";
+    private String baselineStage = "";
+    private long baselineResultCount = -1;
+    private String baselineResultFingerprint = "";
+    private long baselineRunCount = -1;
+    private String baselineRunFingerprint = "";
+    private long baselineLinkCount = -1;
+    private String baselineLinkFingerprint = "";
 
     public String getResultValidationRunId() {
         return resultValidationRunId;
@@ -111,5 +118,61 @@ public class TaskOnboardingContext {
 
     public void setErrorMessage(String errorMessage) {
         this.errorMessage = errorMessage;
+    }
+
+    public String getBaselineStage() {
+        return baselineStage;
+    }
+
+    public void setBaselineStage(String baselineStage) {
+        this.baselineStage = baselineStage;
+    }
+
+    public long getBaselineResultCount() {
+        return baselineResultCount;
+    }
+
+    public void setBaselineResultCount(long baselineResultCount) {
+        this.baselineResultCount = baselineResultCount;
+    }
+
+    public String getBaselineResultFingerprint() {
+        return baselineResultFingerprint;
+    }
+
+    public void setBaselineResultFingerprint(String baselineResultFingerprint) {
+        this.baselineResultFingerprint = baselineResultFingerprint;
+    }
+
+    public long getBaselineRunCount() {
+        return baselineRunCount;
+    }
+
+    public void setBaselineRunCount(long baselineRunCount) {
+        this.baselineRunCount = baselineRunCount;
+    }
+
+    public String getBaselineRunFingerprint() {
+        return baselineRunFingerprint;
+    }
+
+    public void setBaselineRunFingerprint(String baselineRunFingerprint) {
+        this.baselineRunFingerprint = baselineRunFingerprint;
+    }
+
+    public long getBaselineLinkCount() {
+        return baselineLinkCount;
+    }
+
+    public void setBaselineLinkCount(long baselineLinkCount) {
+        this.baselineLinkCount = baselineLinkCount;
+    }
+
+    public String getBaselineLinkFingerprint() {
+        return baselineLinkFingerprint;
+    }
+
+    public void setBaselineLinkFingerprint(String baselineLinkFingerprint) {
+        this.baselineLinkFingerprint = baselineLinkFingerprint;
     }
 }

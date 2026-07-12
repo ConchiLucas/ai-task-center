@@ -121,6 +121,35 @@ class TaskOnboardingSchemaMigrationTest {
         }
     }
 
+    @Test
+    void createsCompositeOnboardingLookupIndexesIdempotently() throws Exception {
+        execute("CREATE TABLE tb_task_config (id bigint PRIMARY KEY)");
+        execute("""
+                CREATE TABLE tb_task_result (
+                    id bigint PRIMARY KEY,
+                    task_config_id bigint,
+                    source_description varchar(1000)
+                )
+                """);
+        execute("""
+                CREATE TABLE tb_task_run (
+                    id bigint PRIMARY KEY,
+                    task_config_id bigint,
+                    reason varchar(1000)
+                )
+                """);
+
+        runMigration(schemaDataSource);
+        runMigration(schemaDataSource);
+
+        assertIndexDefinition(
+                "idx_task_result_onboarding_marker",
+                "task_config_id, source_description, id");
+        assertIndexDefinition(
+                "idx_task_run_onboarding_marker",
+                "task_config_id, reason, id");
+    }
+
     private void runMigration(DataSource dataSource) {
         DatabaseInitializationSettings settings = new DatabaseInitializationSettings();
         settings.setMode(DatabaseInitializationMode.ALWAYS);
@@ -158,6 +187,19 @@ class TaskOnboardingSchemaMigrationTest {
             try (ResultSet resultSet = statement.executeQuery()) {
                 assertTrue(resultSet.next());
                 assertEquals("NO", resultSet.getString(1));
+            }
+        }
+    }
+
+    private void assertIndexDefinition(String indexName, String expectedColumns) throws SQLException {
+        String sql = "SELECT indexdef FROM pg_indexes WHERE schemaname = ? AND indexname = ?";
+        try (Connection connection = schemaDataSource.getConnection();
+                PreparedStatement statement = connection.prepareStatement(sql)) {
+            statement.setString(1, schemaName);
+            statement.setString(2, indexName);
+            try (ResultSet resultSet = statement.executeQuery()) {
+                assertTrue(resultSet.next());
+                assertTrue(resultSet.getString(1).contains("(" + expectedColumns + ")"));
             }
         }
     }

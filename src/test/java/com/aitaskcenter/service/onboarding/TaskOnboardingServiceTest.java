@@ -20,17 +20,24 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import jakarta.persistence.LockModeType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.springframework.data.jpa.repository.Lock;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class TaskOnboardingServiceTest {
     private static final Long TASK_ID = 7L;
+    private static final String ARTIFACT_HASH = "a".repeat(64);
+    private static final String EMPTY_FINGERPRINT =
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
     private static final ObjectMapper OBJECT_MAPPER = new ObjectMapper();
 
     private TaskConfigRepository taskConfigRepository;
@@ -56,13 +63,23 @@ class TaskOnboardingServiceTest {
         taskRunRepository = taskRuns.proxy();
         taskRunResultRepository = taskRunResults.proxy();
         promptBuilder = new TaskOnboardingPromptBuilder(OBJECT_MAPPER);
-        service = new TaskOnboardingService(
-                taskConfigRepository,
+        TaskOnboardingContextCodec contextCodec = new TaskOnboardingContextCodec(OBJECT_MAPPER);
+        TaskOnboardingSnapshotService snapshotService = new TaskOnboardingSnapshotService(
+                taskResultRepository, taskRunRepository, taskRunResultRepository);
+        TaskOnboardingCallbackValidator callbackValidator = new TaskOnboardingCallbackValidator(
                 taskResultRepository,
                 taskRunRepository,
                 taskRunResultRepository,
-                promptBuilder,
-                OBJECT_MAPPER);
+                OBJECT_MAPPER,
+                snapshotService);
+        TaskOnboardingResponseAssembler responseAssembler = new TaskOnboardingResponseAssembler(
+                taskResultRepository, taskRunRepository, promptBuilder);
+        service = new TaskOnboardingService(
+                taskConfigRepository,
+                contextCodec,
+                snapshotService,
+                callbackValidator,
+                responseAssembler);
     }
 
     @Test
@@ -143,7 +160,7 @@ class TaskOnboardingServiceTest {
         assertEquals(List.of(101L, 102L), savedContext.getResultValidationIds());
         assertEquals("", savedContext.getResultReportToken());
         assertEquals("src/result-generator.py", savedContext.getResultArtifactPath());
-        assertEquals("sha256-result", savedContext.getResultArtifactHash());
+        assertEquals(ARTIFACT_HASH, savedContext.getResultArtifactHash());
         assertEquals(OnboardingStep.RESULT_VALIDATION.name(), response.getCurrentStep());
         assertEquals(1, taskConfigs.callCount("save"));
     }
@@ -226,8 +243,6 @@ class TaskOnboardingServiceTest {
         taskRuns.answer("findByTaskConfigIdAndReasonOrderByIdAsc",
                 List.of(run), TASK_ID, "BATCH_VALIDATION:batch-run-1");
         taskRunResults.answer("findByTaskRunIdOrderByIdAsc", links, 301L);
-        taskResults.answer("findByTaskConfigIdOrderByIdAsc",
-                List.of(result(201L, TASK_ID, "formal"), result(202L, TASK_ID, "formal")), TASK_ID);
         taskRunResults.answer("countLinkedResultsForRunAndTask",
                 2L, 301L, TASK_ID, List.of(201L, 202L));
 
@@ -303,8 +318,7 @@ class TaskOnboardingServiceTest {
                 List.of(run(9L, TASK_ID, "BATCH_VALIDATION:run", "PENDING")),
                 TASK_ID, "BATCH_VALIDATION:run");
         taskRunResults.answer("findByTaskRunIdOrderByIdAsc", List.of(link(21L, 9L, 11L)), 9L);
-        taskResults.answer("findByTaskConfigIdOrderByIdAsc",
-                List.of(result(11L, TASK_ID, "formal"), result(12L, TASK_ID, "formal")), TASK_ID);
+        taskResults.answer("findFingerprintRowsByTaskConfigId", List.of("modified-result"), TASK_ID);
         taskRunResults.answer("countLinkedResultsForRunAndTask", 1L, 9L, TASK_ID, List.of(11L));
         assertRejectedWithoutMutation(mutatedResults, report("batch", "token", List.of(9L, 11L)));
     }
@@ -417,8 +431,8 @@ class TaskOnboardingServiceTest {
 
         TaskConfig batchTask = taskAt(OnboardingStep.BATCH_CODE);
         stubTask(batchTask);
-        taskResults.answer("findByTaskConfigIdOrderByIdAsc",
-                List.of(result(201L, TASK_ID, "formal"), result(202L, TASK_ID, "formal")), TASK_ID);
+        taskResults.answer("findFingerprintRowsByTaskConfigId",
+                List.of("formal-201", "formal-202"), TASK_ID);
 
         service.get(TASK_ID);
         TaskOnboardingContext firstBatchContext = context(batchTask);
@@ -431,14 +445,276 @@ class TaskOnboardingServiceTest {
         assertFalse(batchToken.isBlank());
         assertEquals(batchMarker, secondBatchContext.getBatchValidationMarker());
         assertEquals(batchToken, secondBatchContext.getBatchReportToken());
-        assertEquals(List.of(201L, 202L), secondBatchContext.getBatchValidationResultIds());
+        assertEquals(List.of(), secondBatchContext.getBatchValidationResultIds());
+        assertEquals(2L, secondBatchContext.getBaselineResultCount());
         assertNotEquals(resultRunId, batchMarker);
         assertEquals(2, taskConfigs.callCount("save"));
+    }
+
+    @Test
+    void repositoryDeclaresPessimisticWriteLockForOnboardingMutations() throws Exception {
+        Method method = TaskConfigRepository.class.getMethod("findByIdForUpdate", Long.class);
+
+        Lock lock = method.getAnnotation(Lock.class);
+
+        assertNotNull(lock);
+        assertEquals(LockModeType.PESSIMISTIC_WRITE, lock.value());
+    }
+
+    @Test
+    void publicOperationsLoadTaskThroughWriteLock() {
+        TaskConfig task = taskAt(OnboardingStep.READY);
+        stubTaskForUpdate(task);
+
+        service.get(TASK_ID);
+
+        assertEquals(1, taskConfigs.callCount("findByIdForUpdate"));
+        assertEquals(0, taskConfigs.callCount("findById"));
+    }
+
+    @Test
+    void nonActiveCurrentStateHasMatchingNodeNoActionsAndCannotMutate() {
+        for (OnboardingStatus status : List.of(
+                OnboardingStatus.FAILED, OnboardingStatus.STALE, OnboardingStatus.COMPLETED)) {
+            TaskConfig task = resultCodeTask("run", "token");
+            task.setOnboardingStatus(status.name());
+            stubTask(task);
+
+            TaskOnboardingResponse response = service.get(TASK_ID);
+
+            assertEquals(status.name(), response.getNodes().get(0).getState());
+            assertEquals(List.of(), response.getAllowedActions());
+            assertNull(response.getPrompt());
+            assertEquals(0, taskConfigs.callCount("save"));
+            assertRejectedWithoutMutation(task, report("result", "token", List.of(1L)));
+        }
+
+        TaskConfig confirmTask = taskAt(OnboardingStep.RESULT_VALIDATION);
+        confirmTask.setOnboardingStatus(OnboardingStatus.FAILED.name());
+        stubTask(confirmTask);
+        String context = confirmTask.getOnboardingContext();
+        assertThrows(IllegalStateException.class, () -> service.confirmResultValidation(TASK_ID));
+        assertEquals(OnboardingStep.RESULT_VALIDATION.name(), confirmTask.getOnboardingStep());
+        assertEquals(OnboardingStatus.FAILED.name(), confirmTask.getOnboardingStatus());
+        assertEquals(context, confirmTask.getOnboardingContext());
+    }
+
+    @Test
+    void rejectsNullNullListsAndSemanticallyInconsistentContextCleanly() {
+        TaskConfig nullContext = taskAt(OnboardingStep.READY);
+        nullContext.setOnboardingContext("null");
+        stubTask(nullContext);
+        assertControlledContextFailure(nullContext);
+
+        TaskConfig nullLists = taskAt(OnboardingStep.READY);
+        nullLists.setOnboardingContext("{\"resultValidationIds\":null}");
+        stubTask(nullLists);
+        assertControlledContextFailure(nullLists);
+
+        TaskConfig partialIdentity = resultCodeTask("", "token");
+        stubTask(partialIdentity);
+        assertControlledContextFailure(partialIdentity);
+
+        TaskConfig partialBaseline = taskAt(OnboardingStep.READY);
+        TaskOnboardingContext corruptBaseline = new TaskOnboardingContext();
+        corruptBaseline.setBaselineStage("RESULT");
+        corruptBaseline.setBaselineResultCount(0);
+        partialBaseline.setOnboardingContext(write(corruptBaseline));
+        stubTask(partialBaseline);
+        assertControlledContextFailure(partialBaseline);
+    }
+
+    @Test
+    void rejectsBlankArtifactAndNonSha256ArtifactHashWithoutConsumingToken() {
+        TaskConfig blankArtifact = resultCodeTask("run", "token");
+        TaskOnboardingReportRequest blankArtifactRequest = report("result", "token", List.of(1L));
+        blankArtifactRequest.setArtifact("  ");
+        assertInvalidProvenance(blankArtifact, blankArtifactRequest);
+
+        TaskConfig uppercaseHash = resultCodeTask("run", "token");
+        TaskOnboardingReportRequest uppercaseHashRequest = report("result", "token", List.of(1L));
+        uppercaseHashRequest.setArtifactHash("A".repeat(64));
+        assertInvalidProvenance(uppercaseHash, uppercaseHashRequest);
+
+        TaskConfig shortHash = resultCodeTask("run", "token");
+        TaskOnboardingReportRequest shortHashRequest = report("result", "token", List.of(1L));
+        shortHashRequest.setArtifactHash("abc123");
+        assertInvalidProvenance(shortHash, shortHashRequest);
+    }
+
+    @Test
+    void responseSerializationOmitsEntityAndContextSecrets() throws Exception {
+        TaskConfig task = taskAt(OnboardingStep.BATCH_VALIDATION);
+        TaskOnboardingContext context = new TaskOnboardingContext();
+        context.setResultValidationRunId("secret-result-run");
+        context.setResultReportToken("secret-report-token");
+        context.setBatchValidationTaskRunId(9L);
+        context.setBatchValidationMarker("run");
+        context.setBatchValidationResultIds(List.of(11L));
+        task.setOnboardingContext(write(context));
+        TaskRun run = run(9L, TASK_ID, "BATCH_VALIDATION:run", "PENDING");
+        run.setClaimToken("secret-claim-token");
+        run.setWorkerId("secret-worker");
+        run.setAiResponseJson("secret-ai-response");
+        run.setRunLog("secret-run-log");
+        stubTask(task);
+        taskRuns.answer("findByIdAndTaskConfigIdAndReason",
+                Optional.of(run), 9L, TASK_ID, "BATCH_VALIDATION:run");
+
+        String json = OBJECT_MAPPER.writeValueAsString(service.get(TASK_ID));
+
+        assertFalse(json.contains("onboardingContext"));
+        assertFalse(json.contains("secret-report-token"));
+        assertFalse(json.contains("claimToken"));
+        assertFalse(json.contains("secret-claim-token"));
+        assertFalse(json.contains("secret-worker"));
+        assertFalse(json.contains("secret-ai-response"));
+        assertFalse(json.contains("secret-run-log"));
+    }
+
+    @Test
+    void codeStepGetPersistsCompactDeterministicBaselineFingerprintsOnlyOnce() throws Exception {
+        TaskConfig task = taskAt(OnboardingStep.RESULT_CODE);
+        stubTask(task);
+        taskResults.answer("findFingerprintRowsByTaskConfigId", List.of("result-a", "result-b"), TASK_ID);
+        taskRuns.answer("findFingerprintRowsByTaskConfigId", List.of("run-a"), TASK_ID);
+        taskRunResults.answer("findFingerprintRowsByTaskConfigId", List.of("link-a", "link-b"), TASK_ID);
+
+        service.get(TASK_ID);
+        TaskOnboardingContext first = context(task);
+        service.get(TASK_ID);
+        TaskOnboardingContext second = context(task);
+
+        assertEquals("RESULT", first.getBaselineStage());
+        assertEquals(2L, first.getBaselineResultCount());
+        assertEquals(1L, first.getBaselineRunCount());
+        assertEquals(2L, first.getBaselineLinkCount());
+        assertTrue(first.getBaselineResultFingerprint().matches("[0-9a-f]{64}"));
+        assertTrue(first.getBaselineRunFingerprint().matches("[0-9a-f]{64}"));
+        assertTrue(first.getBaselineLinkFingerprint().matches("[0-9a-f]{64}"));
+        assertEquals(first.getBaselineResultFingerprint(), second.getBaselineResultFingerprint());
+        assertEquals(1, taskResults.callCount("findFingerprintRowsByTaskConfigId"));
+        assertEquals(1, taskRuns.callCount("findFingerprintRowsByTaskConfigId"));
+        assertEquals(1, taskRunResults.callCount("findFingerprintRowsByTaskConfigId"));
+    }
+
+    @Test
+    void resultCallbackRejectsExtraUnmarkedModifiedDeletedRowsExtraRunsAndExtraLinks() {
+        assertForbiddenResultSideEffect(
+                List.of("old-result"), List.of("old-result", "extra-unmarked"),
+                List.of("old-run"), List.of("old-run"),
+                List.of("old-link"), List.of("old-link"));
+        assertForbiddenResultSideEffect(
+                List.of("old-result"), List.of("modified-result"),
+                List.of("old-run"), List.of("old-run"),
+                List.of("old-link"), List.of("old-link"));
+        assertForbiddenResultSideEffect(
+                List.of("old-result"), List.of(),
+                List.of("old-run"), List.of("old-run"),
+                List.of("old-link"), List.of("old-link"));
+        assertForbiddenResultSideEffect(
+                List.of("old-result"), List.of("old-result"),
+                List.of("old-run"), List.of("old-run", "extra-run"),
+                List.of("old-link"), List.of("old-link"));
+        assertForbiddenResultSideEffect(
+                List.of("old-result"), List.of("old-result"),
+                List.of("old-run"), List.of("old-run"),
+                List.of("old-link"), List.of("old-link", "extra-link"));
+    }
+
+    @Test
+    void batchCallbackRejectsModifiedResultsExtraRunsAndExtraLinks() {
+        assertForbiddenBatchSideEffect(
+                List.of("old-result"), List.of("modified-result"),
+                List.of("old-run"), List.of("old-run"),
+                List.of("old-link"), List.of("old-link"));
+        assertForbiddenBatchSideEffect(
+                List.of("old-result"), List.of("old-result"),
+                List.of("old-run"), List.of("old-run", "extra-run"),
+                List.of("old-link"), List.of("old-link"));
+        assertForbiddenBatchSideEffect(
+                List.of("old-result"), List.of("old-result"),
+                List.of("old-run"), List.of("old-run"),
+                List.of("old-link"), List.of("old-link", "extra-link"));
     }
 
     private void assertInvalidResultCallback(TaskConfig task, TaskOnboardingReportRequest request) {
         stubTask(task);
         assertRejectedWithoutMutation(task, request);
+    }
+
+    private void assertForbiddenResultSideEffect(
+            List<String> baselineResults,
+            List<String> currentProtectedResults,
+            List<String> baselineRuns,
+            List<String> currentRuns,
+            List<String> baselineLinks,
+            List<String> currentLinks) {
+        TaskConfig task = taskAt(OnboardingStep.RESULT_CODE);
+        stubTask(task);
+        taskResults.answer("findFingerprintRowsByTaskConfigId", baselineResults, TASK_ID);
+        taskRuns.answer("findFingerprintRowsByTaskConfigId", baselineRuns, TASK_ID);
+        taskRunResults.answer("findFingerprintRowsByTaskConfigId", baselineLinks, TASK_ID);
+        service.get(TASK_ID);
+        TaskOnboardingContext baseline = readContext(task);
+        String marker = "RESULT_VALIDATION:" + baseline.getResultValidationRunId();
+        TaskResult created = result(101L, TASK_ID, marker);
+        taskResults.answer("findByTaskConfigIdAndSourceDescriptionOrderByIdAsc",
+                List.of(created), TASK_ID, marker);
+        taskRunResults.answer("countByTaskResultIdIn", 0L, List.of(101L));
+        taskResults.answer("findFingerprintRowsByTaskConfigIdAndIdNotIn",
+                currentProtectedResults, TASK_ID, List.of(101L));
+        taskRuns.answer("findFingerprintRowsByTaskConfigId", currentRuns, TASK_ID);
+        taskRunResults.answer("findFingerprintRowsByTaskConfigId", currentLinks, TASK_ID);
+
+        assertRejectedWithoutMutation(task, report(
+                "result", baseline.getResultReportToken(), List.of(101L)));
+    }
+
+    private void assertForbiddenBatchSideEffect(
+            List<String> baselineResults,
+            List<String> currentResults,
+            List<String> baselineRuns,
+            List<String> currentProtectedRuns,
+            List<String> baselineLinks,
+            List<String> currentProtectedLinks) {
+        TaskConfig task = taskAt(OnboardingStep.BATCH_CODE);
+        stubTask(task);
+        taskResults.answer("findFingerprintRowsByTaskConfigId", baselineResults, TASK_ID);
+        taskRuns.answer("findFingerprintRowsByTaskConfigId", baselineRuns, TASK_ID);
+        taskRunResults.answer("findFingerprintRowsByTaskConfigId", baselineLinks, TASK_ID);
+        service.get(TASK_ID);
+        TaskOnboardingContext baseline = readContext(task);
+        String marker = "BATCH_VALIDATION:" + baseline.getBatchValidationMarker();
+        TaskRun createdRun = run(301L, TASK_ID, marker, "PENDING");
+        taskRuns.answer("findByTaskConfigIdAndReasonOrderByIdAsc",
+                List.of(createdRun), TASK_ID, marker);
+        taskRunResults.answer("findByTaskRunIdOrderByIdAsc", List.of(link(401L, 301L, 11L)), 301L);
+        taskRunResults.answer("countLinkedResultsForRunAndTask", 1L, 301L, TASK_ID, List.of(11L));
+        taskResults.answer("findFingerprintRowsByTaskConfigId", currentResults, TASK_ID);
+        taskRuns.answer("findFingerprintRowsByTaskConfigIdAndIdNot",
+                currentProtectedRuns, TASK_ID, 301L);
+        taskRunResults.answer("findFingerprintRowsByTaskConfigIdAndTaskRunIdNot",
+                currentProtectedLinks, TASK_ID, 301L);
+
+        assertRejectedWithoutMutation(task, report(
+                "batch", baseline.getBatchReportToken(), List.of(301L, 11L)));
+    }
+
+    private TaskOnboardingContext readContext(TaskConfig task) {
+        try {
+            return context(task);
+        } catch (Exception ex) {
+            throw new IllegalStateException(ex);
+        }
+    }
+
+    private void assertInvalidProvenance(TaskConfig task, TaskOnboardingReportRequest request) {
+        long resultQueryCount = taskResults.callCount(
+                "findByTaskConfigIdAndSourceDescriptionOrderByIdAsc");
+        assertInvalidResultCallback(task, request);
+        assertEquals(resultQueryCount, taskResults.callCount(
+                "findByTaskConfigIdAndSourceDescriptionOrderByIdAsc"));
     }
 
     private void assertInvalidBatch(TaskConfig task, TaskOnboardingReportRequest request) {
@@ -488,7 +764,8 @@ class TaskOnboardingServiceTest {
         String context = task.getOnboardingContext();
         long saveCount = taskConfigs.callCount("save");
 
-        assertThrows(IllegalArgumentException.class, () -> service.report(TASK_ID, request));
+        RuntimeException error = assertThrows(RuntimeException.class, () -> service.report(TASK_ID, request));
+        assertFalse(error instanceof NullPointerException);
 
         assertEquals(step, task.getOnboardingStep());
         assertEquals(status, task.getOnboardingStatus());
@@ -498,6 +775,19 @@ class TaskOnboardingServiceTest {
 
     private void stubTask(TaskConfig task) {
         taskConfigs.answer("findById", Optional.of(task), TASK_ID);
+        taskConfigs.answer("findByIdForUpdate", Optional.of(task), TASK_ID);
+    }
+
+    private void stubTaskForUpdate(TaskConfig task) {
+        taskConfigs.answer("findByIdForUpdate", Optional.of(task), TASK_ID);
+    }
+
+    private void assertControlledContextFailure(TaskConfig task) {
+        RuntimeException error = assertThrows(RuntimeException.class, () -> service.get(TASK_ID));
+        assertTrue(error instanceof IllegalStateException);
+        assertFalse(error instanceof NullPointerException);
+        assertTrue(error.getMessage() != null && !error.getMessage().isBlank());
+        assertEquals(0, taskConfigs.callCount("save"));
     }
 
     private static TaskConfig taskAt(OnboardingStep step) {
@@ -517,6 +807,7 @@ class TaskOnboardingServiceTest {
         TaskOnboardingContext context = new TaskOnboardingContext();
         context.setResultValidationRunId(runId);
         context.setResultReportToken(token);
+        setEmptyBaseline(context, "RESULT");
         task.setOnboardingContext(write(context));
         return task;
     }
@@ -526,9 +817,19 @@ class TaskOnboardingServiceTest {
         TaskOnboardingContext context = new TaskOnboardingContext();
         context.setBatchValidationMarker(runId);
         context.setBatchReportToken(token);
-        context.setBatchValidationResultIds(baselineResultIds);
+        setEmptyBaseline(context, "BATCH");
         task.setOnboardingContext(write(context));
         return task;
+    }
+
+    private static void setEmptyBaseline(TaskOnboardingContext context, String stage) {
+        context.setBaselineStage(stage);
+        context.setBaselineResultCount(0);
+        context.setBaselineResultFingerprint(EMPTY_FINGERPRINT);
+        context.setBaselineRunCount(0);
+        context.setBaselineRunFingerprint(EMPTY_FINGERPRINT);
+        context.setBaselineLinkCount(0);
+        context.setBaselineLinkFingerprint(EMPTY_FINGERPRINT);
     }
 
     private static TaskOnboardingReportRequest report(String stage, String token, List<Long> ids) {
@@ -536,7 +837,7 @@ class TaskOnboardingServiceTest {
         request.setStage(stage);
         request.setToken(token);
         request.setArtifact("src/result-generator.py");
-        request.setArtifactHash("sha256-result");
+        request.setArtifactHash(ARTIFACT_HASH);
         request.setEntityIds(ids);
         return request;
     }

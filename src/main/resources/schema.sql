@@ -47,3 +47,17 @@ BEGIN
 END
 $task_onboarding$;
 ^^^
+DO $task_onboarding_indexes$
+BEGIN
+    IF to_regclass('tb_task_result') IS NOT NULL THEN
+        CREATE INDEX IF NOT EXISTS idx_task_result_onboarding_marker
+            ON tb_task_result (task_config_id, source_description, id);
+    END IF;
+
+    IF to_regclass('tb_task_run') IS NOT NULL THEN
+        CREATE INDEX IF NOT EXISTS idx_task_run_onboarding_marker
+            ON tb_task_run (task_config_id, reason, id);
+    END IF;
+END
+$task_onboarding_indexes$;
+^^^

@@ -30,6 +30,7 @@ public class TaskOnboardingPromptBuilder {
                 - 新结果的 result_content 必须是 JSON，且 _meta.validationRunId 必须精确等于 %s。
                 - 禁止对 tb_task_run 或 tb_task_run_result 执行 INSERT、UPDATE 或 DELETE。
                 - 禁止修改来源业务表，禁止执行任务，禁止调用 AI 或 TTS。
+                - 后端会比较完整受保护基线；任何未申报结果、已有结果改删、批次或 link 变化都会拒绝回填。
                 """.formatted(marker, marker);
 
         return """
@@ -50,6 +51,7 @@ public class TaskOnboardingPromptBuilder {
                 - 实现最小的、符合项目既有模式的生成器；不要发明未知的硬编码目标文件或 API。
                 - 添加聚焦测试，完成实现、自测及上述少量真实验证数据插入。
                 - 报告 artifact 路径和 SHA-256 hash。
+                - artifact 路径必须非空，SHA-256 hash 必须是 64 位小写十六进制字符串。
                 - task-workflow 脚本及其集成测试属于 Task 5；本任务不要创建或修改该脚本。
 
                 回填实体 ID 规则：--entity-ids 必须是 1–3 个新建 tb_task_result 的数字数据库 ID，按升序、逗号分隔，后端按 List<Long> 顺序回填。
@@ -85,6 +87,7 @@ public class TaskOnboardingPromptBuilder {
                 - 禁止新增、更新或删除任何 tb_task_result。
                 - 新批次的 ai_prompt_json 必须是 JSON，且 _meta.validationRunId 必须精确等于 %s。
                 - 禁止启动或执行验证批次，禁止调用 AI 或 TTS，禁止回写来源业务表。
+                - 后端会比较完整受保护基线；除申报的单个批次及其 links 外，任何结果、批次或 link 变化都会拒绝回填。
                 """.formatted(marker, marker);
 
         return """
@@ -105,6 +108,7 @@ public class TaskOnboardingPromptBuilder {
                 - 实现最小的、符合项目既有模式的生成器；不要发明未知的硬编码目标文件或 API。
                 - 添加聚焦测试，完成实现、自测及上述单个验证批次和 links 插入。
                 - 报告 artifact 路径和 SHA-256 hash。
+                - artifact 路径必须非空，SHA-256 hash 必须是 64 位小写十六进制字符串。
                 - task-workflow 脚本及其集成测试属于 Task 5；本任务不要创建或修改该脚本。
 
                 回填实体 ID 规则：--entity-ids 的第一个数字必须是新建 tb_task_run 的数据库 ID，其后是已关联的既有 tb_task_result 数字数据库 ID，按升序排列；全部以逗号分隔，后端按 List<Long> 顺序回填。
