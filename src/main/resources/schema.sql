@@ -1,0 +1,31 @@
+DO $task_onboarding$
+BEGIN
+    IF to_regclass('tb_task_config') IS NULL THEN
+        RETURN;
+    END IF;
+
+    ALTER TABLE tb_task_config
+        ADD COLUMN IF NOT EXISTS onboarding_step varchar(40);
+    ALTER TABLE tb_task_config
+        ADD COLUMN IF NOT EXISTS onboarding_status varchar(40);
+    ALTER TABLE tb_task_config
+        ADD COLUMN IF NOT EXISTS onboarding_context text;
+
+    UPDATE tb_task_config
+    SET onboarding_step = COALESCE(onboarding_step, 'RESULT_CODE'),
+        onboarding_status = COALESCE(onboarding_status, 'ACTIVE'),
+        onboarding_context = COALESCE(onboarding_context, '{}')
+    WHERE onboarding_step IS NULL
+       OR onboarding_status IS NULL
+       OR onboarding_context IS NULL;
+
+    ALTER TABLE tb_task_config
+        ALTER COLUMN onboarding_step SET DEFAULT 'RESULT_CODE',
+        ALTER COLUMN onboarding_step SET NOT NULL,
+        ALTER COLUMN onboarding_status SET DEFAULT 'ACTIVE',
+        ALTER COLUMN onboarding_status SET NOT NULL,
+        ALTER COLUMN onboarding_context SET DEFAULT '{}',
+        ALTER COLUMN onboarding_context SET NOT NULL;
+END
+$task_onboarding$;
+^^^

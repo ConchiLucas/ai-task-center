@@ -7,7 +7,12 @@ spring:
     username: ${TASK_CENTER_DB_USER:conchi}
     password: ${TASK_CENTER_DB_PASSWORD:conchi123456}
     driver-class-name: org.postgresql.Driver
+  sql:
+    init:
+      mode: always
+      separator: ^^^
   jpa:
+    defer-datasource-initialization: false
     hibernate:
       ddl-auto: update
     open-in-view: false

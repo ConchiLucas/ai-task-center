@@ -32,13 +32,13 @@ public class TaskConfig extends BaseEntity {
     // 字段：任务关联的数据表 JSON
     private String selectedTables;
 
-    @Column(nullable = false, length = 40)
+    @Column(nullable = false, length = 40, columnDefinition = "varchar(40) default 'RESULT_CODE'")
     private String onboardingStep = OnboardingStep.RESULT_CODE.name();
 
-    @Column(nullable = false, length = 40)
+    @Column(nullable = false, length = 40, columnDefinition = "varchar(40) default 'ACTIVE'")
     private String onboardingStatus = OnboardingStatus.ACTIVE.name();
 
-    @Column(nullable = false, columnDefinition = "text")
+    @Column(nullable = false, columnDefinition = "text default '{}'")
     private String onboardingContext = "{}";
 
     // 方法：getTaskName
