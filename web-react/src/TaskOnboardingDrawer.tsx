@@ -174,9 +174,10 @@ export default function TaskOnboardingDrawer({
     navigateWhenReady = false,
   ) => {
     const taskId = task?.ID;
-    if (!taskId || !isCurrentSession(taskId)) return;
+    if (submittingRef.current || submitting || !taskId || !isCurrentSession(taskId)) return;
     const actionGeneration = ++actionGenerationRef.current;
     requestGenerationRef.current += 1;
+    setLoading(false);
     submittingRef.current = true;
     setSubmitting(true);
     try {
