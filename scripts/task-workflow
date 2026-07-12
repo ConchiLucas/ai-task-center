@@ -89,9 +89,11 @@ def post_report(base_url, task_config_id, payload, token):
 
 
 def build_parser():
-    parser = argparse.ArgumentParser(description="Report task onboarding callback results.")
+    parser = argparse.ArgumentParser(
+        description="Report task onboarding callback results.", allow_abbrev=False)
     subcommands = parser.add_subparsers(dest="command", required=True)
-    report = subcommands.add_parser("report", help="Submit an onboarding callback report.")
+    report = subcommands.add_parser(
+        "report", help="Submit an onboarding callback report.", allow_abbrev=False)
     report.add_argument("--task-config-id", required=True, type=positive_integer)
     report.add_argument("--stage", required=True, choices=("result", "batch"))
     report.add_argument("--token", required=True, type=non_empty)

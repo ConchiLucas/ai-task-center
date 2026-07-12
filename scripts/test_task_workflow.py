@@ -95,6 +95,13 @@ class TaskWorkflowTest(unittest.TestCase):
         self.assertIn("Duplicate entity IDs", result.stderr)
         self.assertEqual([], CallbackHandler.requests)
 
+    def test_rejects_abbreviated_report_flag_without_request(self):
+        result = self.run_workflow("--entity-ids", "1", "--to", "replacement-token")
+
+        self.assertNotEqual(0, result.returncode)
+        self.assertIn("unrecognized arguments: --to", result.stderr)
+        self.assertEqual([], CallbackHandler.requests)
+
     def test_redacts_token_from_backend_errors(self):
         CallbackHandler.response_body = {"code": 7, "data": None, "msg": "token %s rejected" % TOKEN}
 
