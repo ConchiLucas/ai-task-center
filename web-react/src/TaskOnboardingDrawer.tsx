@@ -14,7 +14,7 @@ import {
   Tag,
   Typography,
 } from 'antd';
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ConnectionConfig,
   LocalCliConfigItem,
@@ -87,7 +87,6 @@ export default function TaskOnboardingDrawer({
   const [submitting, setSubmitting] = useState(false);
   const [loadError, setLoadError] = useState('');
   const [batchForm] = Form.useForm();
-  const readyTaskId = useRef<number | null>(null);
 
   const projectName = useMemo(
     () => projects.find((project) => project.ID === task?.projectId)?.projectName || '-',
@@ -116,7 +115,6 @@ export default function TaskOnboardingDrawer({
     if (!open) {
       setState(null);
       setLoadError('');
-      readyTaskId.current = null;
       return;
     }
     void refresh();
@@ -128,12 +126,6 @@ export default function TaskOnboardingDrawer({
     window.addEventListener('focus', onFocus);
     return () => window.removeEventListener('focus', onFocus);
   }, [open, refresh]);
-
-  useEffect(() => {
-    if (!task || state?.currentStep !== 'READY' || readyTaskId.current === task.ID) return;
-    readyTaskId.current = task.ID || null;
-    onReady(task);
-  }, [onReady, state?.currentStep, task]);
 
   useEffect(() => {
     if (state?.currentStep !== 'BATCH_GENERATION' || !task) return;
@@ -158,11 +150,19 @@ export default function TaskOnboardingDrawer({
     }
   };
 
-  const submit = async (action: () => Promise<TaskOnboardingResponse>, fallback: string) => {
+  const submit = async (
+    action: () => Promise<TaskOnboardingResponse>,
+    fallback: string,
+    navigateWhenReady = false,
+  ) => {
     if (!task?.ID) return;
     setSubmitting(true);
     try {
-      applyResponse(await action());
+      const response = await action();
+      applyResponse(response);
+      if (navigateWhenReady && response.currentStep === 'READY') {
+        onReady(task);
+      }
     } catch (error) {
       message.error(errorMessage(error, fallback));
       await refresh();
@@ -182,6 +182,7 @@ export default function TaskOnboardingDrawer({
         includeFailed: values.includeFailed === true,
       }),
       '生成执行批次失败',
+      true,
     );
   };
 
