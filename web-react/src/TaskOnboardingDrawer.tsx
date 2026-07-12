@@ -158,6 +158,7 @@ export default function TaskOnboardingDrawer({
   }, [batchForm, cliConfigs, state?.currentStep, task]);
 
   const isAllowed = (action: string) => state?.allowedActions.includes(action) === true;
+  const notifyLockedNode = () => message.warning('请先完成上一步');
   const copyPrompt = async () => {
     if (!state?.prompt || !isAllowed('COPY_PROMPT')) return;
     try {
@@ -349,26 +350,32 @@ export default function TaskOnboardingDrawer({
               {state.errorMessage && <Text type="danger">{state.errorMessage}</Text>}
             </div>
             <div className="onboarding-flow" aria-label="任务引导步骤">
-              {state.nodes.map((node, index) => (
-                <div key={node.step} className="onboarding-flow-item">
-                  <button
-                    type="button"
-                    className={`onboarding-node onboarding-node-${node.state.toLowerCase()}`}
-                    aria-disabled={node.state === 'LOCKED'}
-                    title={node.state === 'LOCKED' ? '请先完成上一步' : undefined}
-                    onClick={() => node.state === 'LOCKED' && message.warning('请先完成上一步')}
-                    onKeyDown={(event) => {
-                      if (node.state !== 'LOCKED' || (event.key !== 'Enter' && event.key !== ' ')) return;
-                      event.preventDefault();
-                      message.warning('请先完成上一步');
-                    }}
-                  >
-                    <span className="onboarding-node-number">{index + 1}</span>
-                    <span>{node.label}</span>
-                  </button>
-                  {renderNodeBody(node.step)}
-                </div>
-              ))}
+              {state.nodes.map((node, index) => {
+                const isLocked = node.state === 'LOCKED';
+
+                return (
+                  <div key={node.step} className="onboarding-flow-item">
+                    <button
+                      type="button"
+                      className={`onboarding-node onboarding-node-${node.state.toLowerCase()}`}
+                      aria-disabled={isLocked ? 'true' : undefined}
+                      title={isLocked ? '请先完成上一步' : undefined}
+                      onClick={() => {
+                        if (isLocked) notifyLockedNode();
+                      }}
+                      onKeyDown={(event) => {
+                        if (!isLocked || (event.key !== 'Enter' && event.key !== ' ')) return;
+                        event.preventDefault();
+                        notifyLockedNode();
+                      }}
+                    >
+                      <span className="onboarding-node-number">{index + 1}</span>
+                      <span>{node.label}</span>
+                    </button>
+                    {renderNodeBody(node.step)}
+                  </div>
+                );
+              })}
             </div>
           </div>
         ) : <Empty description="暂无引导状态" />}
