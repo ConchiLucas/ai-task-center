@@ -7,7 +7,9 @@ import com.aitaskcenter.dto.TaskOnboardingResponse;
 import com.aitaskcenter.model.TaskConfig;
 import com.aitaskcenter.service.TaskConfigService;
 import com.aitaskcenter.service.onboarding.TaskOnboardingService;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import org.springframework.web.bind.annotation.DeleteMapping;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PathVariable;
@@ -44,18 +46,42 @@ public class TaskConfigController {
 
     @PostMapping("/{id}/generate-results")
     // 方法：generateResults
-    public ApiResponse<TaskOnboardingResponse> generateResults(
+    public ApiResponse<Map<String, Object>> generateResults(
             @PathVariable Long id,
             @RequestParam(defaultValue = "false") boolean overwrite) {
-        return ApiResponse.ok(onboardingService.generateResults(id), "任务结果生成完成");
+        if (overwrite) {
+            throw new IllegalArgumentException(
+                    "overwrite=true is not supported by the gated generation workflow");
+        }
+        return ApiResponse.ok(resultGenerationCounts(onboardingService.generateResults(id)), "任务结果生成完成");
     }
 
     @PostMapping("/{id}/generate-run-batches")
     // 方法：generateRunBatches
-    public ApiResponse<TaskOnboardingResponse> generateRunBatches(
+    public ApiResponse<Map<String, Object>> generateRunBatches(
             @PathVariable Long id,
             @RequestBody GenerateTaskRunBatchRequest request) {
-        return ApiResponse.ok(onboardingService.generateBatches(id, request), "执行批次生成完成");
+        return ApiResponse.ok(batchGenerationCounts(onboardingService.generateBatches(id, request)), "执行批次生成完成");
+    }
+
+    private static Map<String, Object> resultGenerationCounts(TaskOnboardingResponse response) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("insertedCount", count(response, "insertedCount"));
+        return result;
+    }
+
+    private static Map<String, Object> batchGenerationCounts(TaskOnboardingResponse response) {
+        Map<String, Object> result = new LinkedHashMap<>();
+        result.put("createdRunCount", count(response, "createdRunCount"));
+        result.put("linkedResultCount", count(response, "linkedResultCount"));
+        return result;
+    }
+
+    private static long count(TaskOnboardingResponse response, String name) {
+        if (response == null || response.getCounts() == null) {
+            return 0L;
+        }
+        return response.getCounts().getOrDefault(name, 0L);
     }
 
     @PutMapping("/updateTaskConfig")

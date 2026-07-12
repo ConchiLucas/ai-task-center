@@ -725,6 +725,8 @@ class TaskOnboardingServiceTest {
         assertEquals(OnboardingStep.BATCH_CODE.name(), task.getOnboardingStep());
         assertEquals(OnboardingStatus.ACTIVE.name(), task.getOnboardingStatus());
         assertEquals(OnboardingStep.BATCH_CODE.name(), response.getCurrentStep());
+        assertEquals(4L, response.getCounts().get("insertedCount"));
+        assertEquals(4L, service.get(TASK_ID).getCounts().get("insertedCount"));
         assertEquals("", nextContext.getResultValidationRunId());
         assertEquals(List.of(), nextContext.getResultValidationIds());
         assertFalse(nextContext.getBatchValidationMarker().isBlank());
@@ -760,6 +762,10 @@ class TaskOnboardingServiceTest {
 
         assertEquals(OnboardingStep.READY.name(), task.getOnboardingStep());
         assertEquals(OnboardingStep.READY.name(), response.getCurrentStep());
+        assertEquals(1L, response.getCounts().get("createdRunCount"));
+        assertEquals(1L, response.getCounts().get("linkedResultCount"));
+        assertEquals(1L, service.get(TASK_ID).getCounts().get("createdRunCount"));
+        assertEquals(1L, service.get(TASK_ID).getCounts().get("linkedResultCount"));
         verify(taskConfigService).generateRunBatches(
                 TASK_ID, request, "batch-run-1", List.of(201L));
     }

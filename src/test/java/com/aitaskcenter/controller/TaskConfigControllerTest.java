@@ -6,6 +6,7 @@ import com.aitaskcenter.service.TaskConfigService;
 import com.aitaskcenter.service.onboarding.TaskOnboardingService;
 import com.aitaskcenter.service.onboarding.TaskOnboardingStateException;
 import com.fasterxml.jackson.databind.ObjectMapper;
+import java.util.Map;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.MediaType;
@@ -41,38 +42,53 @@ class TaskConfigControllerTest {
     }
 
     @Test
-    void legacyResultGenerationDelegatesToOnboardingGate() throws Exception {
-        when(onboardingService.generateResults(TASK_CONFIG_ID)).thenReturn(response("BATCH_CODE"));
+    void legacyResultGenerationPreservesInsertedCountThroughOnboardingGate() throws Exception {
+        when(onboardingService.generateResults(TASK_CONFIG_ID))
+                .thenReturn(response("BATCH_CODE", Map.of("insertedCount", 4L)));
 
-        mockMvc.perform(post("/api/task/{id}/generate-results", TASK_CONFIG_ID)
-                        .param("overwrite", "true"))
+        mockMvc.perform(post("/api/task/{id}/generate-results", TASK_CONFIG_ID))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(0))
-                .andExpect(jsonPath("$.data.currentStep").value("BATCH_CODE"));
+                .andExpect(jsonPath("$.data.insertedCount").value(4))
+                .andExpect(jsonPath("$.data.currentStep").doesNotExist());
 
         verify(onboardingService).generateResults(TASK_CONFIG_ID);
         verifyNoInteractions(taskConfigService);
     }
 
     @Test
-    void legacyBatchGenerationDelegatesToOnboardingGate() throws Exception {
+    void legacyBatchGenerationPreservesCountsThroughOnboardingGate() throws Exception {
         GenerateTaskRunBatchRequest request = batchRequest();
         when(onboardingService.generateBatches(eq(TASK_CONFIG_ID), any(GenerateTaskRunBatchRequest.class)))
-                .thenReturn(response("READY"));
+                .thenReturn(response("READY", Map.of("createdRunCount", 2L, "linkedResultCount", 6L)));
 
         mockMvc.perform(post("/api/task/{id}/generate-run-batches", TASK_CONFIG_ID)
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isOk())
                 .andExpect(jsonPath("$.code").value(0))
-                .andExpect(jsonPath("$.data.currentStep").value("READY"));
+                .andExpect(jsonPath("$.data.createdRunCount").value(2))
+                .andExpect(jsonPath("$.data.linkedResultCount").value(6))
+                .andExpect(jsonPath("$.data.currentStep").doesNotExist());
 
         verify(onboardingService).generateBatches(eq(TASK_CONFIG_ID), any(GenerateTaskRunBatchRequest.class));
         verifyNoInteractions(taskConfigService);
     }
 
     @Test
-    void legacyResultGenerationRejectsInitialWorkflowStateThroughOnboardingGate() throws Exception {
+    void legacyResultGenerationRejectsOverwriteToProtectOnboardingGate() throws Exception {
+        mockMvc.perform(post("/api/task/{id}/generate-results", TASK_CONFIG_ID)
+                        .param("overwrite", "true"))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.code").value(7))
+                .andExpect(jsonPath("$.msg").value(
+                        "overwrite=true is not supported by the gated generation workflow"));
+
+        verifyNoInteractions(onboardingService, taskConfigService);
+    }
+
+    @Test
+    void legacyResultGenerationRejectsLockedWorkflowStateThroughOnboardingGate() throws Exception {
         when(onboardingService.generateResults(TASK_CONFIG_ID))
                 .thenThrow(new TaskOnboardingStateException("Generation retry does not match the current step"));
 
@@ -110,9 +126,10 @@ class TaskConfigControllerTest {
         return request;
     }
 
-    private TaskOnboardingResponse response(String currentStep) {
+    private TaskOnboardingResponse response(String currentStep, Map<String, Long> counts) {
         TaskOnboardingResponse response = new TaskOnboardingResponse();
         response.setCurrentStep(currentStep);
+        response.setCounts(counts);
         return response;
     }
 }

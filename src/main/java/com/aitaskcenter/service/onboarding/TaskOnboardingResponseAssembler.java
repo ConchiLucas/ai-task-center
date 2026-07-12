@@ -79,6 +79,15 @@ public class TaskOnboardingResponseAssembler {
         counts.put("validationResults", (long) validationResults.size());
         counts.put("validationRuns", response.getValidationRun() == null ? 0L : 1L);
         counts.put("validationRunResults", (long) validationRunResults.size());
+        if (context.getCompletedResultCount() > 0) {
+            counts.put("insertedCount", context.getCompletedResultCount());
+        }
+        if (context.getCompletedBatchRunCount() > 0) {
+            counts.put("createdRunCount", context.getCompletedBatchRunCount());
+        }
+        if (context.getCompletedBatchLinkCount() > 0) {
+            counts.put("linkedResultCount", context.getCompletedBatchLinkCount());
+        }
         response.setCounts(counts);
         return response;
     }
