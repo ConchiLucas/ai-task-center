@@ -6,6 +6,8 @@ import urllib.request
 
 
 DEFAULT_BASE_URL = "http://127.0.0.1:18743"
+DEFAULT_HTTP_TIMEOUT_SECONDS = 10.0
+MAX_HTTP_TIMEOUT_SECONDS = 120.0
 HEX_DIGITS = "0123456789abcdef"
 
 
@@ -43,9 +45,24 @@ def entity_ids(value):
         ids = [positive_integer(part) for part in parts]
     except argparse.ArgumentTypeError as error:
         raise argparse.ArgumentTypeError("entity IDs must be comma-separated positive integers") from error
-    if len(set(ids)) != len(ids):
-        raise argparse.ArgumentTypeError("Duplicate entity IDs are not allowed")
     return ids
+
+
+def validate_entity_ids(stage, ids):
+    ids_to_check = ids if stage == "result" else ids[1:]
+    if len(set(ids_to_check)) != len(ids_to_check):
+        raise WorkflowError("Duplicate entity IDs are not allowed")
+
+
+def http_timeout_seconds(value):
+    try:
+        timeout = float(value)
+    except ValueError as error:
+        raise WorkflowError("TASK_CENTER_HTTP_TIMEOUT_SECONDS must be a positive number") from error
+    if not 0 < timeout <= MAX_HTTP_TIMEOUT_SECONDS:
+        raise WorkflowError(
+            "TASK_CENTER_HTTP_TIMEOUT_SECONDS must be greater than 0 and at most %d" % MAX_HTTP_TIMEOUT_SECONDS)
+    return timeout
 
 
 def redact(message, token):
@@ -62,7 +79,7 @@ def backend_message(body):
     return response.get("code"), response.get("msg")
 
 
-def post_report(base_url, task_config_id, payload, token):
+def post_report(base_url, task_config_id, payload, token, timeout_seconds):
     url = base_url.rstrip("/") + "/api/task/%d/onboarding/report" % task_config_id
     request = urllib.request.Request(
         url,
@@ -71,7 +88,7 @@ def post_report(base_url, task_config_id, payload, token):
         method="POST",
     )
     try:
-        with urllib.request.urlopen(request) as response:
+        with urllib.request.urlopen(request, timeout=timeout_seconds) as response:
             status = response.getcode()
             body = response.read()
     except Exception as error:
@@ -109,6 +126,12 @@ def main():
     base_url = os.environ.get("TASK_CENTER_BASE_URL", DEFAULT_BASE_URL).strip()
     if not base_url:
         parser.exit(1, "Error: TASK_CENTER_BASE_URL must not be blank\n")
+    try:
+        timeout_seconds = http_timeout_seconds(
+            os.environ.get("TASK_CENTER_HTTP_TIMEOUT_SECONDS", str(DEFAULT_HTTP_TIMEOUT_SECONDS)).strip())
+        validate_entity_ids(arguments.stage, arguments.entity_ids)
+    except WorkflowError as error:
+        parser.exit(1, "Error: %s\n" % redact(error, arguments.token))
     payload = {
         "stage": arguments.stage,
         "token": arguments.token,
@@ -117,7 +140,7 @@ def main():
         "entityIds": arguments.entity_ids,
     }
     try:
-        post_report(base_url, arguments.task_config_id, payload, arguments.token)
+        post_report(base_url, arguments.task_config_id, payload, arguments.token, timeout_seconds)
     except WorkflowError as error:
         parser.exit(1, "Error: %s\n" % redact(error, arguments.token))
     print("Onboarding report accepted.")
