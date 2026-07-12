@@ -65,11 +65,19 @@ public class PythonWorkerClient {
     }
 
     // 方法：generateTaskResults
-    @SuppressWarnings("unchecked")
     public Map<String, Object> generateTaskResults(Long taskConfigId, boolean overwrite) {
+        return generateTaskResults(taskConfigId, overwrite, null);
+    }
+
+    @SuppressWarnings("unchecked")
+    public Map<String, Object> generateTaskResults(
+            Long taskConfigId, boolean overwrite, String onboardingGenerationId) {
         String uri = baseUrl
                 + "/api/result-generation/from-task-config-simple?taskConfigId=" + taskConfigId
                 + "&overwrite=" + overwrite;
+        if (onboardingGenerationId != null && !onboardingGenerationId.isBlank()) {
+            uri += "&onboardingGenerationId=" + encode(onboardingGenerationId);
+        }
         HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(uri))
                 .header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.noBody())

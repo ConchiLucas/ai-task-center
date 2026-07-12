@@ -19,6 +19,12 @@ from psycopg2.extras import execute_values
 from fastapi import FastAPI, HTTPException, Query
 from pydantic import BaseModel, Field
 
+from app.result_generation_idempotency import (
+    build_recovered_generation_response,
+    merge_onboarding_generation_metadata,
+    normalize_onboarding_generation_id,
+)
+
 
 app = FastAPI(title="AI Task Center Python Worker")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -1371,6 +1377,7 @@ def build_score_result_rows(
     script_path: str,
     groups: list[dict[str, Any]],
     existing_word_clean_ids: set[int],
+    onboarding_generation_id: str | None = None,
 ) -> list[tuple[Any, ...]]:
     now = datetime.now(timezone.utc)
     source_tables_json = json.dumps(tables, ensure_ascii=False)
@@ -1390,14 +1397,17 @@ def build_score_result_rows(
         display_word = word[:80] if word else str(word_clean_id)
         ai_prompt = build_ai_score_prompt(word, candidates)
         write_back = build_write_back_payload(word_clean_id, word, candidates)
-        payload = {
-            "taskType": "word_clean_sentence_score",
-            "word": word,
-            "sourceTable": "public.word_clean_sentence",
-            "aiPrompt": ai_prompt,
-            "writeBack": write_back,
-            "scriptPath": script_path,
-        }
+        payload = merge_onboarding_generation_metadata(
+            {
+                "taskType": "word_clean_sentence_score",
+                "word": word,
+                "sourceTable": "public.word_clean_sentence",
+                "aiPrompt": ai_prompt,
+                "writeBack": write_back,
+                "scriptPath": script_path,
+            },
+            onboarding_generation_id,
+        )
         rows.append(
             (
                 f"{task_config.task_name} - {display_word} ({word_clean_id})",
@@ -1457,8 +1467,43 @@ def insert_task_result_rows(rows: list[tuple[Any, ...]]) -> int:
     return len(rows)
 
 
+# 函数：load_formal_result_contents
+def load_formal_result_contents(task_config_id: int) -> list[str | None]:
+    settings = load_database_settings()
+    with connect_database(settings) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                select result_content
+                from tb_task_result
+                where task_config_id = %s
+                  and source_description = %s
+                order by id
+                """,
+                (task_config_id, SCORE_SOURCE_DESCRIPTION),
+            )
+            return [row[0] for row in cursor.fetchall()]
+
+
 # 函数：generate_word_clean_sentence_results
-def generate_word_clean_sentence_results(task_config_id: int, overwrite: bool) -> dict[str, Any]:
+def generate_word_clean_sentence_results(
+    task_config_id: int,
+    overwrite: bool,
+    onboarding_generation_id: str | None = None,
+) -> dict[str, Any]:
+    generation_id = normalize_onboarding_generation_id(onboarding_generation_id)
+    if generation_id is not None:
+        recovered = build_recovered_generation_response(
+            task_config_id,
+            generation_id,
+            load_formal_result_contents(task_config_id),
+        )
+        if recovered is not None:
+            return {
+                **recovered,
+                "mode": "word_clean_sentence_score",
+                "sourceTable": "public.word_clean_sentence",
+            }
     task_config = load_task_config_snapshot(task_config_id)
     tables = parse_selected_tables(task_config.selected_tables)
     ensure_word_clean_sentence_task(tables)
@@ -1467,7 +1512,14 @@ def generate_word_clean_sentence_results(task_config_id: int, overwrite: bool) -
     deleted_count = delete_existing_generated_results(task_config.id, SCORE_SOURCE_DESCRIPTION) if overwrite else 0
     existing_ids = set() if overwrite else load_existing_word_clean_ids(task_config.id, SCORE_SOURCE_DESCRIPTION)
     groups = fetch_word_clean_sentence_groups(connection_config)
-    rows = build_score_result_rows(task_config, tables, script_path, groups, existing_ids)
+    rows = build_score_result_rows(
+        task_config,
+        tables,
+        script_path,
+        groups,
+        existing_ids,
+        generation_id,
+    )
     inserted_count = insert_task_result_rows(rows)
     return {
         "accepted": True,
@@ -2480,8 +2532,13 @@ def get_cli_configs() -> dict[str, Any]:
 def generate_results_from_task_config_simple(
     taskConfigId: int,
     overwrite: bool = False,
+    onboardingGenerationId: str | None = None,
 ) -> dict[str, Any]:
-    return generate_word_clean_sentence_results(taskConfigId, overwrite)
+    try:
+        generation_id = normalize_onboarding_generation_id(onboardingGenerationId)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return generate_word_clean_sentence_results(taskConfigId, overwrite, generation_id)
 
 
 # 函数：process_task_result_simple

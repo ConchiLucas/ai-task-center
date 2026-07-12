@@ -19,6 +19,7 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.time.OffsetDateTime;
+import java.util.regex.Pattern;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
@@ -26,6 +27,7 @@ import org.springframework.util.StringUtils;
 
 @Service
 public class TaskConfigService {
+    private static final Pattern ONBOARDING_GENERATION_ID = Pattern.compile("[0-9a-f]{64}");
     private final TaskConfigRepository repository;
     private final ProjectConfigRepository projectRepository;
     private final ConnectionConfigRepository connectionRepository;
@@ -73,8 +75,17 @@ public class TaskConfigService {
 
     // 方法：generateResults
     public Map<String, Object> generateResults(Long id, boolean overwrite) {
+        return generateResults(id, overwrite, null);
+    }
+
+    public Map<String, Object> generateResults(
+            Long id, boolean overwrite, String onboardingGenerationId) {
         if (id == null) {
             throw new IllegalArgumentException("缺少任务配置 ID");
+        }
+        String generationId = clean(onboardingGenerationId);
+        if (!generationId.isEmpty() && !ONBOARDING_GENERATION_ID.matcher(generationId).matches()) {
+            throw new IllegalArgumentException("引导生成 ID 格式无效");
         }
         TaskConfig task = repository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("任务配置不存在"));
@@ -84,7 +95,8 @@ public class TaskConfigService {
         if (!StringUtils.hasText(task.getSelectedTables())) {
             throw new IllegalArgumentException("任务配置未选择来源表");
         }
-        return pythonWorkerClient.generateTaskResults(id, overwrite);
+        return pythonWorkerClient.generateTaskResults(
+                id, overwrite, generationId.isEmpty() ? null : generationId);
     }
 
     @Transactional

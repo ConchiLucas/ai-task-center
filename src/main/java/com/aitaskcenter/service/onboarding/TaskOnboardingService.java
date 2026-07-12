@@ -126,7 +126,8 @@ public class TaskOnboardingService {
 
         Map<String, Object> generationResult;
         try {
-            generationResult = taskConfigServiceProvider.getObject().generateResults(taskConfigId, false);
+            generationResult = taskConfigServiceProvider.getObject().generateResults(
+                    taskConfigId, false, context.getResultValidationRunId());
         } catch (RuntimeException ex) {
             throw new TaskOnboardingStateException("Formal result generation failed", ex);
         }

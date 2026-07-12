@@ -26,11 +26,13 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Set;
 import jakarta.persistence.LockModeType;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.data.jpa.repository.Lock;
+import org.springframework.transaction.annotation.Transactional;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
@@ -40,13 +42,16 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.reset;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 
 class TaskOnboardingServiceTest {
     private static final Long TASK_ID = 7L;
+    private static final String GENERATION_ID = "b".repeat(64);
     private static final String ARTIFACT_HASH = "a".repeat(64);
     private static final String EMPTY_FINGERPRINT =
             "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
@@ -692,9 +697,9 @@ class TaskOnboardingServiceTest {
 
     @Test
     void failedCleanupDoesNotCallFormalGeneration() throws Exception {
-        TaskConfig task = resultGenerationTask("result-run-1", List.of(101L));
+        TaskConfig task = resultGenerationTask(GENERATION_ID, List.of(101L));
         stubTask(task);
-        when(cleanupService.deleteResultValidation(TASK_ID, "result-run-1"))
+        when(cleanupService.deleteResultValidation(TASK_ID, GENERATION_ID))
                 .thenThrow(new IllegalStateException("validation row is linked"));
 
         assertThrows(IllegalStateException.class, () -> service.generateResults(TASK_ID));
@@ -706,10 +711,11 @@ class TaskOnboardingServiceTest {
 
     @Test
     void successfulResultGenerationAdvancesOnlyToBatchCode() throws Exception {
-        TaskConfig task = resultGenerationTask("result-run-1", List.of(101L));
+        TaskConfig task = resultGenerationTask(GENERATION_ID, List.of(101L));
         stubTask(task);
-        when(cleanupService.deleteResultValidation(TASK_ID, "result-run-1")).thenReturn(1);
-        when(taskConfigService.generateResults(TASK_ID, false)).thenReturn(Map.of("insertedCount", 4));
+        when(cleanupService.deleteResultValidation(TASK_ID, GENERATION_ID)).thenReturn(1);
+        when(taskConfigService.generateResults(TASK_ID, false, GENERATION_ID))
+                .thenReturn(Map.of("insertedCount", 4));
         taskResults.answer("findFingerprintRowsByTaskConfigId", List.of("formal-result"), TASK_ID);
 
         TaskOnboardingResponse response = service.generateResults(TASK_ID);
@@ -723,15 +729,16 @@ class TaskOnboardingServiceTest {
         assertFalse(nextContext.getBatchValidationMarker().isBlank());
         assertFalse(nextContext.getBatchReportToken().isBlank());
         assertEquals("BATCH", nextContext.getBaselineStage());
-        verify(taskConfigService).generateResults(TASK_ID, false);
+        verify(taskConfigService).generateResults(TASK_ID, false, GENERATION_ID);
     }
 
     @Test
     void zeroResultInsertCountDoesNotAdvance() {
-        TaskConfig task = resultGenerationTask("result-run-1", List.of(101L));
+        TaskConfig task = resultGenerationTask(GENERATION_ID, List.of(101L));
         stubTask(task);
-        when(cleanupService.deleteResultValidation(TASK_ID, "result-run-1")).thenReturn(1);
-        when(taskConfigService.generateResults(TASK_ID, false)).thenReturn(Map.of("insertedCount", 0));
+        when(cleanupService.deleteResultValidation(TASK_ID, GENERATION_ID)).thenReturn(1);
+        when(taskConfigService.generateResults(TASK_ID, false, GENERATION_ID))
+                .thenReturn(Map.of("insertedCount", 0));
 
         assertThrows(TaskOnboardingStateException.class, () -> service.generateResults(TASK_ID));
         assertEquals(OnboardingStep.RESULT_GENERATION.name(), task.getOnboardingStep());
@@ -752,6 +759,26 @@ class TaskOnboardingServiceTest {
         assertEquals(OnboardingStep.READY.name(), task.getOnboardingStep());
         assertEquals(OnboardingStep.READY.name(), response.getCurrentStep());
         verify(taskConfigService).generateRunBatches(TASK_ID, request);
+    }
+
+    @Test
+    void retryAfterLostResultResponseUsesSameGenerationIdAndAcceptsRecoveredCount() throws Exception {
+        TaskConfig task = resultGenerationTask(GENERATION_ID, List.of(101L));
+        stubTask(task);
+        when(cleanupService.deleteResultValidation(TASK_ID, GENERATION_ID)).thenReturn(1);
+        when(taskConfigService.generateResults(TASK_ID, false, GENERATION_ID))
+                .thenThrow(new IllegalArgumentException("response lost after commit"))
+                .thenReturn(Map.of("insertedCount", 4, "recovered", true));
+
+        assertThrows(TaskOnboardingStateException.class, () -> service.generateResults(TASK_ID));
+
+        assertEquals(OnboardingStep.RESULT_GENERATION.name(), task.getOnboardingStep());
+        assertEquals(GENERATION_ID, context(task).getResultValidationRunId());
+
+        TaskOnboardingResponse recovered = service.generateResults(TASK_ID);
+
+        assertEquals(OnboardingStep.BATCH_CODE.name(), recovered.getCurrentStep());
+        verify(taskConfigService, times(2)).generateResults(TASK_ID, false, GENERATION_ID);
     }
 
     @Test
@@ -851,6 +878,64 @@ class TaskOnboardingServiceTest {
             assertEquals(OnboardingStatus.ACTIVE.name(), existing.getOnboardingStatus());
             assertEquals("{}", existing.getOnboardingContext());
         }
+    }
+
+    @Test
+    void taskConfigServiceValidatesGenerationIdAndKeepsLegacyCallerCompatible() {
+        TaskConfigRepository repository = mock(TaskConfigRepository.class);
+        ConnectionConfigRepository connections = mock(ConnectionConfigRepository.class);
+        PythonWorkerClient worker = mock(PythonWorkerClient.class);
+        TaskConfig task = taskAt(OnboardingStep.RESULT_GENERATION);
+        task.setDatabaseConfigId(5L);
+        when(repository.findById(TASK_ID)).thenReturn(Optional.of(task));
+        when(connections.existsById(5L)).thenReturn(true);
+        when(worker.generateTaskResults(TASK_ID, false, null))
+                .thenReturn(Map.of("insertedCount", 1));
+        TaskConfigService configService = new TaskConfigService(
+                repository,
+                mock(ProjectConfigRepository.class),
+                connections,
+                mock(TaskResultRepository.class),
+                worker,
+                mock(TaskRunPromptBuilder.class),
+                mock(JdbcTemplate.class),
+                OBJECT_MAPPER);
+
+        assertThrows(IllegalArgumentException.class,
+                () -> configService.generateResults(TASK_ID, false, "reused-artifact-hash"));
+        verify(worker, never()).generateTaskResults(TASK_ID, false, "reused-artifact-hash");
+
+        assertEquals(1, configService.generateResults(TASK_ID, false).get("insertedCount"));
+        verify(worker).generateTaskResults(TASK_ID, false, null);
+    }
+
+    @Test
+    void batchGenerationUsesTransactionalJavaPathWithoutWorkerCall() throws Exception {
+        TaskConfigRepository repository = mock(TaskConfigRepository.class);
+        TaskResultRepository results = mock(TaskResultRepository.class);
+        PythonWorkerClient worker = mock(PythonWorkerClient.class);
+        TaskConfig task = taskAt(OnboardingStep.BATCH_GENERATION);
+        when(repository.findById(TASK_ID)).thenReturn(Optional.of(task));
+        when(results.findByTaskConfigIdAndStatusInOrderByIdAsc(TASK_ID, Set.of("PENDING")))
+                .thenReturn(List.of());
+        TaskConfigService configService = new TaskConfigService(
+                repository,
+                mock(ProjectConfigRepository.class),
+                mock(ConnectionConfigRepository.class),
+                results,
+                worker,
+                mock(TaskRunPromptBuilder.class),
+                mock(JdbcTemplate.class),
+                OBJECT_MAPPER);
+
+        Map<String, Object> response = configService.generateRunBatches(
+                TASK_ID, new GenerateTaskRunBatchRequest());
+
+        assertEquals(0, response.get("createdRunCount"));
+        verifyNoInteractions(worker);
+        Method method = TaskConfigService.class.getMethod(
+                "generateRunBatches", Long.class, GenerateTaskRunBatchRequest.class);
+        assertNotNull(method.getAnnotation(Transactional.class));
     }
 
     private void assertInvalidResultCallback(TaskConfig task, TaskOnboardingReportRequest request) {
