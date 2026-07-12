@@ -14,6 +14,9 @@ public interface TaskResultRepository extends JpaRepository<TaskResult, Long>, J
     // 方法：findByTaskConfigIdOrderByIdAsc
     List<TaskResult> findByTaskConfigIdOrderByIdAsc(Long taskConfigId);
 
+    List<TaskResult> findByTaskConfigIdAndSourceDescriptionOrderByIdAsc(
+            Long taskConfigId, String sourceDescription);
+
     // 方法：findByTaskConfigIdAndStatusInOrderByIdAsc
     List<TaskResult> findByTaskConfigIdAndStatusInOrderByIdAsc(Long taskConfigId, Collection<String> statuses);
 

@@ -8,6 +8,8 @@ import org.springframework.data.jpa.repository.JpaRepository;
 public interface TaskRunRepository extends JpaRepository<TaskRun, Long> {
     List<TaskRun> findAllByOrderByCreatedAtDesc();
 
+    List<TaskRun> findByTaskConfigIdAndReasonOrderByIdAsc(Long taskConfigId, String reason);
+
     // 方法：findByDispatchGroupIdIn
     List<TaskRun> findByDispatchGroupIdIn(Collection<String> dispatchGroupIds);
 }
