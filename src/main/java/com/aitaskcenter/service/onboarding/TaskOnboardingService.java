@@ -12,6 +12,7 @@ import com.aitaskcenter.repository.TaskResultRepository;
 import com.aitaskcenter.repository.TaskRunRepository;
 import com.aitaskcenter.repository.TaskRunResultRepository;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.JsonNode;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.nio.charset.StandardCharsets;
 import java.security.MessageDigest;
@@ -166,6 +167,8 @@ public class TaskOnboardingService {
                         || !marker.equals(result.getSourceDescription()))) {
             throw new IllegalArgumentException("Submitted results do not exactly match the marked validation rows");
         }
+        results.forEach(result -> requireValidationMetadata(
+                result.getResultContent(), marker, "TaskResult.resultContent"));
         if (taskRunResultRepository.countByTaskResultIdIn(submittedIds) != 0) {
             throw new IllegalArgumentException("Validation results must not have task-run links");
         }
@@ -197,6 +200,7 @@ public class TaskOnboardingService {
                 || !marker.equals(run.getReason())) {
             throw new IllegalArgumentException("Submitted validation run does not match the marked task run");
         }
+        requireValidationMetadata(run.getAiPromptJson(), marker, "TaskRun.aiPromptJson");
         if (!"PENDING".equals(run.getStatus()) || run.getStartTime() != null || run.getEndTime() != null) {
             throw new IllegalArgumentException("Validation run must be pending and unstarted");
         }
@@ -392,6 +396,24 @@ public class TaskOnboardingService {
             throw new IllegalArgumentException(message);
         }
         return value;
+    }
+
+    private void requireValidationMetadata(String json, String expectedMarker, String fieldName) {
+        JsonNode root;
+        try {
+            root = objectMapper.readTree(json);
+        } catch (JsonProcessingException | IllegalArgumentException ex) {
+            throw new IllegalArgumentException(fieldName + " must contain valid validation metadata JSON", ex);
+        }
+        JsonNode validationRunId = root == null
+                ? null
+                : root.path("_meta").path("validationRunId");
+        if (validationRunId == null
+                || !validationRunId.isTextual()
+                || !expectedMarker.equals(validationRunId.textValue())) {
+            throw new IllegalArgumentException(
+                    fieldName + " _meta.validationRunId must equal " + expectedMarker);
+        }
     }
 
     private static String textOrEmpty(String value) {

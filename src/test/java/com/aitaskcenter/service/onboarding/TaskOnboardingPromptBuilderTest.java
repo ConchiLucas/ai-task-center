@@ -35,6 +35,8 @@ class TaskOnboardingPromptBuilderTest {
         assertBeforeAndAfterBusinessData(prompt, "禁止更新或删除任何已有 tb_task_result");
         assertTrue(prompt.contains("只允许插入 1–3 条新 tb_task_result"));
         assertTrue(prompt.contains("source_description 必须精确等于 RESULT_VALIDATION:result-run-1"));
+        assertTrue(prompt.contains(
+                "result_content 必须是 JSON，且 _meta.validationRunId 必须精确等于 RESULT_VALIDATION:result-run-1"));
         assertTrue(prompt.contains("禁止对 tb_task_run 或 tb_task_run_result 执行 INSERT、UPDATE 或 DELETE"));
         assertTrue(prompt.contains("检查项目现有的任务生成接口、服务和模型"));
         assertTrue(prompt.contains("检查配置连接中已选来源表的 schema"));
@@ -51,6 +53,8 @@ class TaskOnboardingPromptBuilderTest {
         assertBeforeAndAfterBusinessData(prompt, "禁止新增、更新或删除任何 tb_task_result");
         assertTrue(prompt.contains("只允许创建 1 个新的、带标记且未启动的 tb_task_run"));
         assertTrue(prompt.contains("reason 必须精确等于 BATCH_VALIDATION:batch-run-1"));
+        assertTrue(prompt.contains(
+                "ai_prompt_json 必须是 JSON，且 _meta.validationRunId 必须精确等于 BATCH_VALIDATION:batch-run-1"));
         assertTrue(prompt.contains("task_run_id 必须等于这个新建 tb_task_run 的数字数据库 ID"));
         assertTrue(prompt.contains("禁止更新或删除任何已有 tb_task_run 或 tb_task_run_result"));
         assertTrue(prompt.contains("禁止启动或执行验证批次"));

@@ -27,7 +27,7 @@ public class TaskOnboardingPromptBuilder {
                 - 禁止更新或删除任何已有 tb_task_result。
                 - 新结果的 task_config_id 必须是当前任务配置 ID。
                 - 新结果的 source_description 必须精确等于 %s。
-                - 新结果的 result_content._meta.validationRunId 必须精确等于 %s。
+                - 新结果的 result_content 必须是 JSON，且 _meta.validationRunId 必须精确等于 %s。
                 - 禁止对 tb_task_run 或 tb_task_run_result 执行 INSERT、UPDATE 或 DELETE。
                 - 禁止修改来源业务表，禁止执行任务，禁止调用 AI 或 TTS。
                 """.formatted(marker, marker);
@@ -83,7 +83,7 @@ public class TaskOnboardingPromptBuilder {
                 - link 只能引用当前任务配置下已经存在的正式 tb_task_result。
                 - 禁止更新或删除任何已有 tb_task_run 或 tb_task_run_result。
                 - 禁止新增、更新或删除任何 tb_task_result。
-                - 批次 Prompt 的 _meta.validationRunId 必须精确等于 %s。
+                - 新批次的 ai_prompt_json 必须是 JSON，且 _meta.validationRunId 必须精确等于 %s。
                 - 禁止启动或执行验证批次，禁止调用 AI 或 TTS，禁止回写来源业务表。
                 """.formatted(marker, marker);
 

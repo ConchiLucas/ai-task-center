@@ -157,11 +157,7 @@ class TaskOnboardingServiceTest {
                 TASK_ID, "RESULT_VALIDATION:result-run-1");
         taskRunResults.answer("countByTaskResultIdIn", 1L, List.of(101L));
 
-        assertThrows(IllegalArgumentException.class,
-                () -> service.report(TASK_ID, report("result", "result-token", List.of(101L))));
-
-        assertEquals(OnboardingStep.RESULT_CODE.name(), task.getOnboardingStep());
-        assertEquals(0, taskConfigs.callCount("save"));
+        assertRejectedWithoutMutation(task, report("result", "result-token", List.of(101L)));
     }
 
     @Test
@@ -178,7 +174,7 @@ class TaskOnboardingServiceTest {
 
         assertEquals("", context(task).getResultReportToken());
         task.setOnboardingStep(OnboardingStep.RESULT_CODE.name());
-        assertThrows(IllegalArgumentException.class, () -> service.report(TASK_ID, request));
+        assertRejectedWithoutMutation(task, request);
     }
 
     @Test
@@ -195,24 +191,30 @@ class TaskOnboardingServiceTest {
 
         TaskConfig duplicateIds = resultCodeTask("run", "token");
         stubTask(duplicateIds);
-        assertThrows(IllegalArgumentException.class,
-                () -> service.report(TASK_ID, report("result", "token", List.of(1L, 1L))));
+        assertRejectedWithoutMutation(duplicateIds, report("result", "token", List.of(1L, 1L)));
 
         TaskConfig mismatchedIds = resultCodeTask("run", "token");
         stubTask(mismatchedIds);
         taskResults.answer("findByTaskConfigIdAndSourceDescriptionOrderByIdAsc",
                 List.of(result(1L, TASK_ID, "RESULT_VALIDATION:run")),
                 TASK_ID, "RESULT_VALIDATION:run");
-        assertThrows(IllegalArgumentException.class,
-                () -> service.report(TASK_ID, report("result", "token", List.of(2L))));
+        assertRejectedWithoutMutation(mismatchedIds, report("result", "token", List.of(2L)));
 
         TaskConfig wrongMarkerOrTask = resultCodeTask("run", "token");
         stubTask(wrongMarkerOrTask);
         taskResults.answer("findByTaskConfigIdAndSourceDescriptionOrderByIdAsc",
                 List.of(result(1L, 999L, "RESULT_VALIDATION:other")),
                 TASK_ID, "RESULT_VALIDATION:run");
-        assertThrows(IllegalArgumentException.class,
-                () -> service.report(TASK_ID, report("result", "token", List.of(1L))));
+        assertRejectedWithoutMutation(wrongMarkerOrTask, report("result", "token", List.of(1L)));
+    }
+
+    @Test
+    void rejectsResultRowsWithMissingMalformedOrMismatchedValidationMetadata() {
+        assertRejectedResultMetadata(null);
+        assertRejectedResultMetadata("not-json");
+        assertRejectedResultMetadata("{}");
+        assertRejectedResultMetadata("{\"_meta\":{}}");
+        assertRejectedResultMetadata("{\"_meta\":{\"validationRunId\":\"RESULT_VALIDATION:other\"}}");
     }
 
     @Test
@@ -250,29 +252,29 @@ class TaskOnboardingServiceTest {
         TaskConfig noRun = batchCodeTask("run", "token", List.of(11L));
         stubTask(noRun);
         taskRuns.answer("findByTaskConfigIdAndReasonOrderByIdAsc", List.of(), TASK_ID, "BATCH_VALIDATION:run");
-        assertThrows(IllegalArgumentException.class,
-                () -> service.report(TASK_ID, report("batch", "token", List.of(9L, 11L))));
+        assertRejectedWithoutMutation(noRun, report("batch", "token", List.of(9L, 11L)));
 
         TaskConfig wrongCount = batchCodeTask("run", "token", List.of(11L));
         stubTask(wrongCount);
         taskRuns.answer("findByTaskConfigIdAndReasonOrderByIdAsc", List.of(
                 run(9L, TASK_ID, "BATCH_VALIDATION:run", "PENDING"),
                 run(10L, TASK_ID, "BATCH_VALIDATION:run", "PENDING")), TASK_ID, "BATCH_VALIDATION:run");
-        assertThrows(IllegalArgumentException.class,
-                () -> service.report(TASK_ID, report("batch", "token", List.of(9L, 11L))));
+        assertRejectedWithoutMutation(wrongCount, report("batch", "token", List.of(9L, 11L)));
 
         TaskConfig wrongRunId = batchCodeTask("run", "token", List.of(11L));
         stubTask(wrongRunId);
         taskRuns.answer("findByTaskConfigIdAndReasonOrderByIdAsc",
                 List.of(run(9L, TASK_ID, "BATCH_VALIDATION:run", "PENDING")),
                 TASK_ID, "BATCH_VALIDATION:run");
-        assertThrows(IllegalArgumentException.class,
-                () -> service.report(TASK_ID, report("batch", "token", List.of(10L, 11L))));
+        assertRejectedWithoutMutation(wrongRunId, report("batch", "token", List.of(10L, 11L)));
 
         assertRejectedBatchRun(run(9L, TASK_ID, "BATCH_VALIDATION:run", "RUNNING"));
         TaskRun started = run(9L, TASK_ID, "BATCH_VALIDATION:run", "PENDING");
         started.setStartTime(OffsetDateTime.now());
         assertRejectedBatchRun(started);
+        TaskRun ended = run(9L, TASK_ID, "BATCH_VALIDATION:run", "PENDING");
+        ended.setEndTime(OffsetDateTime.now());
+        assertRejectedBatchRun(ended);
         assertRejectedBatchRun(run(9L, TASK_ID, "BATCH_VALIDATION:other", "PENDING"));
         assertRejectedBatchRun(run(9L, 999L, "BATCH_VALIDATION:run", "PENDING"));
 
@@ -282,8 +284,7 @@ class TaskOnboardingServiceTest {
                 List.of(run(9L, TASK_ID, "BATCH_VALIDATION:run", "PENDING")),
                 TASK_ID, "BATCH_VALIDATION:run");
         taskRunResults.answer("findByTaskRunIdOrderByIdAsc", List.of(link(21L, 9L, 12L)), 9L);
-        assertThrows(IllegalArgumentException.class,
-                () -> service.report(TASK_ID, report("batch", "token", List.of(9L, 11L))));
+        assertRejectedWithoutMutation(linkMismatch, report("batch", "token", List.of(9L, 11L)));
 
         TaskConfig otherTaskResult = batchCodeTask("run", "token", List.of(11L));
         stubTask(otherTaskResult);
@@ -294,8 +295,7 @@ class TaskOnboardingServiceTest {
         taskResults.answer("findByTaskConfigIdOrderByIdAsc",
                 List.of(result(12L, TASK_ID, "formal")), TASK_ID);
         taskRunResults.answer("countLinkedResultsForRunAndTask", 0L, 9L, TASK_ID, List.of(11L));
-        assertThrows(IllegalArgumentException.class,
-                () -> service.report(TASK_ID, report("batch", "token", List.of(9L, 11L))));
+        assertRejectedWithoutMutation(otherTaskResult, report("batch", "token", List.of(9L, 11L)));
 
         TaskConfig mutatedResults = batchCodeTask("run", "token", List.of(11L));
         stubTask(mutatedResults);
@@ -306,8 +306,52 @@ class TaskOnboardingServiceTest {
         taskResults.answer("findByTaskConfigIdOrderByIdAsc",
                 List.of(result(11L, TASK_ID, "formal"), result(12L, TASK_ID, "formal")), TASK_ID);
         taskRunResults.answer("countLinkedResultsForRunAndTask", 1L, 9L, TASK_ID, List.of(11L));
-        assertThrows(IllegalArgumentException.class,
-                () -> service.report(TASK_ID, report("batch", "token", List.of(9L, 11L))));
+        assertRejectedWithoutMutation(mutatedResults, report("batch", "token", List.of(9L, 11L)));
+    }
+
+    @Test
+    void rejectsBatchCallbackForWrongStageTokenStepDuplicateIdsAndConsumedToken() {
+        assertInvalidBatch(batchCodeTask("run", "token", List.of(11L)),
+                report("result", "token", List.of(9L, 11L)));
+        assertInvalidBatch(batchCodeTask("run", "token", List.of(11L)),
+                report("batch", "wrong", List.of(9L, 11L)));
+        assertInvalidBatch(batchCodeTask("run", "", List.of(11L)),
+                report("batch", "used-token", List.of(9L, 11L)));
+        assertInvalidBatch(batchCodeTask("run", "token", List.of(11L)),
+                report("batch", "token", List.of(9L, 11L, 11L)));
+
+        TaskConfig wrongStep = batchCodeTask("run", "token", List.of(11L));
+        wrongStep.setOnboardingStep(OnboardingStep.BATCH_VALIDATION.name());
+        assertInvalidBatch(wrongStep, report("batch", "token", List.of(9L, 11L)));
+    }
+
+    @Test
+    void rejectsReusedBatchCallbackTokenAfterSuccessfulConsumption() throws Exception {
+        TaskConfig task = batchCodeTask("run", "token", List.of(11L));
+        TaskRun run = run(9L, TASK_ID, "BATCH_VALIDATION:run", "PENDING");
+        TaskOnboardingReportRequest request = report("batch", "token", List.of(9L, 11L));
+        stubTask(task);
+        taskRuns.answer("findByTaskConfigIdAndReasonOrderByIdAsc",
+                List.of(run), TASK_ID, "BATCH_VALIDATION:run");
+        taskRunResults.answer("findByTaskRunIdOrderByIdAsc", List.of(link(21L, 9L, 11L)), 9L);
+        taskResults.answer("findByTaskConfigIdOrderByIdAsc",
+                List.of(result(11L, TASK_ID, "formal")), TASK_ID);
+        taskRunResults.answer("countLinkedResultsForRunAndTask", 1L, 9L, TASK_ID, List.of(11L));
+
+        service.report(TASK_ID, request);
+
+        assertEquals("", context(task).getBatchReportToken());
+        task.setOnboardingStep(OnboardingStep.BATCH_CODE.name());
+        assertRejectedWithoutMutation(task, request);
+    }
+
+    @Test
+    void rejectsBatchRunWithMissingMalformedOrMismatchedValidationMetadata() {
+        assertRejectedBatchMetadata(null);
+        assertRejectedBatchMetadata("not-json");
+        assertRejectedBatchMetadata("{}");
+        assertRejectedBatchMetadata("{\"_meta\":{}}");
+        assertRejectedBatchMetadata("{\"_meta\":{\"validationRunId\":\"BATCH_VALIDATION:other\"}}");
     }
 
     @Test
@@ -394,12 +438,12 @@ class TaskOnboardingServiceTest {
 
     private void assertInvalidResultCallback(TaskConfig task, TaskOnboardingReportRequest request) {
         stubTask(task);
-        assertThrows(IllegalArgumentException.class, () -> service.report(TASK_ID, request));
+        assertRejectedWithoutMutation(task, request);
     }
 
     private void assertInvalidBatch(TaskConfig task, TaskOnboardingReportRequest request) {
         stubTask(task);
-        assertThrows(IllegalArgumentException.class, () -> service.report(TASK_ID, request));
+        assertRejectedWithoutMutation(task, request);
     }
 
     private void assertRejectedBatchRun(TaskRun run) {
@@ -407,8 +451,49 @@ class TaskOnboardingServiceTest {
         stubTask(task);
         taskRuns.answer("findByTaskConfigIdAndReasonOrderByIdAsc",
                 List.of(run), TASK_ID, "BATCH_VALIDATION:run");
-        assertThrows(IllegalArgumentException.class,
-                () -> service.report(TASK_ID, report("batch", "token", List.of(9L, 11L))));
+        taskRunResults.answer("findByTaskRunIdOrderByIdAsc", List.of(link(21L, 9L, 11L)), 9L);
+        taskResults.answer("findByTaskConfigIdOrderByIdAsc",
+                List.of(result(11L, TASK_ID, "formal")), TASK_ID);
+        taskRunResults.answer("countLinkedResultsForRunAndTask", 1L, 9L, TASK_ID, List.of(11L));
+        assertRejectedWithoutMutation(task, report("batch", "token", List.of(9L, 11L)));
+    }
+
+    private void assertRejectedResultMetadata(String resultContent) {
+        TaskConfig task = resultCodeTask("run", "token");
+        TaskResult result = result(1L, TASK_ID, "RESULT_VALIDATION:run");
+        result.setResultContent(resultContent);
+        stubTask(task);
+        taskResults.answer("findByTaskConfigIdAndSourceDescriptionOrderByIdAsc",
+                List.of(result), TASK_ID, "RESULT_VALIDATION:run");
+        assertRejectedWithoutMutation(task, report("result", "token", List.of(1L)));
+    }
+
+    private void assertRejectedBatchMetadata(String aiPromptJson) {
+        TaskConfig task = batchCodeTask("run", "token", List.of(11L));
+        TaskRun run = run(9L, TASK_ID, "BATCH_VALIDATION:run", "PENDING");
+        run.setAiPromptJson(aiPromptJson);
+        stubTask(task);
+        taskRuns.answer("findByTaskConfigIdAndReasonOrderByIdAsc",
+                List.of(run), TASK_ID, "BATCH_VALIDATION:run");
+        taskRunResults.answer("findByTaskRunIdOrderByIdAsc", List.of(link(21L, 9L, 11L)), 9L);
+        taskResults.answer("findByTaskConfigIdOrderByIdAsc",
+                List.of(result(11L, TASK_ID, "formal")), TASK_ID);
+        taskRunResults.answer("countLinkedResultsForRunAndTask", 1L, 9L, TASK_ID, List.of(11L));
+        assertRejectedWithoutMutation(task, report("batch", "token", List.of(9L, 11L)));
+    }
+
+    private void assertRejectedWithoutMutation(TaskConfig task, TaskOnboardingReportRequest request) {
+        String step = task.getOnboardingStep();
+        String status = task.getOnboardingStatus();
+        String context = task.getOnboardingContext();
+        long saveCount = taskConfigs.callCount("save");
+
+        assertThrows(IllegalArgumentException.class, () -> service.report(TASK_ID, request));
+
+        assertEquals(step, task.getOnboardingStep());
+        assertEquals(status, task.getOnboardingStatus());
+        assertEquals(context, task.getOnboardingContext());
+        assertEquals(saveCount, taskConfigs.callCount("save"));
     }
 
     private void stubTask(TaskConfig task) {
@@ -461,6 +546,7 @@ class TaskOnboardingServiceTest {
         result.setId(id);
         result.setTaskConfigId(taskId);
         result.setSourceDescription(marker);
+        result.setResultContent(validationMetadata(marker));
         result.setResultName("result-" + id);
         result.setProjectId(3L);
         return result;
@@ -471,11 +557,16 @@ class TaskOnboardingServiceTest {
         run.setId(id);
         run.setTaskConfigId(taskId);
         run.setReason(marker);
+        run.setAiPromptJson(validationMetadata(marker));
         run.setStatus(status);
         run.setTaskName("validation run");
         run.setProjectId(3L);
         run.setCliId("codex");
         return run;
+    }
+
+    private static String validationMetadata(String marker) {
+        return "{\"_meta\":{\"validationRunId\":\"" + marker + "\"}}";
     }
 
     private static TaskRunResult link(Long id, Long runId, Long resultId) {
@@ -545,8 +636,14 @@ class TaskOnboardingServiceTest {
                 return arguments[0];
             }
             Class<?> returnType = method.getReturnType();
-            if (returnType == long.class || returnType == int.class || returnType == short.class) {
+            if (returnType == long.class) {
+                return 0L;
+            }
+            if (returnType == int.class) {
                 return 0;
+            }
+            if (returnType == short.class) {
+                return (short) 0;
             }
             if (returnType == boolean.class) {
                 return false;
