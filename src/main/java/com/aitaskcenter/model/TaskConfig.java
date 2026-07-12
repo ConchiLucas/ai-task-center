@@ -1,5 +1,7 @@
 package com.aitaskcenter.model;
 
+import com.aitaskcenter.service.onboarding.OnboardingStatus;
+import com.aitaskcenter.service.onboarding.OnboardingStep;
 import jakarta.persistence.Column;
 import jakarta.persistence.Entity;
 import jakarta.persistence.Table;
@@ -29,6 +31,15 @@ public class TaskConfig extends BaseEntity {
     @Column(length = 4000)
     // 字段：任务关联的数据表 JSON
     private String selectedTables;
+
+    @Column(nullable = false, length = 40)
+    private String onboardingStep = OnboardingStep.RESULT_CODE.name();
+
+    @Column(nullable = false, length = 40)
+    private String onboardingStatus = OnboardingStatus.ACTIVE.name();
+
+    @Column(nullable = false, columnDefinition = "text")
+    private String onboardingContext = "{}";
 
     // 方法：getTaskName
     public String getTaskName() {
@@ -88,5 +99,29 @@ public class TaskConfig extends BaseEntity {
     // 方法：setSelectedTables
     public void setSelectedTables(String selectedTables) {
         this.selectedTables = selectedTables;
+    }
+
+    public String getOnboardingStep() {
+        return onboardingStep;
+    }
+
+    public void setOnboardingStep(String onboardingStep) {
+        this.onboardingStep = onboardingStep;
+    }
+
+    public String getOnboardingStatus() {
+        return onboardingStatus;
+    }
+
+    public void setOnboardingStatus(String onboardingStatus) {
+        this.onboardingStatus = onboardingStatus;
+    }
+
+    public String getOnboardingContext() {
+        return onboardingContext;
+    }
+
+    public void setOnboardingContext(String onboardingContext) {
+        this.onboardingContext = onboardingContext;
     }
 }

@@ -1,0 +1,115 @@
+package com.aitaskcenter.service.onboarding;
+
+import java.util.ArrayList;
+import java.util.List;
+
+public class TaskOnboardingContext {
+    private String resultValidationRunId = "";
+    private String resultReportToken = "";
+    private List<Long> resultValidationIds = new ArrayList<>();
+    private String resultArtifactPath = "";
+    private String resultArtifactHash = "";
+    private String batchValidationMarker = "";
+    private String batchReportToken = "";
+    private Long batchValidationTaskRunId;
+    private List<Long> batchValidationResultIds = new ArrayList<>();
+    private String batchArtifactPath = "";
+    private String batchArtifactHash = "";
+    private String errorMessage = "";
+
+    public String getResultValidationRunId() {
+        return resultValidationRunId;
+    }
+
+    public void setResultValidationRunId(String resultValidationRunId) {
+        this.resultValidationRunId = resultValidationRunId;
+    }
+
+    public String getResultReportToken() {
+        return resultReportToken;
+    }
+
+    public void setResultReportToken(String resultReportToken) {
+        this.resultReportToken = resultReportToken;
+    }
+
+    public List<Long> getResultValidationIds() {
+        return resultValidationIds;
+    }
+
+    public void setResultValidationIds(List<Long> resultValidationIds) {
+        this.resultValidationIds = resultValidationIds;
+    }
+
+    public String getResultArtifactPath() {
+        return resultArtifactPath;
+    }
+
+    public void setResultArtifactPath(String resultArtifactPath) {
+        this.resultArtifactPath = resultArtifactPath;
+    }
+
+    public String getResultArtifactHash() {
+        return resultArtifactHash;
+    }
+
+    public void setResultArtifactHash(String resultArtifactHash) {
+        this.resultArtifactHash = resultArtifactHash;
+    }
+
+    public String getBatchValidationMarker() {
+        return batchValidationMarker;
+    }
+
+    public void setBatchValidationMarker(String batchValidationMarker) {
+        this.batchValidationMarker = batchValidationMarker;
+    }
+
+    public String getBatchReportToken() {
+        return batchReportToken;
+    }
+
+    public void setBatchReportToken(String batchReportToken) {
+        this.batchReportToken = batchReportToken;
+    }
+
+    public Long getBatchValidationTaskRunId() {
+        return batchValidationTaskRunId;
+    }
+
+    public void setBatchValidationTaskRunId(Long batchValidationTaskRunId) {
+        this.batchValidationTaskRunId = batchValidationTaskRunId;
+    }
+
+    public List<Long> getBatchValidationResultIds() {
+        return batchValidationResultIds;
+    }
+
+    public void setBatchValidationResultIds(List<Long> batchValidationResultIds) {
+        this.batchValidationResultIds = batchValidationResultIds;
+    }
+
+    public String getBatchArtifactPath() {
+        return batchArtifactPath;
+    }
+
+    public void setBatchArtifactPath(String batchArtifactPath) {
+        this.batchArtifactPath = batchArtifactPath;
+    }
+
+    public String getBatchArtifactHash() {
+        return batchArtifactHash;
+    }
+
+    public void setBatchArtifactHash(String batchArtifactHash) {
+        this.batchArtifactHash = batchArtifactHash;
+    }
+
+    public String getErrorMessage() {
+        return errorMessage;
+    }
+
+    public void setErrorMessage(String errorMessage) {
+        this.errorMessage = errorMessage;
+    }
+}
