@@ -242,6 +242,25 @@ class TaskOnboardingRepositoryIntegrationTest {
     }
 
     @Test
+    void linkFingerprintIncludesAttributableDanglingLinksWithRawMissingIds() {
+        TaskResult existingResult = taskResultRepository.saveAndFlush(result("existing-result"));
+        TaskRun existingRun = taskRunRepository.saveAndFlush(run());
+        TaskRunResult missingRun = taskRunResultRepository.saveAndFlush(
+                link(-101L, existingResult.getId()));
+        TaskRunResult missingResult = taskRunResultRepository.saveAndFlush(
+                link(existingRun.getId(), -102L));
+        taskRunResultRepository.saveAndFlush(link(-103L, -104L));
+
+        List<String> rows = taskRunResultRepository.findFingerprintRowsByTaskConfigId(task.getId());
+
+        assertEquals(2, rows.size());
+        assertTrue(rows.stream().anyMatch(row -> row.contains("\"id\": " + missingRun.getId())
+                && row.contains("\"task_run_id\": -101")));
+        assertTrue(rows.stream().anyMatch(row -> row.contains("\"id\": " + missingResult.getId())
+                && row.contains("\"task_result_id\": -102")));
+    }
+
+    @Test
     void cleanHibernateSchemaCreatesOnboardingMarkerIndexes() {
         List<String> indexes = jdbcTemplate.queryForList(
                 "select indexname from pg_indexes where schemaname = current_schema()", String.class);
@@ -404,6 +423,34 @@ class TaskOnboardingRepositoryIntegrationTest {
     }
 
     @Test
+    void realResultCallbackRejectsDanglingLinkWithMissingRun() throws Exception {
+        TaskResult protectedResult = taskResultRepository.saveAndFlush(result("protected-result"));
+        onboardingService.get(task.getId());
+        TaskOnboardingContext issued = onboardingContext();
+        TaskResult validation = taskResultRepository.saveAndFlush(validationResult(issued));
+        taskRunResultRepository.saveAndFlush(link(-201L, protectedResult.getId()));
+
+        assertThrows(IllegalArgumentException.class, () -> onboardingService.report(
+                task.getId(), resultReport(issued, List.of(validation.getId()))));
+
+        assertCallbackIdentityUnchanged(issued);
+    }
+
+    @Test
+    void realResultCallbackRejectsDanglingLinkWithMissingResult() throws Exception {
+        TaskRun protectedRun = taskRunRepository.saveAndFlush(run());
+        onboardingService.get(task.getId());
+        TaskOnboardingContext issued = onboardingContext();
+        TaskResult validation = taskResultRepository.saveAndFlush(validationResult(issued));
+        taskRunResultRepository.saveAndFlush(link(protectedRun.getId(), -202L));
+
+        assertThrows(IllegalArgumentException.class, () -> onboardingService.report(
+                task.getId(), resultReport(issued, List.of(validation.getId()))));
+
+        assertCallbackIdentityUnchanged(issued);
+    }
+
+    @Test
     void realBatchCallbackAcceptsLegalRunAndLinks() throws Exception {
         BatchFixture fixture = issueBatchCallback(false);
 
@@ -470,6 +517,22 @@ class TaskOnboardingRepositoryIntegrationTest {
         BatchFixture fixture = issueBatchCallback(true);
         fixture.baselineLink().setStatus("RUNNING");
         taskRunResultRepository.saveAndFlush(fixture.baselineLink());
+
+        assertRejectedBatchCallback(fixture);
+    }
+
+    @Test
+    void realBatchCallbackRejectsDanglingLinkWithMissingRun() throws Exception {
+        BatchFixture fixture = issueBatchCallback(false);
+        taskRunResultRepository.saveAndFlush(link(-301L, fixture.results().get(0).getId()));
+
+        assertRejectedBatchCallback(fixture);
+    }
+
+    @Test
+    void realBatchCallbackRejectsDanglingLinkWithMissingResult() throws Exception {
+        BatchFixture fixture = issueBatchCallback(true);
+        taskRunResultRepository.saveAndFlush(link(fixture.baselineRun().getId(), -302L));
 
         assertRejectedBatchCallback(fixture);
     }
