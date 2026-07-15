@@ -4,6 +4,7 @@ import com.aitaskcenter.dto.ApiResponse;
 import com.aitaskcenter.dto.BatchProcessTaskResultRequest;
 import com.aitaskcenter.dto.DeleteByIdRequest;
 import com.aitaskcenter.dto.PageResult;
+import com.aitaskcenter.model.TaskRecordType;
 import com.aitaskcenter.model.TaskResult;
 import com.aitaskcenter.service.TaskResultService;
 import java.util.List;
@@ -35,8 +36,10 @@ public class TaskResultController {
             @RequestParam(required = false) String resultName,
             @RequestParam(required = false) Long projectId,
             @RequestParam(required = false) Long taskConfigId,
-            @RequestParam(required = false) String status) {
-        return ApiResponse.ok(service.list(page, pageSize, resultName, projectId, taskConfigId, status));
+            @RequestParam(required = false) String status,
+            @RequestParam(defaultValue = TaskRecordType.FORMAL) String recordType) {
+        return ApiResponse.ok(service.list(
+                page, pageSize, resultName, projectId, taskConfigId, status, recordType));
     }
 
     @GetMapping("/{id}")

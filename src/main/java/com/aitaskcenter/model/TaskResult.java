@@ -16,6 +16,7 @@ import java.util.List;
         indexes = {
                 @Index(name = "idx_task_result_created", columnList = "created_at"),
                 @Index(name = "idx_task_result_task_status_created", columnList = "task_config_id,status,created_at"),
+                @Index(name = "idx_task_result_task_record_type", columnList = "task_config_id,record_type,id"),
                 @Index(name = "idx_task_result_project_created", columnList = "project_id,created_at")
         })
 public class TaskResult extends BaseEntity {
@@ -48,6 +49,10 @@ public class TaskResult extends BaseEntity {
     @Column(nullable = false)
     // 字段：任务结果状态
     private String status = "PENDING";
+
+    @Column(nullable = false, length = 30, columnDefinition = "varchar(30) default 'FORMAL'")
+    // 字段：正式数据、当前验证数据或历史验证数据
+    private String recordType = TaskRecordType.FORMAL;
 
     @Column(length = 2000)
     // 字段：任务结果摘要
@@ -158,6 +163,14 @@ public class TaskResult extends BaseEntity {
     // 方法：setStatus
     public void setStatus(String status) {
         this.status = status;
+    }
+
+    public String getRecordType() {
+        return recordType;
+    }
+
+    public void setRecordType(String recordType) {
+        this.recordType = recordType;
     }
 
     // 方法：getSummary

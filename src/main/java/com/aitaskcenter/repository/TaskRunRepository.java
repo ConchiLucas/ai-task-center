@@ -10,4 +10,8 @@ public interface TaskRunRepository extends JpaRepository<TaskRun, Long> {
 
     // 方法：findByDispatchGroupIdIn
     List<TaskRun> findByDispatchGroupIdIn(Collection<String> dispatchGroupIds);
+
+    List<TaskRun> findByTaskConfigIdAndRecordTypeOrderByIdDesc(Long taskConfigId, String recordType);
+
+    long countByTaskConfigIdAndRecordType(Long taskConfigId, String recordType);
 }

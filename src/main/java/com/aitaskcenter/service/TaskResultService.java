@@ -4,6 +4,7 @@ import com.aitaskcenter.dto.BatchProcessTaskResultRequest;
 import com.aitaskcenter.dto.PageResult;
 import com.aitaskcenter.dto.TaskRunReference;
 import com.aitaskcenter.model.TaskResult;
+import com.aitaskcenter.model.TaskRecordType;
 import com.aitaskcenter.model.TaskConfig;
 import com.aitaskcenter.model.TaskExecutionLog;
 import com.aitaskcenter.model.TaskRun;
@@ -70,10 +71,16 @@ public class TaskResultService {
             String resultName,
             Long projectId,
             Long taskConfigId,
-            String status) {
+            String status,
+            String recordType) {
         int safePage = Math.max(page, 1);
         int safePageSize = Math.max(1, Math.min(pageSize, 500));
         Specification<TaskResult> specification = Specification.where(null);
+        String recordTypeFilter = TaskRecordType.normalizeFilter(recordType);
+        if (recordTypeFilter != null) {
+            specification = specification.and((root, query, builder) ->
+                    builder.equal(root.get("recordType"), recordTypeFilter));
+        }
         if (StringUtils.hasText(resultName)) {
             String keyword = "%" + resultName.trim().toLowerCase() + "%";
             specification = specification.and((root, query, builder) ->
@@ -114,6 +121,7 @@ public class TaskResultService {
         }
         TaskResult result = repository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("任务结果不存在"));
+        requireExecutable(result);
         String effectiveCliId = StringUtils.hasText(cliId) ? cliId.trim() : result.getCliId();
         if (!StringUtils.hasText(effectiveCliId)) {
             throw new IllegalArgumentException("任务结果未配置执行 CLI");
@@ -137,6 +145,16 @@ public class TaskResultService {
         if (requestedResults.size() != ids.size()) {
             throw new IllegalArgumentException("部分任务结果不存在");
         }
+        Set<String> recordTypes = requestedResults.stream()
+                .map(TaskResult::getRecordType)
+                .collect(Collectors.toSet());
+        if (recordTypes.size() != 1) {
+            throw new IllegalArgumentException("正式结果和验证结果不能混合批量执行");
+        }
+        String recordType = recordTypes.iterator().next();
+        if (TaskRecordType.VALIDATION_HISTORY.equals(recordType)) {
+            throw new IllegalArgumentException("历史验证结果仅供查看");
+        }
         Set<Long> activeResultIds = findActiveQueuedResultIds(ids);
         List<TaskResult> results = requestedResults.stream()
                 .filter(result -> List.of("PENDING", "FAILED").contains(result.getStatus()))
@@ -145,6 +163,10 @@ public class TaskResultService {
         int skippedCount = requestedResults.size() - results.size();
         if (results.isEmpty()) {
             throw new IllegalArgumentException("没有可执行结果，成功结果或已入队结果已被过滤");
+        }
+        if (TaskRecordType.VALIDATION_CURRENT.equals(recordType)) {
+            return pythonWorkerClient.processTaskResults(
+                    results.stream().map(TaskResult::getId).toList(), cliId, workerCount);
         }
         return enqueueTaskResults(results, cliId, workerCount, skippedCount);
     }
@@ -346,7 +368,12 @@ public class TaskResultService {
         if (id == null) {
             throw new IllegalArgumentException("缺少任务结果 ID");
         }
-        repository.deleteById(id);
+        TaskResult result = repository.findById(id)
+                .orElseThrow(() -> new IllegalArgumentException("任务结果不存在"));
+        if (TaskRecordType.VALIDATION_HISTORY.equals(result.getRecordType())) {
+            throw new IllegalArgumentException("历史验证结果仅供查看，不能删除");
+        }
+        repository.delete(result);
     }
 
     // 方法：copyAndValidate
@@ -364,6 +391,7 @@ public class TaskResultService {
         target.setSourceTables(clean(input.getSourceTables()));
         target.setSourceDescription(clean(input.getSourceDescription()));
         target.setStatus(defaultText(input.getStatus(), "PENDING"));
+        target.setRecordType(TaskRecordType.FORMAL);
         target.setSummary(clean(input.getSummary()));
         target.setResultContent(input.getResultContent() == null ? "" : input.getResultContent());
         target.setErrorMessage(clean(input.getErrorMessage()));
@@ -396,6 +424,9 @@ public class TaskResultService {
             if (run == null) {
                 continue;
             }
+            if (!TaskRecordType.FORMAL.equals(run.getRecordType())) {
+                continue;
+            }
             referencesByResultId.computeIfAbsent(link.getTaskResultId(), ignored -> new ArrayList<>())
                     .add(new TaskRunReference(run.getId(), run.getTaskName(), run.getStatus()));
         }
@@ -410,6 +441,12 @@ public class TaskResultService {
             throw new IllegalArgumentException(message);
         }
         return value.trim();
+    }
+
+    private static void requireExecutable(TaskResult result) {
+        if (TaskRecordType.VALIDATION_HISTORY.equals(result.getRecordType())) {
+            throw new IllegalArgumentException("历史验证结果仅供查看，不能执行");
+        }
     }
 
     // 方法：clean

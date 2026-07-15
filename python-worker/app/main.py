@@ -7,6 +7,8 @@ import socket
 import subprocess
 import threading
 import time
+import urllib.error
+import urllib.request
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
@@ -23,6 +25,15 @@ from pydantic import BaseModel, Field
 app = FastAPI(title="AI Task Center Python Worker")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCORE_SOURCE_DESCRIPTION = "word_clean_sentence_score_generation"
+TTS_SOURCE_DESCRIPTION = "word_clean_best_sentence_tts_generation"
+WORD_CLEAN_SENTENCE_TABLE = "public.word_clean_sentence"
+WORD_CLEAN_BEST_SENTENCE_TABLE = "public.word_clean_best_sentence"
+RESULT_MODE_SCORE = "word_clean_sentence_score"
+RESULT_MODE_TTS = "word_clean_best_sentence_tts"
+WORD_AGENT_BASE_URL = os.getenv("WORD_AGENT_BASE_URL", "http://127.0.0.1:8010").rstrip("/")
+RECORD_TYPE_VALIDATION_CURRENT = "VALIDATION_CURRENT"
+RECORD_TYPE_VALIDATION_HISTORY = "VALIDATION_HISTORY"
+RECORD_TYPE_FORMAL = "FORMAL"
 PROMPT_DIGIT_TRANSLATION = str.maketrans({
     "0": "零",
     "1": "一",
@@ -131,6 +142,8 @@ class TaskResultSnapshot:
     database_config_id: int
     # 字段：任务结果状态
     status: str
+    # 字段：正式数据或验证数据
+    record_type: str
     # 字段：任务结果正文 JSON
     result_content: str
 
@@ -147,6 +160,8 @@ class TaskRunSnapshot:
     ai_prompt_json: str
     # 字段：批次级 AI 原始响应 JSON
     ai_response_json: str
+    # 字段：正式批次或验证批次
+    record_type: str
 
 
 @dataclass(frozen=True)
@@ -266,6 +281,7 @@ def claim_next_queued_task() -> QueuedTaskClaim | None:
                     select task.id
                     from tb_task_run task
                     where task.status in ('QUEUED', 'RETRY_WAIT')
+                      and task.record_type = 'FORMAL'
                       and (task.next_retry_at is null or task.next_retry_at <= now())
                       and coalesce(task.attempt_no, 0) < coalesce(task.max_attempts, 3)
                       and (
@@ -714,7 +730,7 @@ def load_task_result_snapshot(task_result_id: int) -> TaskResultSnapshot:
                 cursor.execute(
                     """
                     select id, result_name, task_config_id, project_id, cli_id,
-                           database_config_id, status, result_content
+                           database_config_id, status, result_content, record_type
                     from tb_task_result
                     where id = %s
                     """,
@@ -737,6 +753,7 @@ def load_task_result_snapshot(task_result_id: int) -> TaskResultSnapshot:
         database_config_id=int(row[5]),
         status=str(row[6] or ""),
         result_content=str(row[7] or ""),
+        record_type=str(row[8] or RECORD_TYPE_FORMAL),
     )
 
 
@@ -751,7 +768,7 @@ def load_task_result_snapshots(task_result_ids: list[int]) -> list[TaskResultSna
                 cursor.execute(
                     """
                     select id, result_name, task_config_id, project_id, cli_id,
-                           database_config_id, status, result_content
+                           database_config_id, status, result_content, record_type
                     from tb_task_result
                     where id = any(%s)
                     """,
@@ -771,6 +788,7 @@ def load_task_result_snapshots(task_result_ids: list[int]) -> list[TaskResultSna
             database_config_id=int(row[5]) if row[5] is not None else 0,
             status=str(row[6] or ""),
             result_content=str(row[7] or ""),
+            record_type=str(row[8] or RECORD_TYPE_FORMAL),
         )
         for row in rows
     }
@@ -791,7 +809,7 @@ def load_task_run_snapshot(task_run_id: int) -> TaskRunSnapshot:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    select id, task_name, cli_id, ai_prompt_json, ai_response_json
+                    select id, task_name, cli_id, ai_prompt_json, ai_response_json, record_type
                     from tb_task_run
                     where id = %s
                     """,
@@ -809,6 +827,7 @@ def load_task_run_snapshot(task_run_id: int) -> TaskRunSnapshot:
         cli_id=str(row[2] or ""),
         ai_prompt_json=str(row[3] or ""),
         ai_response_json=str(row[4] or ""),
+        record_type=str(row[5] or RECORD_TYPE_FORMAL),
     )
 
 
@@ -945,8 +964,34 @@ def normalize_table_name(value: str) -> str:
 # 函数：ensure_word_clean_sentence_task
 def ensure_word_clean_sentence_task(tables: list[str]) -> None:
     normalized = {normalize_table_name(table) for table in tables}
-    if "public.word_clean_sentence" not in normalized:
+    if WORD_CLEAN_SENTENCE_TABLE not in normalized:
         raise HTTPException(status_code=400, detail="第一版仅支持从 public.word_clean_sentence 生成单词评分任务结果")
+
+
+# 函数：ensure_word_clean_best_sentence_task
+def ensure_word_clean_best_sentence_task(tables: list[str]) -> None:
+    normalized = {normalize_table_name(table) for table in tables}
+    if WORD_CLEAN_BEST_SENTENCE_TABLE not in normalized:
+        raise HTTPException(status_code=400, detail="TTS 任务必须从 public.word_clean_best_sentence 生成任务结果")
+
+
+# 函数：detect_result_generation_mode
+def detect_result_generation_mode(tables: list[str]) -> str:
+    normalized = {normalize_table_name(table) for table in tables}
+    selected_modes: list[str] = []
+    if WORD_CLEAN_SENTENCE_TABLE in normalized:
+        selected_modes.append(RESULT_MODE_SCORE)
+    if WORD_CLEAN_BEST_SENTENCE_TABLE in normalized:
+        selected_modes.append(RESULT_MODE_TTS)
+    if len(selected_modes) != 1:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                "任务结果来源必须且只能包含 public.word_clean_sentence "
+                "或 public.word_clean_best_sentence 中的一张表"
+            ),
+        )
+    return selected_modes[0]
 
 
 # 函数：load_cli_config_payload
@@ -1144,8 +1189,13 @@ if __name__ == "__main__":
     return relative_path
 
 
-# 函数：load_existing_word_clean_ids
-def load_existing_word_clean_ids(task_config_id: int, source_description: str) -> set[int]:
+# 函数：load_existing_result_source_ids
+def load_existing_result_source_ids(
+    task_config_id: int,
+    source_description: str,
+    payload_keys: tuple[str, ...],
+    record_type: str = RECORD_TYPE_FORMAL,
+) -> set[int]:
     existing: set[int] = set()
     settings = load_database_settings()
     with connect_database(settings) as connection:
@@ -1154,38 +1204,59 @@ def load_existing_word_clean_ids(task_config_id: int, source_description: str) -
                 """
                 select result_content
                 from tb_task_result
-                where task_config_id = %s and source_description = %s
+                where task_config_id = %s
+                  and source_description = %s
+                  and record_type = %s
                 """,
-                (task_config_id, source_description),
+                (task_config_id, source_description, record_type),
             )
             for (content,) in cursor.fetchall():
                 try:
                     payload = json.loads(content or "{}")
                 except json.JSONDecodeError:
                     continue
-                word_clean_id = payload.get("wordCleanId")
-                if word_clean_id is None and isinstance(payload.get("writeBack"), dict):
-                    word_clean_id = payload["writeBack"].get("wordCleanId")
-                if isinstance(word_clean_id, int):
-                    existing.add(word_clean_id)
+                if not isinstance(payload, dict):
+                    continue
+                write_back = (
+                    payload.get("writeBack")
+                    if isinstance(payload.get("writeBack"), dict)
+                    else {}
+                )
+                source_id = next(
+                    (
+                        value
+                        for key in payload_keys
+                        if isinstance((value := payload.get(key, write_back.get(key))), int)
+                    ),
+                    None,
+                )
+                if source_id is not None:
+                    existing.add(source_id)
     return existing
 
 
-# 函数：delete_existing_generated_results
-def delete_existing_generated_results(task_config_id: int, source_description: str) -> int:
-    settings = load_database_settings()
-    with connect_database(settings) as connection:
-        with connection.cursor() as cursor:
-            cursor.execute(
-                """
-                delete from tb_task_result
-                where task_config_id = %s and source_description = %s
-                """,
-                (task_config_id, source_description),
-            )
-            deleted = cursor.rowcount
-        connection.commit()
-    return int(deleted or 0)
+# 函数：load_existing_word_clean_ids
+def load_existing_word_clean_ids(
+    task_config_id: int, source_description: str, record_type: str = RECORD_TYPE_FORMAL
+) -> set[int]:
+    return load_existing_result_source_ids(
+        task_config_id,
+        source_description,
+        ("wordCleanId",),
+        record_type,
+    )
+
+
+# 函数：load_existing_best_sentence_ids
+def load_existing_best_sentence_ids(
+    task_config_id: int, source_description: str, record_type: str = RECORD_TYPE_FORMAL
+) -> set[int]:
+    return load_existing_result_source_ids(
+        task_config_id,
+        source_description,
+        ("bestSentenceId",),
+        record_type,
+    )
 
 
 # 函数：fetch_word_clean_sentence_groups
@@ -1242,6 +1313,56 @@ def fetch_word_clean_sentence_groups(connection_config: ConnectionConfigSnapshot
         group["candidateCount"] = len(candidates)
         group["scoredCount"] = sum(1 for candidate in candidates if candidate.get("hasScore"))
     return groups
+
+
+# 函数：fetch_word_clean_best_sentences
+def fetch_word_clean_best_sentences(connection_config: ConnectionConfigSnapshot) -> list[dict[str, Any]]:
+    try:
+        with connect_source_database(connection_config) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    select id,
+                           word_clean_id,
+                           word,
+                           meaning,
+                           source_sentence_id,
+                           source_model_name,
+                           sentence,
+                           sentence_translation,
+                           score,
+                           score_reason,
+                           score_model_name,
+                           scored_at
+                    from public.word_clean_best_sentence
+                    where btrim(sentence) <> ''
+                      and scored_at is not null
+                    order by id
+                    """
+                )
+                rows = cursor.fetchall()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取 word_clean_best_sentence 失败: {exc}") from exc
+
+    return [
+        {
+            "bestSentenceId": int(row[0]),
+            "wordCleanId": int(row[1]),
+            "word": str(row[2] or ""),
+            "meaning": str(row[3] or ""),
+            "sourceSentenceId": int(row[4]),
+            "sourceModelName": str(row[5] or ""),
+            "sentence": str(row[6] or ""),
+            "sentenceTranslation": str(row[7] or ""),
+            "score": int(row[8]),
+            "scoreReason": str(row[9] or ""),
+            "scoreModelName": str(row[10] or ""),
+            "scoredAt": row[11].isoformat() if row[11] is not None else None,
+        }
+        for row in rows
+    ]
 
 
 # 函数：candidate_label
@@ -1371,6 +1492,7 @@ def build_score_result_rows(
     script_path: str,
     groups: list[dict[str, Any]],
     existing_word_clean_ids: set[int],
+    record_type: str,
 ) -> list[tuple[Any, ...]]:
     now = datetime.now(timezone.utc)
     source_tables_json = json.dumps(tables, ensure_ascii=False)
@@ -1416,59 +1538,217 @@ def build_score_result_rows(
                 None,
                 now,
                 now,
+                record_type,
+            )
+        )
+    return rows
+
+
+# 函数：build_tts_result_payload
+def build_tts_result_payload(best_sentence: dict[str, Any]) -> dict[str, Any]:
+    best_sentence_id = int(best_sentence["bestSentenceId"])
+    word_clean_id = int(best_sentence["wordCleanId"])
+    source_sentence_id = int(best_sentence["sourceSentenceId"])
+    sentence = str(best_sentence.get("sentence") or "")
+    return {
+        "taskType": RESULT_MODE_TTS,
+        "bestSentenceId": best_sentence_id,
+        "wordCleanId": word_clean_id,
+        "word": str(best_sentence.get("word") or ""),
+        "sourceTable": WORD_CLEAN_BEST_SENTENCE_TABLE,
+        "source": {
+            "bestSentenceId": best_sentence_id,
+            "wordCleanId": word_clean_id,
+            "sourceSentenceId": source_sentence_id,
+            "sourceModelName": str(best_sentence.get("sourceModelName") or ""),
+            "word": str(best_sentence.get("word") or ""),
+            "meaning": str(best_sentence.get("meaning") or ""),
+            "sentence": sentence,
+            "sentenceTranslation": str(best_sentence.get("sentenceTranslation") or ""),
+            "score": int(best_sentence["score"]),
+            "scoreReason": str(best_sentence.get("scoreReason") or ""),
+            "scoreModelName": str(best_sentence.get("scoreModelName") or ""),
+            "scoredAt": best_sentence.get("scoredAt"),
+        },
+        "ttsInput": {
+            "text": sentence,
+            "fileName": f"word_clean_{word_clean_id}_best_{best_sentence_id}.wav",
+            "defaultAudioFormat": "wav",
+        },
+        "writeBack": {
+            "table": WORD_CLEAN_BEST_SENTENCE_TABLE,
+            "bestSentenceId": best_sentence_id,
+            "wordCleanId": word_clean_id,
+            "match": {
+                "id": best_sentence_id,
+                "word_clean_id": word_clean_id,
+            },
+            "sourceGuard": {
+                "source_sentence_id": source_sentence_id,
+                "sentence": sentence,
+            },
+            "ttsResultMapping": {
+                "tts_status": "success",
+                "tts_provider": "ttsResult.provider",
+                "tts_model": "ttsResult.model",
+                "tts_voice": "ttsResult.voice",
+                "tts_audio_format": "ttsResult.audioFormat",
+                "tts_bucket": "ttsResult.bucket",
+                "tts_object_key": "ttsResult.objectKey",
+                "tts_object_url": "ttsResult.objectUrl",
+                "tts_content_type": "ttsResult.contentType",
+                "tts_file_size": "ttsResult.fileSize",
+                "tts_duration_ms": "ttsResult.durationMs",
+                "tts_generated_at": "now()",
+                "tts_error_message": "",
+                "updated_at": "now()",
+            },
+        },
+    }
+
+
+# 函数：build_tts_result_rows
+def build_tts_result_rows(
+    task_config: TaskConfigSnapshot,
+    tables: list[str],
+    best_sentences: list[dict[str, Any]],
+    existing_best_sentence_ids: set[int],
+    record_type: str,
+) -> list[tuple[Any, ...]]:
+    now = datetime.now(timezone.utc)
+    source_tables_json = json.dumps(tables, ensure_ascii=False)
+    rows: list[tuple[Any, ...]] = []
+    for best_sentence in best_sentences:
+        best_sentence_id = int(best_sentence["bestSentenceId"])
+        if best_sentence_id in existing_best_sentence_ids:
+            continue
+        word_clean_id = int(best_sentence["wordCleanId"])
+        word = str(best_sentence.get("word") or "").strip()
+        display_word = word[:80] if word else str(word_clean_id)
+        payload = build_tts_result_payload(best_sentence)
+        rows.append(
+            (
+                f"{task_config.task_name} - {display_word} ({word_clean_id})",
+                None,
+                task_config.id,
+                task_config.project_id,
+                task_config.cli_id,
+                task_config.database_config_id,
+                source_tables_json,
+                TTS_SOURCE_DESCRIPTION,
+                "PENDING",
+                f"最佳句子 {best_sentence_id} 待生成 TTS",
+                json.dumps(payload, ensure_ascii=False),
+                "",
+                now,
+                None,
+                now,
+                now,
+                record_type,
             )
         )
     return rows
 
 
 # 函数：insert_task_result_rows
-def insert_task_result_rows(rows: list[tuple[Any, ...]]) -> int:
-    if not rows:
-        return 0
+def replace_task_result_rows(
+    task_config_id: int,
+    source_description: str,
+    record_type: str,
+    rows: list[tuple[Any, ...]],
+    overwrite_formal: bool,
+) -> tuple[int, int]:
     settings = load_database_settings()
     with connect_database(settings) as connection:
         with connection.cursor() as cursor:
-            execute_values(
-                cursor,
+            cursor.execute(
                 """
-                insert into tb_task_result (
-                    result_name,
-                    task_run_id,
-                    task_config_id,
-                    project_id,
-                    cli_id,
-                    database_config_id,
-                    source_tables,
-                    source_description,
-                    status,
-                    summary,
-                    result_content,
-                    error_message,
-                    parsed_at,
-                    completed_at,
-                    created_at,
-                    updated_at
-                ) values %s
+                update tb_task_result
+                set record_type = %s, updated_at = %s
+                where task_config_id = %s and record_type = %s
                 """,
-                rows,
-                page_size=1000,
+                (
+                    RECORD_TYPE_VALIDATION_HISTORY,
+                    datetime.now(timezone.utc),
+                    task_config_id,
+                    RECORD_TYPE_VALIDATION_CURRENT,
+                ),
             )
+            deleted_count = 0
+            if record_type == RECORD_TYPE_FORMAL and overwrite_formal:
+                cursor.execute(
+                    """
+                    delete from tb_task_result
+                    where task_config_id = %s
+                      and source_description = %s
+                      and record_type = %s
+                    """,
+                    (task_config_id, source_description, RECORD_TYPE_FORMAL),
+                )
+                deleted_count = int(cursor.rowcount or 0)
+            if rows:
+                execute_values(
+                    cursor,
+                    """
+                    insert into tb_task_result (
+                        result_name,
+                        task_run_id,
+                        task_config_id,
+                        project_id,
+                        cli_id,
+                        database_config_id,
+                        source_tables,
+                        source_description,
+                        status,
+                        summary,
+                        result_content,
+                        error_message,
+                        parsed_at,
+                        completed_at,
+                        created_at,
+                        updated_at,
+                        record_type
+                    ) values %s
+                    """,
+                    rows,
+                    page_size=1000,
+                )
         connection.commit()
-    return len(rows)
+    return len(rows), deleted_count
 
 
 # 函数：generate_word_clean_sentence_results
-def generate_word_clean_sentence_results(task_config_id: int, overwrite: bool) -> dict[str, Any]:
+def generate_word_clean_sentence_results(
+    task_config_id: int,
+    overwrite: bool,
+    record_type: str = RECORD_TYPE_FORMAL,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    if record_type not in {RECORD_TYPE_VALIDATION_CURRENT, RECORD_TYPE_FORMAL}:
+        raise HTTPException(status_code=400, detail="任务结果记录类型无效")
+    if limit is not None and (limit < 1 or limit > 20):
+        raise HTTPException(status_code=400, detail="验证结果数量需在 1 到 20 之间")
     task_config = load_task_config_snapshot(task_config_id)
     tables = parse_selected_tables(task_config.selected_tables)
     ensure_word_clean_sentence_task(tables)
     connection_config = load_connection_config_snapshot(task_config.database_config_id)
     script_path = write_word_clean_sentence_score_script(task_config, connection_config)
-    deleted_count = delete_existing_generated_results(task_config.id, SCORE_SOURCE_DESCRIPTION) if overwrite else 0
-    existing_ids = set() if overwrite else load_existing_word_clean_ids(task_config.id, SCORE_SOURCE_DESCRIPTION)
+    existing_ids = (
+        set()
+        if overwrite or record_type == RECORD_TYPE_VALIDATION_CURRENT
+        else load_existing_word_clean_ids(task_config.id, SCORE_SOURCE_DESCRIPTION, RECORD_TYPE_FORMAL)
+    )
     groups = fetch_word_clean_sentence_groups(connection_config)
-    rows = build_score_result_rows(task_config, tables, script_path, groups, existing_ids)
-    inserted_count = insert_task_result_rows(rows)
+    rows = build_score_result_rows(task_config, tables, script_path, groups, existing_ids, record_type)
+    if limit is not None:
+        rows = rows[:limit]
+    inserted_count, deleted_count = replace_task_result_rows(
+        task_config.id,
+        SCORE_SOURCE_DESCRIPTION,
+        record_type,
+        rows,
+        overwrite,
+    )
     return {
         "accepted": True,
         "mode": "word_clean_sentence_score",
@@ -1480,23 +1760,102 @@ def generate_word_clean_sentence_results(task_config_id: int, overwrite: bool) -
         "skippedCount": len(groups) - inserted_count,
         "deletedCount": deleted_count,
         "overwrite": overwrite,
+        "recordType": record_type,
+        "limit": limit,
     }
 
 
-# 函数：parse_task_result_payload
-def parse_task_result_payload(task_result: TaskResultSnapshot) -> dict[str, Any]:
+# 函数：generate_word_clean_best_sentence_tts_results
+def generate_word_clean_best_sentence_tts_results(
+    task_config_id: int,
+    overwrite: bool,
+    record_type: str = RECORD_TYPE_FORMAL,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    if record_type not in {RECORD_TYPE_VALIDATION_CURRENT, RECORD_TYPE_FORMAL}:
+        raise HTTPException(status_code=400, detail="任务结果记录类型无效")
+    if limit is not None and (limit < 1 or limit > 20):
+        raise HTTPException(status_code=400, detail="验证结果数量需在 1 到 20 之间")
+    task_config = load_task_config_snapshot(task_config_id)
+    tables = parse_selected_tables(task_config.selected_tables)
+    ensure_word_clean_best_sentence_task(tables)
+    connection_config = load_connection_config_snapshot(task_config.database_config_id)
+    existing_ids = (
+        set()
+        if overwrite or record_type == RECORD_TYPE_VALIDATION_CURRENT
+        else load_existing_best_sentence_ids(task_config.id, TTS_SOURCE_DESCRIPTION, RECORD_TYPE_FORMAL)
+    )
+    best_sentences = fetch_word_clean_best_sentences(connection_config)
+    rows = build_tts_result_rows(task_config, tables, best_sentences, existing_ids, record_type)
+    if limit is not None:
+        rows = rows[:limit]
+    inserted_count, deleted_count = replace_task_result_rows(
+        task_config.id,
+        TTS_SOURCE_DESCRIPTION,
+        record_type,
+        rows,
+        overwrite,
+    )
+    return {
+        "accepted": True,
+        "mode": RESULT_MODE_TTS,
+        "taskConfigId": task_config.id,
+        "sourceTable": WORD_CLEAN_BEST_SENTENCE_TABLE,
+        "totalBestSentences": len(best_sentences),
+        "insertedCount": inserted_count,
+        "skippedCount": len(best_sentences) - inserted_count,
+        "deletedCount": deleted_count,
+        "overwrite": overwrite,
+        "recordType": record_type,
+        "limit": limit,
+    }
+
+
+# 函数：generate_results_for_task_config
+def generate_results_for_task_config(
+    task_config_id: int,
+    overwrite: bool,
+    record_type: str = RECORD_TYPE_FORMAL,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    task_config = load_task_config_snapshot(task_config_id)
+    mode = detect_result_generation_mode(parse_selected_tables(task_config.selected_tables))
+    if mode == RESULT_MODE_TTS:
+        return generate_word_clean_best_sentence_tts_results(task_config_id, overwrite, record_type, limit)
+    return generate_word_clean_sentence_results(task_config_id, overwrite, record_type, limit)
+
+
+# 函数：parse_task_result_content
+def parse_task_result_content(task_result: TaskResultSnapshot) -> dict[str, Any]:
     try:
         payload = json.loads(task_result.result_content or "{}")
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"任务结果 JSON 解析失败: {exc}") from exc
     if not isinstance(payload, dict):
         raise HTTPException(status_code=400, detail="任务结果正文必须是 JSON 对象")
+    return payload
+
+
+# 函数：parse_task_result_payload
+def parse_task_result_payload(task_result: TaskResultSnapshot) -> dict[str, Any]:
+    payload = parse_task_result_content(task_result)
     if payload.get("taskType") != "word_clean_sentence_score":
-        raise HTTPException(status_code=400, detail="第一版仅支持 word_clean_sentence_score 任务结果")
+        raise HTTPException(status_code=400, detail="任务结果不是 word_clean_sentence_score 类型")
     if not isinstance(payload.get("aiPrompt"), str) or not payload["aiPrompt"].strip():
         raise HTTPException(status_code=400, detail="任务结果缺少 AI 评分提示词")
     if not isinstance(payload.get("writeBack"), dict):
         raise HTTPException(status_code=400, detail="任务结果缺少回填源数据库详情")
+    return payload
+
+
+# 函数：parse_tts_task_result_payload
+def parse_tts_task_result_payload(task_result: TaskResultSnapshot) -> dict[str, Any]:
+    payload = parse_task_result_content(task_result)
+    if payload.get("taskType") != RESULT_MODE_TTS:
+        raise HTTPException(status_code=400, detail=f"任务结果不是 {RESULT_MODE_TTS} 类型")
+    tts_input = payload.get("ttsInput")
+    if not isinstance(tts_input, dict) or not str(tts_input.get("text") or "").strip():
+        raise HTTPException(status_code=400, detail="TTS 任务结果缺少有效的 ttsInput.text")
     return payload
 
 
@@ -2043,12 +2402,16 @@ def fail_task_run_batch_results(task_results: list[TaskResultSnapshot], message:
 # 函数：process_word_clean_sentence_task_run_batch
 def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | None = None) -> dict[str, Any]:
     task_run = load_task_run_snapshot(task_run_id)
+    if task_run.record_type != RECORD_TYPE_FORMAL:
+        raise HTTPException(status_code=400, detail="验证批次不能执行")
     prompt = parse_task_run_batch_prompt(task_run)
     task_result_ids = load_task_run_result_ids(task_run.id)
     if not task_result_ids:
         raise HTTPException(status_code=400, detail="任务批次未关联任务结果")
 
     task_results = load_task_result_snapshots(task_result_ids)
+    if any(item.record_type != RECORD_TYPE_FORMAL for item in task_results):
+        raise HTTPException(status_code=400, detail="验证结果不能执行")
     contexts = build_task_run_batch_item_contexts(prompt, task_results)
     effective_cli_id = (cli_id or task_run.cli_id or "").strip()
     if not effective_cli_id:
@@ -2342,9 +2705,90 @@ def process_word_clean_sentence_task_results_batch(
     }
 
 
+# 函数：post_word_agent_tts
+def post_word_agent_tts(tts_input: dict[str, Any]) -> dict[str, Any]:
+    request_payload: dict[str, Any] = {
+        "text": str(tts_input.get("text") or "").strip(),
+        "format": str(tts_input.get("defaultAudioFormat") or "wav").strip() or "wav",
+        "fileName": str(tts_input.get("fileName") or "").strip() or None,
+        "overwrite": True,
+    }
+    for source_key, target_key in (("voice", "voice"), ("model", "model")):
+        value = str(tts_input.get(source_key) or "").strip()
+        if value:
+            request_payload[target_key] = value
+    request = urllib.request.Request(
+        f"{WORD_AGENT_BASE_URL}/v1/tts/generate",
+        data=json.dumps(request_payload, ensure_ascii=False).encode("utf-8"),
+        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")
+        raise HTTPException(status_code=502, detail=f"word-agent TTS 请求失败: {detail}") from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail=f"word-agent TTS 服务不可用（{WORD_AGENT_BASE_URL}）: {exc.reason}",
+        ) from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=502, detail="word-agent TTS 响应不是有效 JSON") from exc
+    if not isinstance(response_payload, dict):
+        raise HTTPException(status_code=502, detail="word-agent TTS 响应格式无效")
+    download_url = str(response_payload.get("downloadUrl") or "")
+    if download_url.startswith("/"):
+        response_payload["downloadUrl"] = f"{WORD_AGENT_BASE_URL}{download_url}"
+    return response_payload
+
+
+# 函数：process_tts_validation_task_result
+def process_tts_validation_task_result(task_result: TaskResultSnapshot) -> dict[str, Any]:
+    if task_result.record_type != RECORD_TYPE_VALIDATION_CURRENT:
+        raise HTTPException(status_code=400, detail="TTS 单条验证执行只支持当前验证数据")
+    payload = parse_tts_task_result_payload(task_result)
+    update_task_result_state(task_result.id, "RUNNING", "正在生成验证 TTS 音频", payload, "")
+    try:
+        tts_result = post_word_agent_tts(payload["ttsInput"])
+        completed_payload = {
+            **payload,
+            "ttsResult": tts_result,
+            "validationExecution": {
+                "sourceWriteBackSkipped": True,
+                "processedAt": datetime.now(timezone.utc).isoformat(),
+                "wordAgentBaseUrl": WORD_AGENT_BASE_URL,
+            },
+        }
+        file_name = str(tts_result.get("fileName") or payload["ttsInput"].get("fileName") or "音频")
+        byte_size = int(tts_result.get("byteSize") or 0)
+        summary = f"TTS 验证生成成功：{file_name}（{byte_size} 字节），未回填来源业务表"
+        update_task_result_state(task_result.id, "SUCCESS", summary, completed_payload, "")
+        return {
+            "accepted": True,
+            "taskResultId": task_result.id,
+            "status": "SUCCESS",
+            "summary": summary,
+            "ttsResult": tts_result,
+        }
+    except Exception as exc:
+        failed_payload = {
+            **payload,
+            "processorError": str(exc),
+            "processedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        update_task_result_state(task_result.id, "FAILED", "TTS 验证执行失败", failed_payload, str(exc))
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
 # 函数：process_word_clean_sentence_task_result
 def process_word_clean_sentence_task_result(task_result_id: int, cli_id: str | None = None) -> dict[str, Any]:
     task_result = load_task_result_snapshot(task_result_id)
+    if task_result.record_type == RECORD_TYPE_VALIDATION_HISTORY:
+        raise HTTPException(status_code=400, detail="历史验证结果不能执行")
     payload = parse_task_result_payload(task_result)
     effective_cli_id = (cli_id or task_result.cli_id or "").strip()
     if not effective_cli_id:
@@ -2360,14 +2804,21 @@ def process_word_clean_sentence_task_result(task_result_id: int, cli_id: str | N
         cli_response = run_cli_prompt(cli_config, payload["aiPrompt"])
         ai_result = extract_json_payload(cli_response["stdout"])
         scores, best_score_item = validate_ai_score_result(ai_result, payload["writeBack"])
-        connection_config = load_connection_config_snapshot(task_result.database_config_id)
-        backfill_result = backfill_word_clean_sentence_score(
-            connection_config,
-            payload["writeBack"],
-            scores,
-            best_score_item,
-            str(cli_config.get("label") or effective_cli_id),
-        )
+        validation_execution = task_result.record_type == RECORD_TYPE_VALIDATION_CURRENT
+        if validation_execution:
+            backfill_result = {
+                "skipped": True,
+                "reason": "当前验证结果只保存执行输出，不回填来源业务表",
+            }
+        else:
+            connection_config = load_connection_config_snapshot(task_result.database_config_id)
+            backfill_result = backfill_word_clean_sentence_score(
+                connection_config,
+                payload["writeBack"],
+                scores,
+                best_score_item,
+                str(cli_config.get("label") or effective_cli_id),
+            )
         completed_payload = {
             **payload,
             "aiRawOutput": cli_response["stdout"],
@@ -2391,8 +2842,13 @@ def process_word_clean_sentence_task_result(task_result_id: int, cli_id: str | N
             "backfillResult": backfill_result,
         }
         summary = (
-            f"已评分 {len(scores)} 条候选句，最高分 "
-            f"{best_score_item['candidate']}={best_score_item['score']}，TTS 待生成"
+            f"验证评分成功：{len(scores)} 条候选句，最高分 "
+            f"{best_score_item['candidate']}={best_score_item['score']}，未回填来源业务表"
+            if validation_execution
+            else (
+                f"已评分 {len(scores)} 条候选句，最高分 "
+                f"{best_score_item['candidate']}={best_score_item['score']}，TTS 待生成"
+            )
         )
         update_task_result_state(task_result.id, "SUCCESS", summary, completed_payload, "")
         return {
@@ -2414,6 +2870,51 @@ def process_word_clean_sentence_task_result(task_result_id: int, cli_id: str | N
         raise HTTPException(status_code=500, detail=str(exc)) from exc
 
 
+# 函数：process_task_result_by_type
+def process_task_result_by_type(task_result_id: int, cli_id: str | None = None) -> dict[str, Any]:
+    task_result = load_task_result_snapshot(task_result_id)
+    payload = parse_task_result_content(task_result)
+    if payload.get("taskType") == RESULT_MODE_TTS:
+        return process_tts_validation_task_result(task_result)
+    return process_word_clean_sentence_task_result(task_result_id, cli_id)
+
+
+# 函数：process_validation_task_results_batch
+def process_validation_task_results_batch(
+    task_result_ids: list[int],
+    cli_id: str | None,
+    worker_count: int,
+) -> dict[str, Any]:
+    if not task_result_ids:
+        raise HTTPException(status_code=400, detail="任务结果 ID 不能为空")
+    task_results = load_task_result_snapshots(task_result_ids)
+    if any(item.record_type != RECORD_TYPE_VALIDATION_CURRENT for item in task_results):
+        raise HTTPException(status_code=400, detail="小批量直接执行只支持当前验证结果")
+
+    success_count = 0
+    failed_count = 0
+    with ThreadPoolExecutor(max_workers=min(worker_count, len(task_results))) as executor:
+        futures = {
+            executor.submit(process_task_result_by_type, item.id, cli_id): item.id
+            for item in task_results
+        }
+        for future in as_completed(futures):
+            try:
+                future.result()
+                success_count += 1
+            except Exception:
+                failed_count += 1
+    return {
+        "accepted": True,
+        "mode": "validation-direct-batch",
+        "taskResultCount": len(task_results),
+        "successCount": success_count,
+        "failedCount": failed_count,
+        "workerCount": worker_count,
+        "cliId": cli_id,
+    }
+
+
 # 函数：load_queue_status_counts
 def load_queue_status_counts() -> dict[str, int]:
     settings = load_database_settings()
@@ -2424,6 +2925,7 @@ def load_queue_status_counts() -> dict[str, int]:
                 select status, count(*)
                 from tb_task_run
                 where status in ('QUEUED', 'RUNNING', 'RETRY_WAIT')
+                  and record_type = 'FORMAL'
                 group by status
                 """
             )
@@ -2480,8 +2982,10 @@ def get_cli_configs() -> dict[str, Any]:
 def generate_results_from_task_config_simple(
     taskConfigId: int,
     overwrite: bool = False,
+    recordType: str = RECORD_TYPE_FORMAL,
+    limit: int | None = Query(default=None, ge=1, le=20),
 ) -> dict[str, Any]:
-    return generate_word_clean_sentence_results(taskConfigId, overwrite)
+    return generate_results_for_task_config(taskConfigId, overwrite, recordType, limit)
 
 
 # 函数：process_task_result_simple
@@ -2490,7 +2994,7 @@ def process_task_result_simple(
     taskResultId: int,
     cliId: str | None = None,
 ) -> dict[str, Any]:
-    return process_word_clean_sentence_task_result(taskResultId, cliId)
+    return process_task_result_by_type(taskResultId, cliId)
 
 
 # 函数：process_task_run_batch_json_simple
@@ -2510,7 +3014,7 @@ def process_task_results_batch_simple(
     workerCount: int = Query(default=4, ge=1, le=32),
 ) -> dict[str, Any]:
     task_result_ids = [int(item) for item in taskResultIds.split(",") if item.strip().isdigit()]
-    return process_word_clean_sentence_task_results_batch(task_result_ids, cliId, workerCount)
+    return process_validation_task_results_batch(task_result_ids, cliId, workerCount)
 
 
 # 函数：start_execution

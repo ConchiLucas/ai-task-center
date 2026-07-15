@@ -1,0 +1,44 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+BASE_URL="${TASK_CENTER_BASE_URL:-http://127.0.0.1:18743}"
+
+if [ "${1:-}" != "report" ]; then
+  printf 'Usage: %s report --task-config-id ID --stage result|batch --token TOKEN --status CODE_READY\n' "$0" >&2
+  exit 2
+fi
+shift
+
+TASK_CONFIG_ID=""
+STAGE=""
+TOKEN=""
+STATUS=""
+while [ "$#" -gt 0 ]; do
+  case "$1" in
+    --task-config-id) TASK_CONFIG_ID="${2:-}"; shift 2 ;;
+    --stage) STAGE="${2:-}"; shift 2 ;;
+    --token) TOKEN="${2:-}"; shift 2 ;;
+    --status) STATUS="${2:-}"; shift 2 ;;
+    *) printf 'Unknown argument: %s\n' "$1" >&2; exit 2 ;;
+  esac
+done
+
+if ! [[ "$TASK_CONFIG_ID" =~ ^[0-9]+$ ]]; then
+  printf 'task-config-id must be numeric\n' >&2
+  exit 2
+fi
+if [ "$STAGE" != "result" ] && [ "$STAGE" != "batch" ]; then
+  printf 'stage must be result or batch\n' >&2
+  exit 2
+fi
+if [ -z "$TOKEN" ] || [ "$STATUS" != "CODE_READY" ]; then
+  printf 'token is required and status must be CODE_READY\n' >&2
+  exit 2
+fi
+
+payload="$(python3 -c 'import json,sys; print(json.dumps({"stage":sys.argv[1],"token":sys.argv[2],"status":sys.argv[3]}))' "$STAGE" "$TOKEN" "$STATUS")"
+curl -fsS \
+  -H 'Content-Type: application/json' \
+  -d "$payload" \
+  "${BASE_URL}/api/task/${TASK_CONFIG_ID}/onboarding/report"
+printf '\n'

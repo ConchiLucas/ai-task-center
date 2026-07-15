@@ -3,6 +3,7 @@ package com.aitaskcenter.service;
 import com.aitaskcenter.dto.GenerateTaskRunBatchRequest;
 import com.aitaskcenter.model.TaskConfig;
 import com.aitaskcenter.model.TaskResult;
+import com.aitaskcenter.model.TaskRecordType;
 import com.aitaskcenter.repository.ConnectionConfigRepository;
 import com.aitaskcenter.repository.ProjectConfigRepository;
 import com.aitaskcenter.repository.TaskConfigRepository;
@@ -64,6 +65,12 @@ public class TaskConfigService {
 
     // 方法：generateResults
     public Map<String, Object> generateResults(Long id, boolean overwrite) {
+        return generateResults(id, overwrite, TaskRecordType.FORMAL, null);
+    }
+
+    // 方法：generateResults
+    public Map<String, Object> generateResults(
+            Long id, boolean overwrite, String recordType, Integer limit) {
         if (id == null) {
             throw new IllegalArgumentException("缺少任务配置 ID");
         }
@@ -75,12 +82,30 @@ public class TaskConfigService {
         if (!StringUtils.hasText(task.getSelectedTables())) {
             throw new IllegalArgumentException("任务配置未选择来源表");
         }
-        return pythonWorkerClient.generateTaskResults(id, overwrite);
+        if (!List.of(TaskRecordType.VALIDATION_CURRENT, TaskRecordType.FORMAL).contains(recordType)) {
+            throw new IllegalArgumentException("任务结果记录类型无效");
+        }
+        if (limit != null && (limit < 1 || limit > 20)) {
+            throw new IllegalArgumentException("验证结果数量需在 1 到 20 之间");
+        }
+        return pythonWorkerClient.generateTaskResults(id, overwrite, recordType, limit);
     }
 
     @Transactional
     // 方法：generateRunBatches
     public Map<String, Object> generateRunBatches(Long id, GenerateTaskRunBatchRequest request) {
+        archiveCurrentValidationRuns(id);
+        return generateRunBatches(id, request, TaskRecordType.FORMAL, null);
+    }
+
+    @Transactional
+    public Map<String, Object> generateValidationRunBatch(Long id, GenerateTaskRunBatchRequest request) {
+        archiveCurrentValidationRuns(id);
+        return generateRunBatches(id, request, TaskRecordType.VALIDATION_CURRENT, 1);
+    }
+
+    private Map<String, Object> generateRunBatches(
+            Long id, GenerateTaskRunBatchRequest request, String recordType, Integer maxRunCount) {
         if (id == null) {
             throw new IllegalArgumentException("缺少任务配置 ID");
         }
@@ -99,7 +124,8 @@ public class TaskConfigService {
                 : task.getTaskName();
         Set<String> statuses = buildBatchStatuses(request.getIncludeFailed());
 
-        List<TaskResult> candidateResults = taskResultRepository.findByTaskConfigIdAndStatusInOrderByIdAsc(id, statuses);
+        List<TaskResult> candidateResults = taskResultRepository
+                .findByTaskConfigIdAndRecordTypeAndStatusInOrderByIdAsc(id, TaskRecordType.FORMAL, statuses);
         if (candidateResults.isEmpty()) {
             return Map.of(
                     "createdRunCount", 0,
@@ -112,13 +138,17 @@ public class TaskConfigService {
         List<Object[]> linkRows = new ArrayList<>(candidateResults.size());
         int batchIndex = 1;
         for (int start = 0; start < candidateResults.size(); start += batchSize) {
+            if (maxRunCount != null && batchIndex > maxRunCount) {
+                break;
+            }
             int end = Math.min(start + batchSize, candidateResults.size());
             List<TaskResult> chunk = candidateResults.subList(start, end);
             String taskRunName = namePrefix + " - 批次 " + batchIndex;
             String promptJson = taskRunPromptBuilder.buildBatchPromptJson(
                     new TaskRunPromptBuilder.BatchPromptContext(taskRunName, cliId, task.getSelectedTables()),
                     chunk);
-            Long taskRunId = insertTaskRunBatch(task, taskRunName, cliId, chunk.size(), promptJson, now);
+            Long taskRunId = insertTaskRunBatch(
+                    task, taskRunName, cliId, chunk.size(), promptJson, recordType, now);
             for (TaskResult taskResult : chunk) {
                 linkRows.add(new Object[]{now, now, taskRunId, taskResult.getId(), "PENDING", ""});
             }
@@ -139,6 +169,7 @@ public class TaskConfigService {
             String cliId,
             int resultCount,
             String promptJson,
+            String recordType,
             OffsetDateTime now) {
         return jdbcTemplate.queryForObject(
                 """
@@ -156,8 +187,9 @@ public class TaskConfigService {
                     log_path,
                     run_log,
                     ai_prompt_json,
-                    ai_response_json
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    ai_response_json,
+                    record_type
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 returning id
                 """,
                 Long.class,
@@ -174,7 +206,21 @@ public class TaskConfigService {
                 "",
                 "批次已创建，包含 " + resultCount + " 条任务结果。",
                 promptJson,
-                "");
+                "",
+                recordType);
+    }
+
+    private void archiveCurrentValidationRuns(Long taskConfigId) {
+        jdbcTemplate.update(
+                """
+                update tb_task_run
+                set record_type = ?, updated_at = ?
+                where task_config_id = ? and record_type = ?
+                """,
+                TaskRecordType.VALIDATION_HISTORY,
+                OffsetDateTime.now(),
+                taskConfigId,
+                TaskRecordType.VALIDATION_CURRENT);
     }
 
     // 方法：batchInsertTaskRunResultLinks

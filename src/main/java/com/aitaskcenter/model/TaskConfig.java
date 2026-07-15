@@ -30,6 +30,15 @@ public class TaskConfig extends BaseEntity {
     // 字段：任务关联的数据表 JSON
     private String selectedTables;
 
+    @Column(nullable = false, length = 40, columnDefinition = "varchar(40) default 'RESULT_CODE'")
+    private String onboardingStep = "RESULT_CODE";
+
+    @Column(nullable = false, length = 40, columnDefinition = "varchar(40) default 'ACTIVE'")
+    private String onboardingStatus = "ACTIVE";
+
+    @Column(nullable = false, columnDefinition = "text default '{}'")
+    private String onboardingContext = "{}";
+
     // 方法：getTaskName
     public String getTaskName() {
         return taskName;
@@ -88,5 +97,29 @@ public class TaskConfig extends BaseEntity {
     // 方法：setSelectedTables
     public void setSelectedTables(String selectedTables) {
         this.selectedTables = selectedTables;
+    }
+
+    public String getOnboardingStep() {
+        return onboardingStep;
+    }
+
+    public void setOnboardingStep(String onboardingStep) {
+        this.onboardingStep = onboardingStep;
+    }
+
+    public String getOnboardingStatus() {
+        return onboardingStatus;
+    }
+
+    public void setOnboardingStatus(String onboardingStatus) {
+        this.onboardingStatus = onboardingStatus;
+    }
+
+    public String getOnboardingContext() {
+        return onboardingContext;
+    }
+
+    public void setOnboardingContext(String onboardingContext) {
+        this.onboardingContext = onboardingContext;
     }
 }

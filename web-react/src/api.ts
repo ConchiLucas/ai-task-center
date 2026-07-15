@@ -83,8 +83,70 @@ export interface TaskConfig {
   UpdatedAt?: string;
 }
 
+export type TaskOnboardingStep =
+  | 'RESULT_CODE'
+  | 'RESULT_VALIDATION'
+  | 'RESULT_GENERATION'
+  | 'BATCH_CODE'
+  | 'BATCH_VALIDATION'
+  | 'BATCH_GENERATION'
+  | 'READY';
+
+export type TaskOnboardingStatus = 'ACTIVE' | 'COMPLETED' | 'STALE';
+
+export interface TaskOnboardingTaskSummary {
+  id: number;
+  taskName: string;
+  projectId: number;
+  cliId: string;
+  databaseConfigId: number | null;
+  taskDesc: string | null;
+  selectedTables: string | null;
+}
+
+export interface TaskOnboardingNode {
+  step: TaskOnboardingStep;
+  label: string;
+  state: 'ACTIVE' | 'COMPLETED' | 'LOCKED';
+}
+
+export interface TaskOnboardingResultSummary {
+  id: number;
+  resultName: string;
+  status: string;
+  summary: string | null;
+  resultContent: string | null;
+  sourceDescription: string | null;
+}
+
+export interface TaskOnboardingRunSummary {
+  id: number;
+  taskName: string;
+  status: string;
+  reason: string | null;
+  cliId: string;
+  aiPromptJson: string | null;
+  expectedResultCount: number | null;
+}
+
+export interface TaskOnboardingResponse {
+  task: TaskOnboardingTaskSummary;
+  nodes: TaskOnboardingNode[];
+  currentStep: TaskOnboardingStep;
+  currentStatus: TaskOnboardingStatus;
+  prompt: string | null;
+  validationResults: TaskOnboardingResultSummary[];
+  validationRun: TaskOnboardingRunSummary | null;
+  validationRunResults: TaskOnboardingResultSummary[];
+  counts: Record<string, number>;
+  allowedActions: string[];
+  errorMessage: string | null;
+}
+
 export type TaskRunStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'RETRY_WAIT' | 'SUCCESS' | 'FAILED' | 'CANCELLED';
 export type TaskResultStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED';
+export type TaskRecordType = 'VALIDATION_CURRENT' | 'VALIDATION_HISTORY' | 'FORMAL';
+export type TaskRecordTypeFilter = TaskRecordType | 'ALL';
 
 export interface TaskRun {
   ID?: number;
@@ -113,6 +175,7 @@ export interface TaskRun {
   workerId?: string;
   heartbeatAt?: string;
   expectedResultCount?: number;
+  recordType?: TaskRecordType;
   CreatedAt?: string;
   UpdatedAt?: string;
 }
@@ -140,6 +203,7 @@ export interface TaskResult {
   parsedAt?: string;
   completedAt?: string;
   relatedTaskRuns?: TaskRunReference[];
+  recordType?: TaskRecordType;
   CreatedAt?: string;
   UpdatedAt?: string;
 }
@@ -333,6 +397,60 @@ export async function deleteTaskConfig(id: number) {
   await request.delete<ApiResponse<void>>('/task/deleteTaskConfig', { data: { ID: id } });
 }
 
+export async function getTaskOnboarding(id: number) {
+  const res = await request.get<ApiResponse<TaskOnboardingResponse>>(`/task/${id}/onboarding`);
+  return res.data.data;
+}
+
+export async function generateTaskOnboardingResultValidation(id: number) {
+  const res = await request.post<ApiResponse<TaskOnboardingResponse>>(
+    `/task/${id}/onboarding/result-validation/generate`,
+  );
+  return res.data.data;
+}
+
+export async function confirmTaskOnboardingResultValidation(id: number) {
+  const res = await request.post<ApiResponse<TaskOnboardingResponse>>(
+    `/task/${id}/onboarding/result-validation/confirm`,
+  );
+  return res.data.data;
+}
+
+export async function generateTaskOnboardingResults(id: number) {
+  const res = await request.post<ApiResponse<TaskOnboardingResponse>>(`/task/${id}/onboarding/results/generate`);
+  return res.data.data;
+}
+
+export async function generateTaskOnboardingBatchValidation(id: number, data: {
+  batchSize: number;
+  cliId: string;
+  taskNamePrefix: string;
+  includeFailed: boolean;
+}) {
+  const res = await request.post<ApiResponse<TaskOnboardingResponse>>(
+    `/task/${id}/onboarding/batch-validation/generate`,
+    data,
+  );
+  return res.data.data;
+}
+
+export async function confirmTaskOnboardingBatchValidation(id: number) {
+  const res = await request.post<ApiResponse<TaskOnboardingResponse>>(
+    `/task/${id}/onboarding/batch-validation/confirm`,
+  );
+  return res.data.data;
+}
+
+export async function generateTaskOnboardingBatches(id: number, data: {
+  batchSize: number;
+  cliId: string;
+  taskNamePrefix: string;
+  includeFailed: boolean;
+}) {
+  const res = await request.post<ApiResponse<TaskOnboardingResponse>>(`/task/${id}/onboarding/batches/generate`, data);
+  return res.data.data;
+}
+
 // 函数：generateTaskResults
 export async function generateTaskResults(id: number, overwrite = false) {
   const res = await request.post<ApiResponse<GenerateTaskResultsResponse>>(`/task/${id}/generate-results`, null, {
@@ -356,8 +474,10 @@ export async function generateTaskRunBatches(id: number, data: {
 export async function getTaskRuns(params?: {
   taskName?: string;
   projectId?: number;
+  taskConfigId?: number;
   cliId?: string;
   status?: string;
+  recordType?: TaskRecordTypeFilter;
 }) {
   const res = await request.get<ApiResponse<TaskRun[]>>('/task-run/list', { params });
   return res.data.data || [];
@@ -422,6 +542,7 @@ export async function getTaskResults(params?: {
   projectId?: number;
   taskConfigId?: number;
   status?: string;
+  recordType?: TaskRecordTypeFilter;
 }) {
   const res = await request.get<ApiResponse<PageResult<TaskResult>>>('/task-result/list', { params });
   return res.data.data || { list: [], total: 0, page: 1, pageSize: params?.pageSize || 10 };

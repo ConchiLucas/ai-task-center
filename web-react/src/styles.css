@@ -399,6 +399,113 @@ body {
   max-height: 68vh;
 }
 
+.task-onboarding-drawer .ant-drawer-body {
+  padding: 20px 24px;
+}
+
+.onboarding-task-summary {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 18px;
+  margin-bottom: 20px;
+}
+
+.onboarding-flow {
+  display: flex;
+  align-items: flex-start;
+  gap: 16px;
+  width: 100%;
+  padding-bottom: 12px;
+  overflow-x: auto;
+}
+
+.onboarding-flow-item {
+  width: 340px;
+  flex: 0 0 340px;
+}
+
+.onboarding-node {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 54px;
+  padding: 10px 12px;
+  border: 1px solid #d9d9d9;
+  border-radius: 8px;
+  background: #fff;
+  font-weight: 700;
+}
+
+.onboarding-node-number {
+  display: grid;
+  place-items: center;
+  width: 24px;
+  height: 24px;
+  flex: 0 0 24px;
+  border-radius: 50%;
+  background: #8c8c8c;
+  color: #fff;
+  font-size: 12px;
+}
+
+.onboarding-node-active {
+  border-color: #7c3aed;
+  background: #f5f3ff;
+  color: #7c3aed;
+}
+
+.onboarding-node-active .onboarding-node-number {
+  background: #7c3aed;
+}
+
+.onboarding-node-completed {
+  border-color: #389e0d;
+  background: #f6ffed;
+  color: #389e0d;
+}
+
+.onboarding-node-completed .onboarding-node-number {
+  background: #389e0d;
+}
+
+.onboarding-node-locked {
+  background: #fafafa;
+  color: #8c8c8c;
+}
+
+.onboarding-node-body {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 92px;
+  padding: 14px 0 4px;
+}
+
+.onboarding-prompt {
+  max-height: 440px;
+  margin: 0;
+  padding: 14px;
+  overflow: auto;
+  border: 1px solid #303030;
+  border-radius: 8px;
+  background: #141414;
+  color: #f5f5f5;
+  font: 12px/1.55 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.onboarding-run-summary {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+}
+
+.onboarding-error-state {
+  padding: 36px 0;
+}
+
 @media (max-width: 920px) {
   .app-shell {
     display: block;
@@ -450,5 +557,20 @@ body {
   .task-table-head {
     flex-direction: column;
     align-items: stretch;
+  }
+}
+
+@media (max-width: 767px) {
+  .task-onboarding-drawer .ant-drawer-content-wrapper {
+    width: 100% !important;
+  }
+
+  .task-onboarding-drawer .ant-drawer-body {
+    padding: 16px;
+  }
+
+  .onboarding-flow-item {
+    width: min(340px, calc(100vw - 48px));
+    flex-basis: min(340px, calc(100vw - 48px));
   }
 }

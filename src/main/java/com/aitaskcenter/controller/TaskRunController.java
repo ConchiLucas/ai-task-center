@@ -5,6 +5,7 @@ import com.aitaskcenter.dto.BatchDeleteRequest;
 import com.aitaskcenter.dto.CreateTaskRunRequest;
 import com.aitaskcenter.dto.DeleteByIdRequest;
 import com.aitaskcenter.dto.StartTaskRunRequest;
+import com.aitaskcenter.model.TaskRecordType;
 import com.aitaskcenter.model.TaskRun;
 import com.aitaskcenter.service.TaskRunService;
 import java.util.List;
@@ -32,9 +33,11 @@ public class TaskRunController {
     public ApiResponse<List<TaskRun>> list(
             @RequestParam(required = false) String taskName,
             @RequestParam(required = false) Long projectId,
+            @RequestParam(required = false) Long taskConfigId,
             @RequestParam(required = false) String cliId,
-            @RequestParam(required = false) String status) {
-        return ApiResponse.ok(service.list(taskName, projectId, cliId, status));
+            @RequestParam(required = false) String status,
+            @RequestParam(defaultValue = TaskRecordType.FORMAL) String recordType) {
+        return ApiResponse.ok(service.list(taskName, projectId, taskConfigId, cliId, status, recordType));
     }
 
     @PostMapping("/create")

@@ -12,6 +12,7 @@ import java.time.OffsetDateTime;
         indexes = {
                 @Index(name = "idx_task_run_queue", columnList = "status,next_retry_at,created_at"),
                 @Index(name = "idx_task_run_dispatch_group", columnList = "dispatch_group_id,status"),
+                @Index(name = "idx_task_run_task_record_type", columnList = "task_config_id,record_type,id"),
                 @Index(name = "idx_task_run_lease", columnList = "status,lease_until")
         })
 public class TaskRun extends BaseEntity {
@@ -40,6 +41,10 @@ public class TaskRun extends BaseEntity {
     @Column(nullable = false)
     // 字段：任务执行状态
     private String status = "PENDING";
+
+    @Column(nullable = false, length = 30, columnDefinition = "varchar(30) default 'FORMAL'")
+    // 字段：正式批次、当前验证批次或历史验证批次
+    private String recordType = TaskRecordType.FORMAL;
 
     // 字段：开始执行时间
     private OffsetDateTime startTime;
@@ -172,6 +177,14 @@ public class TaskRun extends BaseEntity {
     // 方法：setStatus
     public void setStatus(String status) {
         this.status = status;
+    }
+
+    public String getRecordType() {
+        return recordType;
+    }
+
+    public void setRecordType(String recordType) {
+        this.recordType = recordType;
     }
 
     // 方法：getStartTime

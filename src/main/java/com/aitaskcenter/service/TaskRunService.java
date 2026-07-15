@@ -7,6 +7,7 @@ import com.aitaskcenter.dto.StartTaskRunRequest;
 import com.aitaskcenter.model.TaskConfig;
 import com.aitaskcenter.model.TaskExecutionLog;
 import com.aitaskcenter.model.TaskResult;
+import com.aitaskcenter.model.TaskRecordType;
 import com.aitaskcenter.model.TaskRun;
 import com.aitaskcenter.model.TaskRunResult;
 import com.aitaskcenter.repository.ProjectConfigRepository;
@@ -61,11 +62,20 @@ public class TaskRunService {
     }
 
     // 方法：list
-    public List<TaskRun> list(String taskName, Long projectId, String cliId, String status) {
+    public List<TaskRun> list(
+            String taskName,
+            Long projectId,
+            Long taskConfigId,
+            String cliId,
+            String status,
+            String recordType) {
+        String recordTypeFilter = TaskRecordType.normalizeFilter(recordType);
         return repository.findAllByOrderByCreatedAtDesc().stream()
+                .filter(item -> recordTypeFilter == null || recordTypeFilter.equals(item.getRecordType()))
                 .filter(item -> !StringUtils.hasText(taskName)
                         || item.getTaskName().toLowerCase(Locale.ROOT).contains(taskName.trim().toLowerCase(Locale.ROOT)))
                 .filter(item -> projectId == null || projectId.equals(item.getProjectId()))
+                .filter(item -> taskConfigId == null || taskConfigId.equals(item.getTaskConfigId()))
                 .filter(item -> !StringUtils.hasText(cliId) || cliId.trim().equals(item.getCliId()))
                 .filter(item -> !StringUtils.hasText(status) || status.trim().equals(item.getStatus()))
                 .toList();
@@ -88,6 +98,7 @@ public class TaskRunService {
         run.setDatabaseConfigId(config.getDatabaseConfigId());
         run.setSelectedTables(config.getSelectedTables());
         run.setStatus("PENDING");
+        run.setRecordType(TaskRecordType.FORMAL);
         run.setReason("");
         run.setLogPath("");
         run.setRunLog("任务已创建，等待执行。");
@@ -181,6 +192,9 @@ public class TaskRunService {
         List<TaskRun> requestedRuns = repository.findAllById(ids);
         if (requestedRuns.size() != ids.size()) {
             throw new IllegalArgumentException("部分任务记录不存在");
+        }
+        if (requestedRuns.stream().anyMatch(run -> !TaskRecordType.FORMAL.equals(run.getRecordType()))) {
+            throw new IllegalArgumentException("验证批次不能进入正式执行队列");
         }
         List<TaskRun> manageableRuns = requestedRuns.stream()
                 .filter(run -> isStartOrConcurrencyAdjustableStatus(run.getStatus()))

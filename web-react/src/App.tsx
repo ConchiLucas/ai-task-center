@@ -47,6 +47,8 @@ import {
   ProjectConfig,
   TaskConfig,
   TaskExecutionLog,
+  TaskRecordType,
+  TaskRecordTypeFilter,
   TaskResult,
   TaskResultStatus,
   TaskRun,
@@ -72,8 +74,6 @@ import {
   getTaskRunDetail,
   getTaskRuns,
   getTaskConfigs,
-  generateTaskResults,
-  generateTaskRunBatches,
   listConnectionTables,
   processTaskResult,
   saveAIActiveProvider,
@@ -85,6 +85,7 @@ import {
   updateProject,
   updateTaskConfig,
 } from './api';
+import TaskOnboardingDrawer from './TaskOnboardingDrawer';
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text, Paragraph } = Typography;
@@ -115,6 +116,13 @@ const taskResultStatusOptions: { value: TaskResultStatus; label: string; color: 
   { value: 'RUNNING', label: '处理中', color: 'processing' },
   { value: 'SUCCESS', label: '处理成功', color: 'blue' },
   { value: 'FAILED', label: '处理失败', color: 'red' },
+];
+
+const taskRecordTypeOptions: { value: TaskRecordTypeFilter; label: string }[] = [
+  { value: 'FORMAL', label: '正式数据' },
+  { value: 'VALIDATION_CURRENT', label: '当前验证数据' },
+  { value: 'VALIDATION_HISTORY', label: '历史验证数据' },
+  { value: 'ALL', label: '全部数据' },
 ];
 
 const tablePageSizeOptions = ['10', '20', '50', '100', '200', '500'];
@@ -205,11 +213,7 @@ export default function App() {
   const [selectedTables, setSelectedTables] = useState<string[]>([]);
   const [tableLoading, setTableLoading] = useState(false);
   const [savingTables, setSavingTables] = useState(false);
-  const [generatingResultId, setGeneratingResultId] = useState<number | null>(null);
-  const [runBatchModalOpen, setRunBatchModalOpen] = useState(false);
-  const [runBatchTask, setRunBatchTask] = useState<TaskConfig | null>(null);
-  const [runBatchForm] = Form.useForm();
-  const [generatingRunBatches, setGeneratingRunBatches] = useState(false);
+  const [onboardingTask, setOnboardingTask] = useState<TaskConfig | null>(null);
   const [taskTablePageSize, setTaskTablePageSize] = useState(10);
   const [taskFilters, setTaskFilters] = useState<{
     taskName?: string;
@@ -238,13 +242,13 @@ export default function App() {
   const executableSelectedTaskRunIds = useMemo(
     () => selectedTaskRunIds.filter((id) => {
       const run = taskRuns.find((item) => item.ID === id);
-      return run ? isTaskRunExecutable(run.status) : false;
+      return run ? isFormalRecord(run.recordType) && isTaskRunExecutable(run.status) : false;
     }),
     [selectedTaskRunIds, taskRuns],
   );
   const executableFilteredTaskRunIds = useMemo(
     () => taskRuns
-      .filter((run) => run.ID && isTaskRunExecutable(run.status))
+      .filter((run) => run.ID && isFormalRecord(run.recordType) && isTaskRunExecutable(run.status))
       .map((run) => Number(run.ID)),
     [taskRuns],
   );
@@ -907,69 +911,13 @@ export default function App() {
     }
   };
 
-  // 函数：generateResultsForTask
-  const generateResultsForTask = (task: TaskConfig) => {
-    if (!task.ID) return;
-    modal.confirm({
-      title: '生成任务结果',
-      content: `将根据「${task.taskName}」的已选表生成任务结果。第一版仅支持 public.word_clean_sentence 评分任务，重复数据会自动跳过。`,
-      okText: '生成',
-      cancelText: '取消',
-      async onOk() {
-        setGeneratingResultId(task.ID!);
-        try {
-          const result = await generateTaskResults(task.ID!, false);
-          message.success(`生成完成：新增 ${result.insertedCount} 条，跳过 ${result.skippedCount} 条`);
-          await loadTaskResultPageData(taskResultSearchForm.getFieldsValue());
-        } catch (error) {
-          message.error(errorMessage(error, '生成任务结果失败'));
-        } finally {
-          setGeneratingResultId(null);
-        }
-      },
-    });
-  };
-
-  // 函数：openRunBatchModal
-  const openRunBatchModal = (task: TaskConfig) => {
-    if (!task.ID) return;
-    setRunBatchTask(task);
-    runBatchForm.setFieldsValue({
-      batchSize: 50,
-      cliId: task.cliId || activeCliId || cliConfigs[0]?.id,
-      taskNamePrefix: task.taskName,
-      includeFailed: false,
-    });
-    setRunBatchModalOpen(true);
-  };
-
-  // 函数：createRunBatches
-  const createRunBatches = async () => {
-    if (!runBatchTask?.ID) return;
-    const values = await runBatchForm.validateFields();
-    setGeneratingRunBatches(true);
-    try {
-      const result = await generateTaskRunBatches(runBatchTask.ID, {
-        batchSize: Number(values.batchSize) || 50,
-        cliId: values.cliId,
-        taskNamePrefix: values.taskNamePrefix || runBatchTask.taskName,
-        includeFailed: values.includeFailed === true,
-      });
-      message.success(`生成完成：创建 ${result.createdRunCount} 个批次，关联 ${result.linkedResultCount} 条结果`);
-      setRunBatchModalOpen(false);
-      await loadTaskRunPageData(taskRunSearchForm.getFieldsValue());
-    } catch (error) {
-      message.error(errorMessage(error, '生成执行批次失败'));
-    } finally {
-      setGeneratingRunBatches(false);
-    }
-  };
-
   const loadTaskRunPageData = async (filters?: {
     taskName?: string;
     projectId?: number;
+    taskConfigId?: number;
     cliId?: string;
     status?: string;
+    recordType?: TaskRecordTypeFilter;
   }) => {
     setTaskRunLoading(true);
     try {
@@ -1167,6 +1115,7 @@ export default function App() {
     projectId?: number;
     taskConfigId?: number;
     status?: string;
+    recordType?: TaskRecordTypeFilter;
   }, page = taskResultCurrentPage, pageSize = taskResultTablePageSize) => {
     setTaskResultLoading(true);
     try {
@@ -1212,8 +1161,10 @@ export default function App() {
     if (!result.ID) return;
     const resultId = result.ID;
     modal.confirm({
-      title: '执行评分并回填',
-      content: `将调用「${result.cliId || '未配置 CLI'}」处理「${result.resultName}」，成功后会回填源数据库并把最高分句子设为 TTS 待生成。`,
+      title: result.recordType === 'VALIDATION_CURRENT' ? '执行验证结果' : '执行任务结果',
+      content: result.recordType === 'VALIDATION_CURRENT'
+        ? `将处理验证结果「${result.resultName}」。执行输出只保存到验证结果，不回填来源业务表。`
+        : `将调用「${result.cliId || '未配置 CLI'}」处理「${result.resultName}」。`,
       okText: '执行',
       cancelText: '取消',
       async onOk() {
@@ -1228,7 +1179,7 @@ export default function App() {
             setCurrentResult(nextResult);
           }
         } catch (error) {
-          message.error(errorMessage(error, '执行评分回填失败'));
+          message.error(errorMessage(error, '执行任务结果失败'));
           await loadTaskResultPageData(taskResultSearchForm.getFieldsValue());
         } finally {
           setProcessingResultId(null);
@@ -1777,30 +1728,15 @@ export default function App() {
             {
               title: '操作',
               key: 'action',
-              width: 300,
+              width: 250,
               fixed: 'right',
               render: (_, record) => (
                 <Space split={<span className="table-action-split" />}>
-                  <Button
-                    type="link"
-                    size="small"
-                    loading={generatingResultId === record.ID}
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      generateResultsForTask(record);
-                    }}
-                  >
-                    生成结果
-                  </Button>
-                  <Button
-                    type="link"
-                    size="small"
-                    onClick={(event) => {
-                      event.stopPropagation();
-                      openRunBatchModal(record);
-                    }}
-                  >
-                    生成批次
+                  <Button type="link" size="small" onClick={(event) => {
+                    event.stopPropagation();
+                    setOnboardingTask(record);
+                  }}>
+                    任务接入
                   </Button>
                   <Button type="link" size="small" onClick={() => openTaskModal(record)}>
                     编辑
@@ -1825,6 +1761,7 @@ export default function App() {
         <Form
           form={taskRunSearchForm}
           layout="inline"
+          initialValues={{ recordType: 'FORMAL' }}
           onFinish={(values) => void loadTaskRunPageData(values)}
           className="task-search-form"
         >
@@ -1840,6 +1777,15 @@ export default function App() {
               options={projects.map((project) => ({ value: project.ID, label: project.projectName }))}
             />
           </Form.Item>
+          <Form.Item label="任务配置" name="taskConfigId">
+            <Select
+              allowClear
+              showSearch
+              placeholder="请选择任务配置"
+              optionFilterProp="label"
+              options={tasks.map((task) => ({ value: task.ID, label: task.taskName }))}
+            />
+          </Form.Item>
           <Form.Item label="执行工具" name="cliId">
             <Select
               allowClear
@@ -1847,6 +1793,11 @@ export default function App() {
               placeholder="请选择 CLI"
               optionFilterProp="label"
               options={cliConfigs.map((config) => ({ value: config.id, label: config.label || config.id }))}
+            />
+          </Form.Item>
+          <Form.Item label="数据类型" name="recordType">
+            <Select
+              options={taskRecordTypeOptions.map((item) => ({ value: item.value, label: item.label }))}
             />
           </Form.Item>
           <Form.Item label="状态" name="status">
@@ -1898,6 +1849,10 @@ export default function App() {
           rowSelection={{
             selectedRowKeys: selectedTaskRunIds,
             onChange: (keys) => setSelectedTaskRunIds(keys.map((key) => Number(key)).filter(Boolean)),
+            getCheckboxProps: (record) => ({
+              disabled: !isFormalRecord(record.recordType),
+              title: isFormalRecord(record.recordType) ? undefined : '验证批次仅供查看',
+            }),
           }}
           pagination={{
             pageSize: taskRunTablePageSize,
@@ -1926,6 +1881,12 @@ export default function App() {
               dataIndex: 'status',
               width: 130,
               render: (value: TaskRunStatus) => renderTaskRunStatus(value),
+            },
+            {
+              title: '数据类型',
+              dataIndex: 'recordType',
+              width: 130,
+              render: (value?: TaskRecordType) => renderTaskRecordType(value),
             },
             {
               title: '执行次数',
@@ -2012,12 +1973,13 @@ export default function App() {
               fixed: 'right',
               render: (_, record) => (
                 <Space split={<span className="table-action-split" />}>
-                  {(record.status === 'PENDING' || record.status === 'CANCELLED') && (
+                  {isFormalRecord(record.recordType)
+                    && (record.status === 'PENDING' || record.status === 'CANCELLED') && (
                     <Button type="link" size="small" onClick={() => openSingleTaskRunStartModal(record)}>
                       执行
                     </Button>
                   )}
-                  {record.status === 'FAILED' && (
+                  {isFormalRecord(record.recordType) && record.status === 'FAILED' && (
                     <Button type="link" size="small" onClick={() => openSingleTaskRunStartModal(record)}>
                       重试
                     </Button>
@@ -2025,19 +1987,22 @@ export default function App() {
                   <Button type="link" size="small" onClick={() => void showRunLog(record)}>
                     日志
                   </Button>
-                  {(['PENDING', 'QUEUED', 'RETRY_WAIT', 'RUNNING'] as TaskRunStatus[]).includes(record.status) && (
+                  {isFormalRecord(record.recordType)
+                    && (['PENDING', 'QUEUED', 'RETRY_WAIT', 'RUNNING'] as TaskRunStatus[]).includes(record.status) && (
                     <Button type="link" size="small" onClick={() => void cancelRun(record)}>
                       取消
                     </Button>
                   )}
-                  <Button type="link" size="small" danger onClick={() => removeTaskRun(record)}>
-                    删除
-                  </Button>
+                  {isFormalRecord(record.recordType) && (
+                    <Button type="link" size="small" danger onClick={() => removeTaskRun(record)}>
+                      删除
+                    </Button>
+                  )}
                 </Space>
               ),
             },
           ]}
-          scroll={{ x: 1770 }}
+          scroll={{ x: 1900 }}
         />
       </Spin>
     </section>
@@ -2050,6 +2015,7 @@ export default function App() {
         <Form
           form={taskResultSearchForm}
           layout="inline"
+          initialValues={{ recordType: 'FORMAL' }}
           onFinish={(values) => void loadTaskResultPageData(values, 1, taskResultTablePageSize)}
           className="task-search-form"
         >
@@ -2073,6 +2039,11 @@ export default function App() {
               allowClear
               placeholder="请选择状态"
               options={taskResultStatusOptions.map((item) => ({ value: item.value, label: item.label }))}
+            />
+          </Form.Item>
+          <Form.Item label="数据类型" name="recordType">
+            <Select
+              options={taskRecordTypeOptions.map((item) => ({ value: item.value, label: item.label }))}
             />
           </Form.Item>
           <Form.Item className="task-search-actions">
@@ -2111,6 +2082,10 @@ export default function App() {
           rowSelection={{
             selectedRowKeys: selectedTaskResultIds,
             onChange: (keys) => setSelectedTaskResultIds(keys.map((key) => Number(key))),
+            getCheckboxProps: (record) => ({
+              disabled: !isExecutableResultRecord(record.recordType),
+              title: isExecutableResultRecord(record.recordType) ? undefined : '历史验证结果仅供查看',
+            }),
           }}
           pagination={{
             current: taskResultCurrentPage,
@@ -2195,6 +2170,12 @@ export default function App() {
               render: (value: TaskResultStatus) => renderTaskResultStatus(value),
             },
             {
+              title: '数据类型',
+              dataIndex: 'recordType',
+              width: 130,
+              render: (value?: TaskRecordType) => renderTaskRecordType(value),
+            },
+            {
               title: '摘要',
               dataIndex: 'summary',
               ellipsis: true,
@@ -2219,34 +2200,39 @@ export default function App() {
               fixed: 'right',
               render: (_, record) => (
                 <Space split={<span className="table-action-split" />}>
-                  <Button
-                    type="link"
-                    size="small"
-                    loading={processingResultId === record.ID}
-                    onClick={() => processResult(record)}
-                  >
-                    执行
-                  </Button>
+                  {isExecutableResultRecord(record.recordType) && (
+                    <Button
+                      type="link"
+                      size="small"
+                      loading={processingResultId === record.ID}
+                      onClick={() => processResult(record)}
+                    >
+                      执行
+                    </Button>
+                  )}
                   <Button type="link" size="small" onClick={() => void showTaskResultDetail(record)}>
                     详情
                   </Button>
-                  <Button type="link" size="small" danger onClick={() => removeTaskResult(record)}>
-                    删除
-                  </Button>
+                  {isExecutableResultRecord(record.recordType) && (
+                    <Button type="link" size="small" danger onClick={() => removeTaskResult(record)}>
+                      删除
+                    </Button>
+                  )}
                 </Space>
               ),
             },
           ]}
-          scroll={{ x: 1520 }}
+          scroll={{ x: 1650 }}
         />
       </Spin>
     </section>
   );
 
   const resultDetailPayload = parseResultPayload(currentResult?.resultContent);
-  const resultAiPrompt = extractResultAiPrompt(resultDetailPayload, currentResult?.resultContent);
-  const resultAiResponseText = formatResultAiResponse(resultDetailPayload);
+  const resultInputText = extractResultInput(resultDetailPayload, currentResult?.resultContent);
+  const resultExecutionResponseText = formatResultExecutionResponse(resultDetailPayload);
   const resultWriteBackText = formatResultWriteBack(resultDetailPayload);
+  const resultAudioUrl = extractResultAudioUrl(resultDetailPayload);
   const currentBatchAiPrompt = buildTaskRunBatchAiPrompt(currentPromptRun, currentPromptResults);
 
   return (
@@ -2326,6 +2312,20 @@ export default function App() {
         </Content>
         </Layout>
       </Layout>
+
+      <TaskOnboardingDrawer
+        open={Boolean(onboardingTask)}
+        task={onboardingTask}
+        projects={projects}
+        connections={taskConnections}
+        cliConfigs={cliConfigs}
+        onClose={() => setOnboardingTask(null)}
+        onReady={() => {
+          setOnboardingTask(null);
+          setActiveModule('taskRun');
+          void loadTaskRunPageData();
+        }}
+      />
 
       <Modal
         title={editingProject ? '编辑项目' : '新增项目'}
@@ -2478,52 +2478,6 @@ export default function App() {
           <Form.Item label="任务描述" name="taskDesc">
             <Input.TextArea rows={4} placeholder="描述这个任务要做什么、适合什么时候使用" />
           </Form.Item>
-        </Form>
-      </Modal>
-
-      <Modal
-        title="生成执行批次"
-        open={runBatchModalOpen}
-        onCancel={() => setRunBatchModalOpen(false)}
-        onOk={() => void createRunBatches()}
-        okText="生成批次"
-        cancelText="取消"
-        width={720}
-        confirmLoading={generatingRunBatches}
-      >
-        <Form layout="vertical" form={runBatchForm}>
-          <div className="table-picker-meta">
-            <Text strong>{runBatchTask?.taskName || '未选择任务配置'}</Text>
-            <Text type="secondary">默认只将待处理任务结果拆分成执行批次，成功结果不会加入批次。</Text>
-          </div>
-          <Row gutter={16}>
-            <Col xs={24} md={12}>
-              <Form.Item label="每个批次数量" name="batchSize" rules={[{ required: true, message: '请填写每批数量' }]}>
-                <InputNumber min={1} max={1000} className="full-field" />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={12}>
-              <Form.Item label="失败结果" name="includeFailed" valuePropName="checked">
-                <Switch checkedChildren="包含失败结果" unCheckedChildren="只处理待处理" />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Form.Item label="默认执行 CLI" name="cliId" rules={[{ required: true, message: '请选择执行 CLI' }]}>
-            <Select
-              showSearch
-              placeholder="选择 Codex 或 Antigravity"
-              optionFilterProp="label"
-              options={cliConfigs
-                .filter((config) => config.enabled)
-                .map((config) => ({ value: config.id, label: config.label || config.id }))}
-            />
-          </Form.Item>
-          <Form.Item label="任务名称前缀" name="taskNamePrefix" rules={[{ required: true, message: '请填写任务名称前缀' }]}>
-            <Input placeholder="单词评分任务" />
-          </Form.Item>
-          <Text type="secondary">
-            生成后可到任务列表选择这些批次开始执行，执行时仍可调整 CLI 和并发数量。
-          </Text>
         </Form>
       </Modal>
 
@@ -2706,9 +2660,12 @@ export default function App() {
         <Space direction="vertical" size={12} className="full-field">
           <div className="table-picker-meta">
             <Text strong>{currentLogRun?.taskName || '未选择任务'}</Text>
-            <Text type="secondary">
-              最近状态：{currentLogRun ? taskRunStatusLabel(currentLogRun.status) : '-'} / 共 {currentExecutions.length} 次执行
-            </Text>
+            <Space wrap>
+              {currentLogRun && renderTaskRecordType(currentLogRun.recordType)}
+              <Text type="secondary">
+                最近状态：{currentLogRun ? taskRunStatusLabel(currentLogRun.status) : '-'} / 共 {currentExecutions.length} 次执行
+              </Text>
+            </Space>
           </div>
           {currentExecutions.length > 0 ? (
             <Collapse
@@ -2764,17 +2721,17 @@ export default function App() {
                   children: (
                     <Space direction="vertical" size={12} className="full-field">
                       <div className="result-detail-section">
-                        <Text strong>AI 评分提示词</Text>
+                        <Text strong>任务输入</Text>
                         <pre className="task-log-box result-detail-code">
-                          {extractResultAiPrompt(payload, result.resultContent)}
+                          {extractResultInput(payload, result.resultContent)}
                         </pre>
                       </div>
                       <div className="result-detail-section">
-                        <Text strong>AI 响应结果</Text>
-                        <pre className="task-log-box result-detail-code">{formatResultAiResponse(payload)}</pre>
+                        <Text strong>执行响应结果</Text>
+                        <pre className="task-log-box result-detail-code">{formatResultExecutionResponse(payload)}</pre>
                       </div>
                       <div className="result-detail-section">
-                        <Text strong>回填源数据库详情</Text>
+                        <Text strong>数据处理详情</Text>
                         <pre className="task-log-box result-detail-code">{formatResultWriteBack(payload)}</pre>
                       </div>
                     </Space>
@@ -2803,6 +2760,7 @@ export default function App() {
               {' / '}
               项目：{currentResult ? projectMap.get(currentResult.projectId) || '未找到项目' : '-'}
             </Text>
+            {currentResult && renderTaskRecordType(currentResult.recordType)}
             <Text type="secondary">
               来源表：{parseSelectedTables(currentResult?.sourceTables).join(', ') || '无'}
             </Text>
@@ -2820,15 +2778,20 @@ export default function App() {
             </div>
           )}
           <div className="result-detail-section">
-            <Text strong>AI 评分提示词</Text>
-            <pre className="task-log-box result-detail-code">{resultAiPrompt}</pre>
+            <Text strong>任务输入</Text>
+            <pre className="task-log-box result-detail-code">{resultInputText}</pre>
           </div>
           <div className="result-detail-section">
-            <Text strong>AI 响应结果</Text>
-            <pre className="task-log-box result-detail-code">{resultAiResponseText}</pre>
+            <Text strong>执行响应结果</Text>
+            {resultAudioUrl && (
+              <audio className="full-field" controls preload="metadata" src={resultAudioUrl}>
+                当前浏览器不支持音频播放。
+              </audio>
+            )}
+            <pre className="task-log-box result-detail-code">{resultExecutionResponseText}</pre>
           </div>
           <div className="result-detail-section">
-            <Text strong>回填源数据库详情</Text>
+            <Text strong>数据处理详情</Text>
             <pre className="task-log-box result-detail-code">{resultWriteBackText}</pre>
           </div>
         </Space>
@@ -2912,6 +2875,23 @@ function isTaskRunExecutable(status: TaskRunStatus) {
   return ['PENDING', 'FAILED', 'CANCELLED', 'QUEUED', 'RETRY_WAIT', 'RUNNING'].includes(status);
 }
 
+// 函数：isFormalRecord
+function isFormalRecord(recordType?: TaskRecordType) {
+  return !recordType || recordType === 'FORMAL';
+}
+
+// 函数：isExecutableResultRecord
+function isExecutableResultRecord(recordType?: TaskRecordType) {
+  return recordType !== 'VALIDATION_HISTORY';
+}
+
+// 函数：renderTaskRecordType
+function renderTaskRecordType(recordType?: TaskRecordType) {
+  if (recordType === 'VALIDATION_CURRENT') return <Tag color="gold">当前验证</Tag>;
+  if (recordType === 'VALIDATION_HISTORY') return <Tag>历史验证</Tag>;
+  return <Tag color="green">正式数据</Tag>;
+}
+
 // 函数：taskRunStatusColor
 function taskRunStatusColor(status: TaskRunStatus) {
   return taskRunStatusOptions.find((item) => item.value === status)?.color || 'default';
@@ -2944,13 +2924,17 @@ function parseResultPayload(value?: string) {
   }
 }
 
-// 函数：extractResultAiPrompt
-function extractResultAiPrompt(payload: Record<string, unknown> | null, raw?: string) {
+// 函数：extractResultInput
+function extractResultInput(payload: Record<string, unknown> | null, raw?: string) {
+  const ttsInput = payload?.ttsInput;
+  if (isPlainRecord(ttsInput)) {
+    return JSON.stringify(ttsInput, null, 2);
+  }
   const aiPrompt = payload?.aiPrompt;
   if (typeof aiPrompt === 'string' && aiPrompt.trim()) {
     return aiPrompt;
   }
-  return raw || '暂无 AI 评分提示词';
+  return raw || '暂无任务输入';
 }
 
 // 函数：buildTaskRunBatchAiPrompt
@@ -3064,8 +3048,12 @@ function promptSafeText(value: string) {
     .replace(/9/g, '九');
 }
 
-// 函数：formatResultAiResponse
-function formatResultAiResponse(payload: Record<string, unknown> | null) {
+// 函数：formatResultExecutionResponse
+function formatResultExecutionResponse(payload: Record<string, unknown> | null) {
+  const ttsResult = payload?.ttsResult;
+  if (ttsResult) {
+    return JSON.stringify(ttsResult, null, 2);
+  }
   const rawOutput = payload?.aiRawOutput;
   if (typeof rawOutput === 'string' && rawOutput.trim()) {
     return rawOutput;
@@ -3074,17 +3062,26 @@ function formatResultAiResponse(payload: Record<string, unknown> | null) {
   if (aiResult) {
     return JSON.stringify(aiResult, null, 2);
   }
-  return '暂无 AI 响应结果';
+  return '暂无执行响应结果';
+}
+
+// 函数：extractResultAudioUrl
+function extractResultAudioUrl(payload: Record<string, unknown> | null) {
+  const ttsResult = payload?.ttsResult;
+  if (!isPlainRecord(ttsResult)) return '';
+  const downloadUrl = ttsResult.downloadUrl;
+  return typeof downloadUrl === 'string' ? downloadUrl : '';
 }
 
 // 函数：formatResultWriteBack
 function formatResultWriteBack(payload: Record<string, unknown> | null) {
   const writeBack = payload?.writeBack;
-  if (!writeBack) return '暂无回填源数据库详情';
+  if (!writeBack) return '暂无数据处理详情';
   const detail: Record<string, unknown> = { writeBack };
   if (payload?.aiResult) detail.aiResult = payload.aiResult;
   if (payload?.backfillResult) detail.backfillResult = payload.backfillResult;
   if (payload?.execution) detail.execution = payload.execution;
+  if (payload?.validationExecution) detail.validationExecution = payload.validationExecution;
   return JSON.stringify(detail, null, 2);
 }
 
