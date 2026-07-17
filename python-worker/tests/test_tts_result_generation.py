@@ -67,9 +67,12 @@ class TtsResultGenerationTest(unittest.TestCase):
 
         self.assertEqual(1, len(rows))
         row = rows[0]
-        payload = json.loads(row[10])
-        self.assertEqual(worker.TTS_SOURCE_DESCRIPTION, row[7])
-        self.assertEqual("PENDING", row[8])
+        payload = json.loads(row[13])
+        self.assertEqual(worker.HANDLER_TTS, row[5])
+        self.assertEqual("AI_PROVIDER", row[6])
+        self.assertEqual("xiaomi-mimo-tts", row[7])
+        self.assertEqual(worker.TTS_SOURCE_DESCRIPTION, row[10])
+        self.assertEqual("PENDING", row[11])
         self.assertEqual(worker.RECORD_TYPE_VALIDATION_CURRENT, row[-1])
         self.assertEqual(worker.RESULT_MODE_TTS, payload["taskType"])
         self.assertEqual(11, payload["bestSentenceId"])

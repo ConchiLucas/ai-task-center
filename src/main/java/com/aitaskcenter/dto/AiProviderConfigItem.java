@@ -1,6 +1,10 @@
 package com.aitaskcenter.dto;
 
 import com.fasterxml.jackson.annotation.JsonProperty;
+import java.util.ArrayList;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 
 public class AiProviderConfigItem {
     private String id;
@@ -17,6 +21,14 @@ public class AiProviderConfigItem {
 
     @JsonProperty("max_tokens")
     private Integer maxTokens;
+
+    private String voice;
+
+    private List<String> capabilities = new ArrayList<>();
+
+    private Map<String, Object> options = new LinkedHashMap<>();
+
+    private boolean enabled = true;
 
     private boolean active;
 
@@ -88,6 +100,38 @@ public class AiProviderConfigItem {
     // 方法：setMaxTokens
     public void setMaxTokens(Integer maxTokens) {
         this.maxTokens = maxTokens;
+    }
+
+    public String getVoice() {
+        return voice;
+    }
+
+    public void setVoice(String voice) {
+        this.voice = voice;
+    }
+
+    public List<String> getCapabilities() {
+        return capabilities;
+    }
+
+    public void setCapabilities(List<String> capabilities) {
+        this.capabilities = capabilities == null ? new ArrayList<>() : capabilities;
+    }
+
+    public Map<String, Object> getOptions() {
+        return options;
+    }
+
+    public void setOptions(Map<String, Object> options) {
+        this.options = options == null ? new LinkedHashMap<>() : options;
+    }
+
+    public boolean isEnabled() {
+        return enabled;
+    }
+
+    public void setEnabled(boolean enabled) {
+        this.enabled = enabled;
     }
 
     // 方法：isActive

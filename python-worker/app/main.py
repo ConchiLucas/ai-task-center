@@ -1,6 +1,9 @@
+import base64
+import binascii
 import json
 import logging
 import os
+import re
 import shlex
 import signal
 import socket
@@ -19,6 +22,7 @@ from typing import Any
 import psycopg2
 from psycopg2.extras import execute_values
 from fastapi import FastAPI, HTTPException, Query
+from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 
@@ -32,7 +36,16 @@ RESULT_MODE_SCORE = "word_clean_sentence_score"
 RESULT_MODE_TTS = "word_clean_best_sentence_tts"
 RESULT_MODE_SCORE_BATCH = f"{RESULT_MODE_SCORE}_batch"
 RESULT_MODE_TTS_BATCH = f"{RESULT_MODE_TTS}_batch"
-WORD_AGENT_BASE_URL = os.getenv("WORD_AGENT_BASE_URL", "http://127.0.0.1:8010").rstrip("/")
+HANDLER_SCORE = RESULT_MODE_SCORE
+HANDLER_TTS = RESULT_MODE_TTS
+PYTHON_WORKER_PUBLIC_BASE_URL = os.getenv(
+    "PYTHON_WORKER_PUBLIC_BASE_URL",
+    "http://127.0.0.1:19186",
+).rstrip("/")
+TTS_OUTPUT_DIR = Path(
+    os.getenv("PYTHON_WORKER_TTS_OUTPUT_DIR", str(PROJECT_ROOT / "data" / "tts_audio"))
+).expanduser()
+MIMO_PROVIDER_ID = os.getenv("MIMO_PROVIDER_ID", "xiaomi-mimo-tts").strip()
 RECORD_TYPE_VALIDATION_CURRENT = "VALIDATION_CURRENT"
 RECORD_TYPE_VALIDATION_HISTORY = "VALIDATION_HISTORY"
 RECORD_TYPE_FORMAL = "FORMAL"
@@ -108,6 +121,9 @@ class TaskConfigSnapshot:
     database_config_id: int
     # 字段：任务关联的数据表 JSON
     selected_tables: str
+    handler_key: str = ""
+    executor_type: str = ""
+    executor_id: str = ""
 
 
 @dataclass
@@ -148,6 +164,9 @@ class TaskResultSnapshot:
     record_type: str
     # 字段：任务结果正文 JSON
     result_content: str
+    handler_key: str = ""
+    executor_type: str = ""
+    executor_id: str = ""
 
 
 @dataclass
@@ -166,6 +185,9 @@ class TaskRunSnapshot:
     record_type: str
     # 字段：批次内部允许使用的并发数
     requested_worker_count: int
+    handler_key: str = ""
+    executor_type: str = ""
+    executor_id: str = ""
 
 
 @dataclass(frozen=True)
@@ -202,6 +224,36 @@ class DatabaseSettings:
     password: str
 
 
+@dataclass(frozen=True)
+class MiMoTTSConfig:
+    provider_id: str
+    api_key: str
+    base_url: str
+    model: str
+    voice: str
+    source: str
+
+
+@dataclass(frozen=True)
+class ExecutionTarget:
+    executor_type: str
+    executor_id: str
+    label: str
+    protocol: str
+    capabilities: tuple[str, ...]
+    config: dict[str, Any]
+
+    def public_metadata(self) -> dict[str, Any]:
+        return {
+            "executorType": self.executor_type,
+            "executorId": self.executor_id,
+            "label": self.label,
+            "protocol": self.protocol,
+            "capabilities": list(self.capabilities),
+            "model": str(self.config.get("model") or ""),
+        }
+
+
 # 函数：load_database_settings
 def load_database_settings() -> DatabaseSettings:
     return DatabaseSettings(
@@ -222,6 +274,211 @@ def connect_database(settings: DatabaseSettings):
         user=settings.user,
         password=settings.password,
         connect_timeout=5,
+    )
+
+
+def parse_json_object(value: Any) -> dict[str, Any]:
+    if isinstance(value, dict):
+        return value
+    if not isinstance(value, str) or not value.strip():
+        return {}
+    try:
+        parsed = json.loads(value)
+    except json.JSONDecodeError:
+        return {}
+    return parsed if isinstance(parsed, dict) else {}
+
+
+def normalize_capabilities(value: Any, defaults: tuple[str, ...]) -> tuple[str, ...]:
+    if not isinstance(value, list):
+        return defaults
+    normalized = tuple(dict.fromkeys(
+        str(item).strip().upper() for item in value if str(item).strip()
+    ))
+    return normalized or defaults
+
+
+def load_execution_target_payloads() -> tuple[dict[str, Any], dict[str, Any]]:
+    settings = load_database_settings()
+    try:
+        with connect_database(settings) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    select providers, local_cli_config
+                    from tb_ai_config
+                    where config_key = %s
+                    order by id desc
+                    limit 1
+                    """,
+                    ("default",),
+                )
+                row = cursor.fetchone()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取调用通道配置失败: {exc}") from exc
+    if not row:
+        return {}, {"active": "", "configs": []}
+    return parse_json_object(row[0]), parse_json_object(row[1])
+
+
+def resolve_execution_target(
+    executor_type: str,
+    executor_id: str,
+    required_capability: str,
+) -> ExecutionTarget:
+    normalized_type = str(executor_type or "").strip().upper()
+    normalized_id = str(executor_id or "").strip()
+    capability = str(required_capability or "").strip().upper()
+    providers, cli_payload = load_execution_target_payloads()
+    if normalized_type == "AI_PROVIDER":
+        config = providers.get(normalized_id)
+        if not isinstance(config, dict):
+            raise HTTPException(status_code=400, detail=f"AI Provider 配置不存在: {normalized_id}")
+        protocol = str(config.get("type") or "openai-compatible").strip().lower()
+        model = str(config.get("model") or "").strip().lower()
+        if "mimo-tts" in normalized_id.lower() or "tts" in model:
+            protocol = "mimo-tts"
+        defaults = ("AUDIO_TTS",) if protocol == "mimo-tts" else ("TEXT_GENERATION",)
+        capabilities = normalize_capabilities(config.get("capabilities"), defaults)
+        label = str(config.get("label") or normalized_id).strip()
+    elif normalized_type == "CLI":
+        configs = cli_payload.get("configs") if isinstance(cli_payload, dict) else []
+        config = next(
+            (
+                item for item in configs
+                if isinstance(item, dict) and str(item.get("id") or "").strip() == normalized_id
+            ),
+            None,
+        )
+        if not isinstance(config, dict):
+            raise HTTPException(status_code=400, detail=f"CLI 配置不存在: {normalized_id}")
+        protocol = "local-cli"
+        capabilities = normalize_capabilities(
+            config.get("capabilities"),
+            ("TEXT_GENERATION", "CODE_EXECUTION"),
+        )
+        label = str(config.get("label") or normalized_id).strip()
+    else:
+        raise HTTPException(status_code=400, detail=f"调用通道类型不支持: {normalized_type or '空'}")
+    if not bool(config.get("enabled", True)):
+        raise HTTPException(status_code=400, detail=f"调用通道未启用: {normalized_id}")
+    if capability and capability not in capabilities:
+        raise HTTPException(
+            status_code=400,
+            detail=f"调用通道 {normalized_id} 不支持任务所需能力 {capability}",
+        )
+    return ExecutionTarget(
+        executor_type=normalized_type,
+        executor_id=normalized_id,
+        label=label,
+        protocol=protocol,
+        capabilities=capabilities,
+        config=dict(config),
+    )
+
+
+def resolve_task_run_text_target(
+    task_run: TaskRunSnapshot,
+    legacy_cli_id: str | None = None,
+) -> ExecutionTarget:
+    explicit_type = str(task_run.executor_type or "").strip().upper()
+    explicit_id = str(task_run.executor_id or "").strip()
+    if explicit_type and explicit_id:
+        return resolve_execution_target(explicit_type, explicit_id, "TEXT_GENERATION")
+    fallback_cli_id = str(legacy_cli_id or task_run.cli_id or "").strip()
+    if not fallback_cli_id:
+        raise HTTPException(status_code=400, detail="任务批次未配置调用通道")
+    return resolve_execution_target("CLI", fallback_cli_id, "TEXT_GENERATION")
+
+
+def load_mimo_tts_config(
+    provider_id: str | None = None,
+    strict_provider: bool = False,
+) -> MiMoTTSConfig:
+    selected_provider_id = str(provider_id or MIMO_PROVIDER_ID).strip() or MIMO_PROVIDER_ID
+    if strict_provider:
+        target = resolve_execution_target("AI_PROVIDER", selected_provider_id, "AUDIO_TTS")
+        if target.protocol != "mimo-tts":
+            raise HTTPException(
+                status_code=400,
+                detail=f"调用通道 {selected_provider_id} 不是 MiMo TTS Provider",
+            )
+        api_key = str(target.config.get("api_key") or target.config.get("apiKey") or "").strip()
+        if not api_key:
+            raise HTTPException(status_code=500, detail=f"MiMo TTS Provider 未配置 API Key: {selected_provider_id}")
+        return MiMoTTSConfig(
+            provider_id=selected_provider_id,
+            api_key=api_key,
+            base_url=str(target.config.get("base_url") or target.config.get("baseUrl") or "https://api.xiaomimimo.com/v1").rstrip("/"),
+            model=str(target.config.get("model") or "mimo-v2.5-tts").strip() or "mimo-v2.5-tts",
+            voice=str(target.config.get("voice") or "Chloe").strip() or "Chloe",
+            source="database",
+        )
+    provider: dict[str, Any] | None = None
+    try:
+        settings = load_database_settings()
+        with connect_database(settings) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    select active, providers
+                    from tb_ai_config
+                    where config_key = %s
+                    limit 1
+                    """,
+                    ("default",),
+                )
+                row = cursor.fetchone()
+        if row:
+            providers_value = row[1]
+            providers = (
+                json.loads(providers_value)
+                if isinstance(providers_value, str)
+                else providers_value
+            )
+            if isinstance(providers, dict):
+                selected_id = selected_provider_id or str(row[0] or "").strip()
+                selected = providers.get(selected_id)
+                if isinstance(selected, dict):
+                    provider = selected
+    except Exception:
+        LOGGER.warning(
+            "无法从 AI Task Center 数据库读取 MiMo 配置，将尝试环境变量回退"
+        )
+
+    database_key = str(
+        (provider or {}).get("api_key") or (provider or {}).get("apiKey") or ""
+    ).strip()
+    if database_key:
+        base_url = str(
+            (provider or {}).get("base_url") or (provider or {}).get("baseUrl") or ""
+        ).strip()
+        model = str((provider or {}).get("model") or "").strip()
+        voice = str((provider or {}).get("voice") or "").strip()
+        return MiMoTTSConfig(
+            provider_id=selected_provider_id,
+            api_key=database_key,
+            base_url=(base_url or "https://api.xiaomimimo.com/v1").rstrip("/"),
+            model=model or "mimo-v2.5-tts",
+            voice=voice or "Chloe",
+            source="database",
+        )
+
+    environment_key = str(
+        os.getenv("MIMO_API_KEY") or os.getenv("PYTHON_WORKER_MIMO_API_KEY") or ""
+    ).strip()
+    if not environment_key:
+        raise HTTPException(
+            status_code=500,
+            detail="缺少 MiMo TTS API Key：数据库配置和 Python Worker 环境变量均未提供",
+        )
+    return MiMoTTSConfig(
+        provider_id=selected_provider_id,
+        api_key=environment_key,
+        base_url=os.getenv("MIMO_TTS_BASE_URL", "https://api.xiaomimimo.com/v1").rstrip("/"),
+        model=os.getenv("MIMO_TTS_MODEL", "mimo-v2.5-tts").strip() or "mimo-v2.5-tts",
+        voice=os.getenv("MIMO_TTS_VOICE", "Chloe").strip() or "Chloe",
+        source="environment",
     )
 
 
@@ -336,10 +593,12 @@ def claim_next_queued_task() -> QueuedTaskClaim | None:
                 """
                 insert into tb_task_execution_log (
                     created_at, updated_at, task_run_id, attempt_no, cli_id,
+                    handler_key, executor_type, executor_id, executor_label,
                     execution_mode, worker_count, status, start_time, reason,
                     run_log, ai_prompt_json, ai_response_json
                 )
                 select now(), now(), task.id, task.attempt_no, task.cli_id,
+                       task.handler_key, task.executor_type, task.executor_id, task.executor_id,
                        coalesce(task.execution_mode, 'thread'),
                        greatest(1, least(32, coalesce(task.requested_worker_count, 1))),
                        'RUNNING', now(), 'Python Worker 已领取任务',
@@ -350,6 +609,10 @@ def claim_next_queued_task() -> QueuedTaskClaim | None:
                 on conflict (task_run_id, attempt_no) do update
                 set updated_at = now(),
                     cli_id = excluded.cli_id,
+                    handler_key = excluded.handler_key,
+                    executor_type = excluded.executor_type,
+                    executor_id = excluded.executor_id,
+                    executor_label = excluded.executor_label,
                     execution_mode = excluded.execution_mode,
                     worker_count = excluded.worker_count,
                     status = 'RUNNING',
@@ -672,7 +935,8 @@ def load_task_config_snapshot(task_config_id: int) -> TaskConfigSnapshot:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    select id, task_name, project_id, cli_id, database_config_id, selected_tables
+                    select id, task_name, project_id, cli_id, database_config_id, selected_tables,
+                           handler_key, executor_type, executor_id
                     from tb_task_config
                     where id = %s
                     """,
@@ -693,6 +957,9 @@ def load_task_config_snapshot(task_config_id: int) -> TaskConfigSnapshot:
         cli_id=str(row[3] or ""),
         database_config_id=int(row[4]),
         selected_tables=str(row[5] or ""),
+        handler_key=str(row[6] or ""),
+        executor_type=str(row[7] or ""),
+        executor_id=str(row[8] or ""),
     )
 
 
@@ -735,10 +1002,15 @@ def load_task_result_snapshot(task_result_id: int) -> TaskResultSnapshot:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    select id, result_name, task_config_id, project_id, cli_id,
-                           database_config_id, status, result_content, record_type
-                    from tb_task_result
-                    where id = %s
+                    select result.id, result.result_name, result.task_config_id, result.project_id,
+                           coalesce(nullif(result.cli_id, ''), config.cli_id),
+                           result.database_config_id, result.status, result.result_content, result.record_type,
+                           coalesce(nullif(result.handler_key, ''), config.handler_key),
+                           coalesce(nullif(result.executor_type, ''), config.executor_type),
+                           coalesce(nullif(result.executor_id, ''), config.executor_id)
+                    from tb_task_result result
+                    left join tb_task_config config on config.id = result.task_config_id
+                    where result.id = %s
                     """,
                     (task_result_id,),
                 )
@@ -760,6 +1032,9 @@ def load_task_result_snapshot(task_result_id: int) -> TaskResultSnapshot:
         status=str(row[6] or ""),
         result_content=str(row[7] or ""),
         record_type=str(row[8] or RECORD_TYPE_FORMAL),
+        handler_key=str(row[9] or ""),
+        executor_type=str(row[10] or ""),
+        executor_id=str(row[11] or ""),
     )
 
 
@@ -773,10 +1048,15 @@ def load_task_result_snapshots(task_result_ids: list[int]) -> list[TaskResultSna
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    select id, result_name, task_config_id, project_id, cli_id,
-                           database_config_id, status, result_content, record_type
-                    from tb_task_result
-                    where id = any(%s)
+                    select result.id, result.result_name, result.task_config_id, result.project_id,
+                           coalesce(nullif(result.cli_id, ''), config.cli_id),
+                           result.database_config_id, result.status, result.result_content, result.record_type,
+                           coalesce(nullif(result.handler_key, ''), config.handler_key),
+                           coalesce(nullif(result.executor_type, ''), config.executor_type),
+                           coalesce(nullif(result.executor_id, ''), config.executor_id)
+                    from tb_task_result result
+                    left join tb_task_config config on config.id = result.task_config_id
+                    where result.id = any(%s)
                     """,
                     (task_result_ids,),
                 )
@@ -795,6 +1075,9 @@ def load_task_result_snapshots(task_result_ids: list[int]) -> list[TaskResultSna
             status=str(row[6] or ""),
             result_content=str(row[7] or ""),
             record_type=str(row[8] or RECORD_TYPE_FORMAL),
+            handler_key=str(row[9] or ""),
+            executor_type=str(row[10] or ""),
+            executor_id=str(row[11] or ""),
         )
         for row in rows
     }
@@ -815,10 +1098,15 @@ def load_task_run_snapshot(task_run_id: int) -> TaskRunSnapshot:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    select id, task_name, cli_id, ai_prompt_json, ai_response_json, record_type,
-                           greatest(1, least(32, coalesce(requested_worker_count, 1)))
-                    from tb_task_run
-                    where id = %s
+                    select run.id, run.task_name, coalesce(nullif(run.cli_id, ''), config.cli_id),
+                           run.ai_prompt_json, run.ai_response_json, run.record_type,
+                           greatest(1, least(32, coalesce(run.requested_worker_count, 1))),
+                           coalesce(nullif(run.handler_key, ''), config.handler_key),
+                           coalesce(nullif(run.executor_type, ''), config.executor_type),
+                           coalesce(nullif(run.executor_id, ''), config.executor_id)
+                    from tb_task_run run
+                    left join tb_task_config config on config.id = run.task_config_id
+                    where run.id = %s
                     """,
                     (task_run_id,),
                 )
@@ -836,6 +1124,9 @@ def load_task_run_snapshot(task_run_id: int) -> TaskRunSnapshot:
         ai_response_json=str(row[4] or ""),
         record_type=str(row[5] or RECORD_TYPE_FORMAL),
         requested_worker_count=int(row[6] or 1),
+        handler_key=str(row[7] or ""),
+        executor_type=str(row[8] or ""),
+        executor_id=str(row[9] or ""),
     )
 
 
@@ -1537,6 +1828,9 @@ def build_score_result_rows(
     now = datetime.now(timezone.utc)
     source_tables_json = json.dumps(tables, ensure_ascii=False)
     rows: list[tuple[Any, ...]] = []
+    handler_key = str(task_config.handler_key or HANDLER_SCORE).strip() or HANDLER_SCORE
+    executor_type = str(task_config.executor_type or "CLI").strip().upper() or "CLI"
+    executor_id = str(task_config.executor_id or task_config.cli_id).strip()
     for group in groups:
         word_clean_id = group["wordCleanId"]
         if word_clean_id in existing_word_clean_ids:
@@ -1567,6 +1861,9 @@ def build_score_result_rows(
                 task_config.id,
                 task_config.project_id,
                 task_config.cli_id,
+                handler_key,
+                executor_type,
+                executor_id,
                 task_config.database_config_id,
                 source_tables_json,
                 SCORE_SOURCE_DESCRIPTION,
@@ -1658,6 +1955,9 @@ def build_tts_result_rows(
     now = datetime.now(timezone.utc)
     source_tables_json = json.dumps(tables, ensure_ascii=False)
     rows: list[tuple[Any, ...]] = []
+    handler_key = str(task_config.handler_key or HANDLER_TTS).strip() or HANDLER_TTS
+    executor_type = str(task_config.executor_type or "AI_PROVIDER").strip().upper() or "AI_PROVIDER"
+    executor_id = str(task_config.executor_id or MIMO_PROVIDER_ID).strip() or MIMO_PROVIDER_ID
     for best_sentence in best_sentences:
         best_sentence_id = int(best_sentence["bestSentenceId"])
         if best_sentence_id in existing_best_sentence_ids:
@@ -1673,6 +1973,9 @@ def build_tts_result_rows(
                 task_config.id,
                 task_config.project_id,
                 task_config.cli_id,
+                handler_key,
+                executor_type,
+                executor_id,
                 task_config.database_config_id,
                 source_tables_json,
                 TTS_SOURCE_DESCRIPTION,
@@ -1736,6 +2039,9 @@ def replace_task_result_rows(
                         task_config_id,
                         project_id,
                         cli_id,
+                        handler_key,
+                        executor_type,
+                        executor_id,
                         database_config_id,
                         source_tables,
                         source_description,
@@ -1985,6 +2291,119 @@ def run_cli_prompt(cli_config: dict[str, Any], prompt: str) -> dict[str, Any]:
         "model": model,
         "reasoningEffort": reasoning_effort,
         "workingDirectory": working_directory,
+    }
+
+
+def execute_text_generation(target: ExecutionTarget, prompt: str) -> dict[str, Any]:
+    if "TEXT_GENERATION" not in target.capabilities:
+        raise HTTPException(
+            status_code=400,
+            detail=f"调用通道 {target.executor_id} 不支持任务所需能力 TEXT_GENERATION",
+        )
+    if target.executor_type == "CLI":
+        cli_response = run_cli_prompt(target.config, prompt)
+        return {
+            "rawOutput": cli_response["stdout"],
+            "executorType": target.executor_type,
+            "executorId": target.executor_id,
+            "executorLabel": target.label,
+            "protocol": target.protocol,
+            "model": cli_response.get("model", ""),
+            "metadata": {
+                "command": cli_response.get("command", ""),
+                "defaultArgs": cli_response.get("defaultArgs", []),
+                "effectiveArgs": cli_response.get("effectiveArgs", []),
+                "reasoningEffort": cli_response.get("reasoningEffort", ""),
+                "workingDirectory": cli_response.get("workingDirectory", ""),
+                "returnCode": cli_response.get("returnCode", 0),
+                "stderr": cli_response.get("stderr", ""),
+            },
+        }
+    if target.executor_type != "AI_PROVIDER":
+        raise HTTPException(status_code=400, detail=f"调用通道类型不支持: {target.executor_type}")
+
+    config = target.config
+    api_key = str(config.get("api_key") or config.get("apiKey") or "").strip()
+    base_url = str(config.get("base_url") or config.get("baseUrl") or "").strip().rstrip("/")
+    model = str(config.get("model") or "").strip()
+    max_tokens = int(config.get("max_tokens") or config.get("maxTokens") or 4096)
+    if not api_key:
+        raise HTTPException(status_code=500, detail=f"AI Provider {target.executor_id} 缺少 API Key")
+    if not base_url or not model:
+        raise HTTPException(status_code=500, detail=f"AI Provider {target.executor_id} 配置不完整")
+
+    if target.protocol == "openai-compatible":
+        url = f"{base_url}/chat/completions"
+        payload = {
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "Authorization": f"Bearer {api_key}",
+        }
+    elif target.protocol == "anthropic-compatible":
+        url = f"{base_url}/messages"
+        payload = {
+            "model": model,
+            "max_tokens": max_tokens,
+            "messages": [{"role": "user", "content": prompt}],
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "x-api-key": api_key,
+            "anthropic-version": "2023-06-01",
+        }
+    else:
+        raise HTTPException(
+            status_code=400,
+            detail=f"Provider 协议不支持文本生成: {target.protocol}",
+        )
+
+    request = urllib.request.Request(
+        url,
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=90) as response:
+            response_payload = json.loads(response.read().decode("utf-8"))
+    except urllib.error.HTTPError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1000]
+        raise HTTPException(
+            status_code=502,
+            detail=f"AI Provider 请求失败: HTTP {exc.code}, {detail}",
+        ) from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=503, detail="AI Provider 当前不可用") from exc
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise HTTPException(status_code=502, detail="AI Provider 响应不是有效 JSON") from exc
+
+    try:
+        if target.protocol == "openai-compatible":
+            raw_output = response_payload["choices"][0]["message"]["content"]
+        else:
+            raw_output = "".join(
+                str(block.get("text") or "")
+                for block in response_payload["content"]
+                if isinstance(block, dict) and block.get("type") == "text"
+            )
+    except (KeyError, IndexError, TypeError) as exc:
+        raise HTTPException(status_code=502, detail="AI Provider 响应缺少文本内容") from exc
+    if not isinstance(raw_output, str) or not raw_output.strip():
+        raise HTTPException(status_code=502, detail="AI Provider 响应文本为空")
+    return {
+        "rawOutput": raw_output.strip(),
+        "executorType": target.executor_type,
+        "executorId": target.executor_id,
+        "executorLabel": target.label,
+        "protocol": target.protocol,
+        "model": model,
+        "metadata": {},
     }
 
 
@@ -2480,14 +2899,24 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
     if any(item.record_type != RECORD_TYPE_FORMAL for item in task_results):
         raise HTTPException(status_code=400, detail="验证结果不能执行")
     contexts = build_task_run_batch_item_contexts(prompt, task_results)
-    effective_cli_id = (cli_id or task_run.cli_id or "").strip()
-    if not effective_cli_id:
-        raise HTTPException(status_code=400, detail="任务批次未配置执行 CLI")
-
-    cli_config = find_cli_config(effective_cli_id)
-    access = cli_config.get("access", {})
-    if not access.get("accessible"):
-        raise HTTPException(status_code=400, detail=f"CLI 不可访问: {access.get('message', '')}")
+    target = resolve_task_run_text_target(task_run, cli_id)
+    if target.executor_type == "AI_PROVIDER":
+        effective_cli_id = target.executor_id
+        cli_config = {"label": target.label, "model": target.config.get("model")}
+        executor_type = target.executor_type
+        executor_id = target.executor_id
+        protocol = target.protocol
+        running_summary = f"批次执行中，正在调用 AI Provider {target.label} 评分"
+    else:
+        effective_cli_id = target.executor_id
+        cli_config = find_cli_config(effective_cli_id)
+        access = cli_config.get("access", {})
+        if not access.get("accessible"):
+            raise HTTPException(status_code=400, detail=f"CLI 不可访问: {access.get('message', '')}")
+        executor_type = "CLI"
+        executor_id = effective_cli_id
+        protocol = "local-cli"
+        running_summary = "批次执行中，正在调用 CLI 评分"
 
     if validation_execution:
         batch_update_task_run_result_link_states(task_run.id, [
@@ -2495,12 +2924,27 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
         ])
     else:
         batch_update_task_result_states([
-            (item.id, "RUNNING", "批次 JSON 执行中，正在调用 CLI 评分", None, "")
+            (item.id, "RUNNING", running_summary, None, "")
             for item in task_results
         ])
 
     try:
-        cli_response = run_cli_prompt(cli_config, task_run.ai_prompt_json)
+        if target.executor_type == "AI_PROVIDER":
+            text_execution = execute_text_generation(target, task_run.ai_prompt_json)
+            metadata = text_execution.get("metadata") if isinstance(text_execution.get("metadata"), dict) else {}
+            cli_response = {
+                "stdout": text_execution["rawOutput"],
+                "command": str(metadata.get("command") or ""),
+                "defaultArgs": metadata.get("defaultArgs") or [],
+                "effectiveArgs": metadata.get("effectiveArgs") or [],
+                "model": str(text_execution.get("model") or ""),
+                "reasoningEffort": str(metadata.get("reasoningEffort") or ""),
+                "workingDirectory": str(metadata.get("workingDirectory") or ""),
+                "returnCode": int(metadata.get("returnCode") or 0),
+                "stderr": str(metadata.get("stderr") or ""),
+            }
+        else:
+            cli_response = run_cli_prompt(cli_config, task_run.ai_prompt_json)
         ai_result = extract_json_payload(cli_response["stdout"])
         ai_response_json = update_task_run_ai_response(task_run.id, {
             "rawOutput": cli_response["stdout"],
@@ -2508,6 +2952,10 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
             "execution": {
                 "mode": "task-run-json-batch",
                 "taskRunId": task_run.id,
+                "executorType": executor_type,
+                "executorId": executor_id,
+                "executorLabel": cli_config.get("label"),
+                "protocol": protocol,
                 "cliId": effective_cli_id,
                 "cliLabel": cli_config.get("label"),
                 "command": cli_response["command"],
@@ -2546,6 +2994,8 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
                 "successCount": len(prepared_items),
                 "failedCount": len(failed_rows),
                 "cliId": effective_cli_id,
+                "executorType": executor_type,
+                "executorId": executor_id,
                 "aiResponseJson": ai_response_json,
                 "validationExecution": True,
             }
@@ -2593,6 +3043,8 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
             "successCount": len(success_rows),
             "failedCount": len(failed_rows),
             "cliId": effective_cli_id,
+            "executorType": executor_type,
+            "executorId": executor_id,
             "aiResponseJson": ai_response_json,
         }
     except Exception as exc:
@@ -2803,43 +3255,112 @@ def process_word_clean_sentence_task_results_batch(
     }
 
 
-# 函数：post_word_agent_tts
-def post_word_agent_tts(tts_input: dict[str, Any]) -> dict[str, Any]:
-    request_payload: dict[str, Any] = {
-        "text": str(tts_input.get("text") or "").strip(),
-        "format": str(tts_input.get("defaultAudioFormat") or "wav").strip() or "wav",
-        "fileName": str(tts_input.get("fileName") or "").strip() or None,
-        "overwrite": True,
+# 函数：safe_tts_file_name
+def safe_tts_file_name(value: str | None) -> str:
+    requested_name = Path(value or "").name
+    sanitized = re.sub(r"[^A-Za-z0-9._-]+", "_", requested_name).strip("._-")
+    if not sanitized:
+        sanitized = f"tts_{uuid.uuid4().hex}.wav"
+    if not sanitized.lower().endswith(".wav"):
+        sanitized = f"{sanitized}.wav"
+    return sanitized
+
+
+# 函数：resolve_tts_file_path
+def resolve_tts_file_path(file_name: str) -> Path:
+    if not file_name or file_name != Path(file_name).name:
+        raise HTTPException(status_code=400, detail="TTS 文件名无效")
+    if safe_tts_file_name(file_name) != file_name or not file_name.lower().endswith(".wav"):
+        raise HTTPException(status_code=400, detail="TTS 文件名无效")
+    output_dir = TTS_OUTPUT_DIR.resolve()
+    file_path = (output_dir / file_name).resolve()
+    if file_path.parent != output_dir:
+        raise HTTPException(status_code=400, detail="TTS 文件名无效")
+    return file_path
+
+
+# 函数：generate_mimo_tts
+def generate_mimo_tts(
+    tts_input: dict[str, Any],
+    provider_id: str | None = None,
+    strict_provider: bool = False,
+) -> dict[str, Any]:
+    text = str(tts_input.get("text") or "").strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="TTS 文本不能为空")
+
+    audio_format = str(tts_input.get("defaultAudioFormat") or "wav").strip().lower()
+    if audio_format != "wav":
+        raise HTTPException(status_code=400, detail="MiMo TTS 当前仅支持 wav 格式")
+
+    config = load_mimo_tts_config(provider_id, strict_provider=strict_provider)
+    model = str(tts_input.get("model") or config.model).strip() or config.model
+    voice = str(tts_input.get("voice") or config.voice).strip() or config.voice
+    style = str(
+        tts_input.get("style")
+        or "Clear English pronunciation for vocabulary learning. Speak naturally and clearly."
+    ).strip()
+    payload = {
+        "model": model,
+        "messages": [
+            {"role": "user", "content": style},
+            {"role": "assistant", "content": text},
+        ],
+        "audio": {"format": audio_format, "voice": voice},
     }
-    for source_key, target_key in (("voice", "voice"), ("model", "model")):
-        value = str(tts_input.get(source_key) or "").strip()
-        if value:
-            request_payload[target_key] = value
     request = urllib.request.Request(
-        f"{WORD_AGENT_BASE_URL}/v1/tts/generate",
-        data=json.dumps(request_payload, ensure_ascii=False).encode("utf-8"),
-        headers={"Content-Type": "application/json", "Accept": "application/json"},
+        f"{config.base_url.rstrip('/')}/chat/completions",
+        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        headers={
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+            "api-key": config.api_key,
+        },
         method="POST",
     )
     try:
         with urllib.request.urlopen(request, timeout=90) as response:
             response_payload = json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")
-        raise HTTPException(status_code=502, detail=f"word-agent TTS 请求失败: {detail}") from exc
-    except urllib.error.URLError as exc:
+        detail = exc.read().decode("utf-8", errors="replace")[:1000]
         raise HTTPException(
-            status_code=503,
-            detail=f"word-agent TTS 服务不可用（{WORD_AGENT_BASE_URL}）: {exc.reason}",
+            status_code=502,
+            detail=f"MiMo TTS 请求失败: HTTP {exc.code}, {detail}",
         ) from exc
+    except urllib.error.URLError as exc:
+        raise HTTPException(status_code=503, detail="MiMo TTS 服务当前不可用") from exc
     except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=502, detail="word-agent TTS 响应不是有效 JSON") from exc
-    if not isinstance(response_payload, dict):
-        raise HTTPException(status_code=502, detail="word-agent TTS 响应格式无效")
-    download_url = str(response_payload.get("downloadUrl") or "")
-    if download_url.startswith("/"):
-        response_payload["downloadUrl"] = f"{WORD_AGENT_BASE_URL}{download_url}"
-    return response_payload
+        raise HTTPException(status_code=502, detail="MiMo TTS 响应不是有效 JSON") from exc
+
+    try:
+        audio_base64 = response_payload["choices"][0]["message"]["audio"]["data"]
+    except (KeyError, IndexError, TypeError) as exc:
+        raise HTTPException(
+            status_code=502,
+            detail="MiMo TTS 响应缺少 choices[0].message.audio.data",
+        ) from exc
+    if not isinstance(audio_base64, str) or not audio_base64:
+        raise HTTPException(status_code=502, detail="MiMo TTS 音频内容为空")
+    try:
+        audio_bytes = base64.b64decode(audio_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise HTTPException(status_code=502, detail="MiMo TTS 音频内容不是有效 base64") from exc
+
+    file_name = safe_tts_file_name(str(tts_input.get("fileName") or ""))
+    TTS_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
+    file_path = resolve_tts_file_path(file_name)
+    file_path.write_bytes(audio_bytes)
+    return {
+        "provider": config.provider_id,
+        "model": model,
+        "voice": voice,
+        "format": audio_format,
+        "fileName": file_name,
+        "filePath": str(file_path),
+        "downloadUrl": f"{PYTHON_WORKER_PUBLIC_BASE_URL}/api/tts/files/{file_name}",
+        "byteSize": len(audio_bytes),
+        "contentType": "audio/wav",
+    }
 
 
 # 函数：backfill_word_clean_best_sentence_tts
@@ -2859,7 +3380,7 @@ def backfill_word_clean_best_sentence_tts(
     file_name = str(tts_result.get("fileName") or "")
     object_url = str(tts_result.get("objectUrl") or tts_result.get("downloadUrl") or "")
     normalized = {
-        "provider": str(tts_result.get("provider") or "word-agent"),
+        "provider": str(tts_result.get("provider") or MIMO_PROVIDER_ID),
         "model": str(tts_result.get("model") or ""),
         "voice": str(tts_result.get("voice") or ""),
         "audioFormat": str(tts_result.get("format") or payload["ttsInput"].get("defaultAudioFormat") or "wav"),
@@ -2931,7 +3452,18 @@ def process_tts_batch_item(
 ) -> tuple[tuple[int, str, str, dict[str, Any] | None, str], dict[str, Any]]:
     try:
         payload = parse_tts_task_result_payload(task_result)
-        tts_result = post_word_agent_tts(payload["ttsInput"])
+        explicit_type = str(task_run.executor_type or task_result.executor_type or "").strip().upper()
+        explicit_id = str(task_run.executor_id or task_result.executor_id or "").strip()
+        if bool(explicit_type) != bool(explicit_id):
+            raise HTTPException(status_code=400, detail="TTS 调用通道快照不完整")
+        if explicit_type and explicit_type != "AI_PROVIDER":
+            raise HTTPException(status_code=400, detail=f"TTS 不支持调用通道类型: {explicit_type}")
+        provider_id = explicit_id or MIMO_PROVIDER_ID
+        tts_result = generate_mimo_tts(
+            payload["ttsInput"],
+            provider_id,
+            strict_provider=bool(explicit_id),
+        )
         if validation_execution:
             backfill_result = {
                 "skipped": True,
@@ -2947,7 +3479,7 @@ def process_tts_batch_item(
                 "mode": "task-run-tts-batch",
                 "taskRunId": task_run.id,
                 "itemKey": item_key,
-                "service": WORD_AGENT_BASE_URL,
+                "service": "python-worker-mimo-tts",
                 "processedAt": datetime.now(timezone.utc).isoformat(),
                 "legacyJobTableDependency": False,
                 "validationExecution": validation_execution,
@@ -3019,7 +3551,7 @@ def process_word_clean_best_sentence_tts_task_run_batch(
         ])
     else:
         batch_update_task_result_states([
-            (item.id, "RUNNING", "TTS 批次执行中，正在调用 word-agent", None, "")
+            (item.id, "RUNNING", "TTS 批次执行中，正在调用 MiMo", None, "")
             for item in task_results
         ])
     result_rows: list[tuple[int, str, str, dict[str, Any] | None, str]] = []
@@ -3059,7 +3591,7 @@ def process_word_clean_best_sentence_tts_task_run_batch(
             "mode": "task-run-tts-batch",
             "taskRunId": task_run.id,
             "workerCount": worker_count,
-            "service": WORD_AGENT_BASE_URL,
+            "service": "python-worker-mimo-tts",
             "processedAt": datetime.now(timezone.utc).isoformat(),
             "legacyJobTableDependency": False,
             "validationExecution": validation_execution,
@@ -3087,11 +3619,13 @@ def process_task_run_batch_by_type(task_run_id: int, cli_id: str | None = None) 
     except json.JSONDecodeError as exc:
         raise HTTPException(status_code=400, detail=f"批次执行载荷 JSON 解析失败: {exc}") from exc
     task_type = prompt.get("taskType") if isinstance(prompt, dict) else None
-    if task_type == RESULT_MODE_TTS_BATCH:
+    handler_key = str(task_run.handler_key or "").strip()
+    if handler_key == HANDLER_TTS or (not handler_key and task_type == RESULT_MODE_TTS_BATCH):
         return process_word_clean_best_sentence_tts_task_run_batch(task_run_id, cli_id)
-    if task_type == RESULT_MODE_SCORE_BATCH:
+    if handler_key == HANDLER_SCORE or (not handler_key and task_type == RESULT_MODE_SCORE_BATCH):
         return process_word_clean_sentence_task_run_batch(task_run_id, cli_id)
-    raise HTTPException(status_code=400, detail=f"批次执行载荷类型不支持: {task_type or '空'}")
+    unsupported = handler_key or task_type or "空"
+    raise HTTPException(status_code=400, detail=f"任务处理器不支持: {unsupported}")
 
 
 # 函数：process_tts_validation_task_result
@@ -3101,14 +3635,25 @@ def process_tts_validation_task_result(task_result: TaskResultSnapshot) -> dict[
     payload = parse_tts_task_result_payload(task_result)
     update_task_result_state(task_result.id, "RUNNING", "正在生成验证 TTS 音频", payload, "")
     try:
-        tts_result = post_word_agent_tts(payload["ttsInput"])
+        explicit_type = str(task_result.executor_type or "").strip().upper()
+        explicit_id = str(task_result.executor_id or "").strip()
+        if bool(explicit_type) != bool(explicit_id):
+            raise HTTPException(status_code=400, detail="TTS 调用通道快照不完整")
+        if explicit_type and explicit_type != "AI_PROVIDER":
+            raise HTTPException(status_code=400, detail=f"TTS 不支持调用通道类型: {explicit_type}")
+        provider_id = explicit_id or MIMO_PROVIDER_ID
+        tts_result = generate_mimo_tts(
+            payload["ttsInput"],
+            provider_id,
+            strict_provider=bool(explicit_id),
+        )
         completed_payload = {
             **payload,
             "ttsResult": tts_result,
             "validationExecution": {
                 "sourceWriteBackSkipped": True,
                 "processedAt": datetime.now(timezone.utc).isoformat(),
-                "wordAgentBaseUrl": WORD_AGENT_BASE_URL,
+                "service": "python-worker-mimo-tts",
             },
         }
         file_name = str(tts_result.get("fileName") or payload["ttsInput"].get("fileName") or "音频")
@@ -3140,18 +3685,52 @@ def process_word_clean_sentence_task_result(task_result_id: int, cli_id: str | N
     if task_result.record_type == RECORD_TYPE_VALIDATION_HISTORY:
         raise HTTPException(status_code=400, detail="历史验证结果不能执行")
     payload = parse_task_result_payload(task_result)
-    effective_cli_id = (cli_id or task_result.cli_id or "").strip()
-    if not effective_cli_id:
-        raise HTTPException(status_code=400, detail="任务结果未配置执行 CLI")
+    explicit_executor_type = str(task_result.executor_type or "").strip().upper()
+    explicit_executor_id = str(task_result.executor_id or "").strip()
+    if explicit_executor_type == "AI_PROVIDER":
+        target = resolve_execution_target("AI_PROVIDER", explicit_executor_id, "TEXT_GENERATION")
+        text_execution = execute_text_generation(target, payload["aiPrompt"])
+        metadata = text_execution.get("metadata") if isinstance(text_execution.get("metadata"), dict) else {}
+        cli_response = {
+            "stdout": text_execution["rawOutput"],
+            "command": str(metadata.get("command") or ""),
+            "defaultArgs": metadata.get("defaultArgs") or [],
+            "effectiveArgs": metadata.get("effectiveArgs") or [],
+            "model": str(text_execution.get("model") or ""),
+            "reasoningEffort": str(metadata.get("reasoningEffort") or ""),
+            "workingDirectory": str(metadata.get("workingDirectory") or ""),
+            "returnCode": int(metadata.get("returnCode") or 0),
+            "stderr": str(metadata.get("stderr") or ""),
+        }
+        cli_config = {"label": target.label, "model": text_execution.get("model")}
+        effective_cli_id = target.executor_id
+        executor_type = target.executor_type
+        executor_id = target.executor_id
+        protocol = target.protocol
+        running_summary = f"正在调用 AI Provider {target.label} 评分"
+    else:
+        effective_cli_id = (
+            explicit_executor_id
+            if explicit_executor_type == "CLI" and explicit_executor_id
+            else str(cli_id or task_result.cli_id or "").strip()
+        )
+        if not effective_cli_id:
+            raise HTTPException(status_code=400, detail="任务结果未配置调用通道")
+        target = resolve_execution_target("CLI", effective_cli_id, "TEXT_GENERATION")
+        cli_config = find_cli_config(effective_cli_id)
+        access = cli_config.get("access", {})
+        if not access.get("accessible"):
+            raise HTTPException(status_code=400, detail=f"CLI 不可访问: {access.get('message', '')}")
+        cli_response = None
+        executor_type = "CLI"
+        executor_id = effective_cli_id
+        protocol = "local-cli"
+        running_summary = "正在调用 CLI 评分"
 
-    cli_config = find_cli_config(effective_cli_id)
-    access = cli_config.get("access", {})
-    if not access.get("accessible"):
-        raise HTTPException(status_code=400, detail=f"CLI 不可访问: {access.get('message', '')}")
-
-    update_task_result_state(task_result.id, "RUNNING", "正在调用 CLI 评分", payload, "")
+    update_task_result_state(task_result.id, "RUNNING", running_summary, payload, "")
     try:
-        cli_response = run_cli_prompt(cli_config, payload["aiPrompt"])
+        if cli_response is None:
+            cli_response = run_cli_prompt(cli_config, payload["aiPrompt"])
         ai_result = extract_json_payload(cli_response["stdout"])
         scores, best_score_item = validate_ai_score_result(ai_result, payload["writeBack"])
         validation_execution = task_result.record_type == RECORD_TYPE_VALIDATION_CURRENT
@@ -3177,6 +3756,10 @@ def process_word_clean_sentence_task_result(task_result_id: int, cli_id: str | N
                 "bestCandidate": best_score_item["candidate"],
             },
             "execution": {
+                "executorType": executor_type,
+                "executorId": executor_id,
+                "executorLabel": cli_config.get("label"),
+                "protocol": protocol,
                 "cliId": effective_cli_id,
                 "cliLabel": cli_config.get("label"),
                 "command": cli_response["command"],
@@ -3224,9 +3807,13 @@ def process_word_clean_sentence_task_result(task_result_id: int, cli_id: str | N
 def process_task_result_by_type(task_result_id: int, cli_id: str | None = None) -> dict[str, Any]:
     task_result = load_task_result_snapshot(task_result_id)
     payload = parse_task_result_content(task_result)
-    if payload.get("taskType") == RESULT_MODE_TTS:
+    handler_key = str(task_result.handler_key or "").strip()
+    if handler_key == HANDLER_TTS or (not handler_key and payload.get("taskType") == RESULT_MODE_TTS):
         return process_tts_validation_task_result(task_result)
-    return process_word_clean_sentence_task_result(task_result_id, cli_id)
+    if handler_key == HANDLER_SCORE or (not handler_key and payload.get("taskType") == RESULT_MODE_SCORE):
+        return process_word_clean_sentence_task_result(task_result_id, cli_id)
+    unsupported = handler_key or payload.get("taskType") or "空"
+    raise HTTPException(status_code=400, detail=f"任务处理器不支持: {unsupported}")
 
 
 # 函数：process_validation_task_results_batch
@@ -3283,6 +3870,15 @@ def load_queue_status_counts() -> dict[str, int]:
     counts = {"QUEUED": 0, "RUNNING": 0, "RETRY_WAIT": 0}
     counts.update({str(row[0]): int(row[1]) for row in rows})
     return counts
+
+
+# 函数：download_tts_file
+@app.get("/api/tts/files/{file_name}")
+def download_tts_file(file_name: str) -> FileResponse:
+    file_path = resolve_tts_file_path(file_name)
+    if not file_path.exists() or not file_path.is_file():
+        raise HTTPException(status_code=404, detail="TTS 文件不存在")
+    return FileResponse(file_path, media_type="audio/wav", filename=file_name)
 
 
 # 函数：health
@@ -3360,7 +3956,7 @@ def process_task_run_batch_json_simple(
 @app.post("/api/task-result/process-batch-simple")
 def process_task_results_batch_simple(
     taskResultIds: str,
-    cliId: str,
+    cliId: str | None = None,
     workerCount: int = Query(default=4, ge=1, le=32),
 ) -> dict[str, Any]:
     task_result_ids = [int(item) for item in taskResultIds.split(",") if item.strip().isdigit()]

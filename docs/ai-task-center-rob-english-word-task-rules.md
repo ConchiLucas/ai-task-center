@@ -14,10 +14,10 @@ tags: [rob_english_word, task, scoring, tts]
 
 AI Task Center 只从以下业务数据表生成任务：
 
-| 任务 | 来源表 | 目标 |
-| --- | --- | --- |
-| 单词评分任务 | `public.word_clean_sentence` | 读取候选句，评分后回写候选句评分，并维护最佳句子 |
-| 生成 TTS 任务 | `public.word_clean_best_sentence` | 读取最佳句子，生成音频后回写 TTS 结果 |
+| 任务 | 来源表 | 处理器 | 运行调用通道 |
+| --- | --- | --- | --- |
+| 单词评分任务 | `public.word_clean_sentence` | `word_clean_sentence_score` | CLI 或具备 `TEXT_GENERATION` 能力的 AI Provider |
+| 生成 TTS 任务 | `public.word_clean_best_sentence` | `word_clean_best_sentence_tts` | 具备 `AUDIO_TTS` 能力的 MiMo AI Provider |
 
 ## 已配置任务
 

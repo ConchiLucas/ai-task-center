@@ -4,6 +4,7 @@ import com.aitaskcenter.dto.AiActiveRequest;
 import com.aitaskcenter.dto.AiConfigRequest;
 import com.aitaskcenter.dto.AiProviderConfigItem;
 import com.aitaskcenter.dto.ApiResponse;
+import com.aitaskcenter.dto.ExecutionTargetItem;
 import com.aitaskcenter.dto.LocalCliConfigRequest;
 import com.aitaskcenter.service.AiConfigService;
 import java.util.List;
@@ -26,19 +27,21 @@ public class AiConfigController {
     @GetMapping("/config")
     // 方法：getConfig
     public ApiResponse<AiConfigRequest> getConfig() {
-        return ApiResponse.ok(service.getConfig());
+        return ApiResponse.ok(service.getProviders());
     }
 
     @PostMapping("/config")
     // 方法：saveConfig
     public ApiResponse<List<AiProviderConfigItem>> saveConfig(@RequestBody AiConfigRequest request) {
-        return ApiResponse.ok(service.save(request), "保存成功");
+        service.save(request);
+        return ApiResponse.ok(service.getProviders().getProviders(), "保存成功");
     }
 
     @PostMapping("/config/active")
     // 方法：saveActive
     public ApiResponse<List<AiProviderConfigItem>> saveActive(@RequestBody AiActiveRequest request) {
-        return ApiResponse.ok(service.saveActive(request.getActive()), "保存成功");
+        service.saveActive(request.getActive());
+        return ApiResponse.ok(service.getProviders().getProviders(), "保存成功");
     }
 
     @GetMapping("/providers")
@@ -57,5 +60,10 @@ public class AiConfigController {
     // 方法：saveLocalCliConfig
     public ApiResponse<LocalCliConfigRequest> saveLocalCliConfig(@RequestBody LocalCliConfigRequest request) {
         return ApiResponse.ok(service.saveLocalCliConfig(request), "保存成功");
+    }
+
+    @GetMapping("/execution-targets")
+    public ApiResponse<List<ExecutionTargetItem>> executionTargets() {
+        return ApiResponse.ok(service.getExecutionTargets());
     }
 }

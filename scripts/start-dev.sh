@@ -23,7 +23,7 @@ DB_USER="${TASK_CENTER_DB_USER:-conchi}"
 DB_PASSWORD="${TASK_CENTER_DB_PASSWORD:-conchi123456}"
 DB_URL="${TASK_CENTER_DB_URL:-jdbc:postgresql://${DB_HOST}:${DB_PORT}/${DB_NAME}}"
 PYTHON_WORKER_BASE_URL="${PYTHON_WORKER_BASE_URL:-http://${LOCAL_HOST}:${WORKER_PORT}}"
-WORD_AGENT_BASE_URL="${WORD_AGENT_BASE_URL:-http://${LOCAL_HOST}:8010}"
+PYTHON_WORKER_PUBLIC_BASE_URL="${PYTHON_WORKER_PUBLIC_BASE_URL:-$PYTHON_WORKER_BASE_URL}"
 MAVEN_BIN="${MAVEN_BIN:-$(command -v mvn || true)}"
 JAVA_BIN="${JAVA_BIN:-$(command -v java || true)}"
 BACKEND_JAR="${ROOT_DIR}/target/ai-task-center-0.0.1-SNAPSHOT.jar"
@@ -159,7 +159,7 @@ start_python_worker() {
   if [ "$USE_LAUNCHCTL" = true ]; then
     launchctl remove com.conchi.ai-task-center.python-worker >/dev/null 2>&1 || true
     launchctl submit -l com.conchi.ai-task-center.python-worker -- /bin/zsh -lc \
-      "cd '$worker_dir' && exec env TASK_CENTER_DB_HOST='$DB_HOST' TASK_CENTER_DB_PORT='$DB_PORT' TASK_CENTER_DB_NAME='$DB_NAME' TASK_CENTER_DB_USER='$DB_USER' TASK_CENTER_DB_PASSWORD='$DB_PASSWORD' TASK_QUEUE_MAX_WORKERS='$QUEUE_MAX_WORKERS' TASK_QUEUE_POLL_SECONDS='$QUEUE_POLL_SECONDS' TASK_QUEUE_LEASE_SECONDS='$QUEUE_LEASE_SECONDS' TASK_QUEUE_HEARTBEAT_SECONDS='$QUEUE_HEARTBEAT_SECONDS' WORD_AGENT_BASE_URL='$WORD_AGENT_BASE_URL' .venv/bin/uvicorn app.main:app --host '$HOST' --port '$WORKER_PORT' >> '$log_file' 2>&1"
+      "cd '$worker_dir' && exec env TASK_CENTER_DB_HOST='$DB_HOST' TASK_CENTER_DB_PORT='$DB_PORT' TASK_CENTER_DB_NAME='$DB_NAME' TASK_CENTER_DB_USER='$DB_USER' TASK_CENTER_DB_PASSWORD='$DB_PASSWORD' TASK_QUEUE_MAX_WORKERS='$QUEUE_MAX_WORKERS' TASK_QUEUE_POLL_SECONDS='$QUEUE_POLL_SECONDS' TASK_QUEUE_LEASE_SECONDS='$QUEUE_LEASE_SECONDS' TASK_QUEUE_HEARTBEAT_SECONDS='$QUEUE_HEARTBEAT_SECONDS' PYTHON_WORKER_PUBLIC_BASE_URL='$PYTHON_WORKER_PUBLIC_BASE_URL' .venv/bin/uvicorn app.main:app --host '$HOST' --port '$WORKER_PORT' >> '$log_file' 2>&1"
   else
     (
       cd "$worker_dir"
@@ -173,7 +173,7 @@ start_python_worker() {
         TASK_QUEUE_POLL_SECONDS="$QUEUE_POLL_SECONDS" \
         TASK_QUEUE_LEASE_SECONDS="$QUEUE_LEASE_SECONDS" \
         TASK_QUEUE_HEARTBEAT_SECONDS="$QUEUE_HEARTBEAT_SECONDS" \
-        WORD_AGENT_BASE_URL="$WORD_AGENT_BASE_URL" \
+        PYTHON_WORKER_PUBLIC_BASE_URL="$PYTHON_WORKER_PUBLIC_BASE_URL" \
         .venv/bin/uvicorn app.main:app --host "$HOST" --port "$WORKER_PORT" >"$log_file" 2>&1 &
       echo $! >"${PID_DIR}/python-worker.pid"
     )

@@ -3,11 +3,15 @@ package com.aitaskcenter.service;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.never;
+import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.aitaskcenter.dto.CreateTaskRunRequest;
 import com.aitaskcenter.dto.StartTaskRunRequest;
+import com.aitaskcenter.model.TaskConfig;
+import com.aitaskcenter.model.TaskExecutionLog;
 import com.aitaskcenter.model.TaskRecordType;
 import com.aitaskcenter.model.TaskRun;
 import com.aitaskcenter.repository.ProjectConfigRepository;
@@ -19,9 +23,44 @@ import com.aitaskcenter.repository.TaskRunResultRepository;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import org.mockito.ArgumentCaptor;
 import org.junit.jupiter.api.Test;
 
 class TaskRunServiceListTest {
+    @Test
+    void createdRunCopiesHandlerAndExecutionTargetSnapshot() {
+        TaskRunRepository repository = mock(TaskRunRepository.class);
+        TaskConfigRepository taskConfigRepository = mock(TaskConfigRepository.class);
+        TaskConfig config = new TaskConfig();
+        config.setId(1L);
+        config.setTaskName("生成 TTS 任务");
+        config.setProjectId(1L);
+        config.setCliId("codex");
+        config.setHandlerKey("word_clean_best_sentence_tts");
+        config.setExecutorType("AI_PROVIDER");
+        config.setExecutorId("xiaomi-mimo-tts");
+        when(taskConfigRepository.findById(1L)).thenReturn(Optional.of(config));
+        when(repository.save(any(TaskRun.class))).thenAnswer(invocation -> invocation.getArgument(0));
+        TaskRunService service = new TaskRunService(
+                repository,
+                taskConfigRepository,
+                mock(ProjectConfigRepository.class),
+                mock(TaskResultRepository.class),
+                mock(TaskRunResultRepository.class),
+                mock(TaskExecutionLogRepository.class),
+                mock(PythonWorkerClient.class),
+                mock(TaskRunPromptBuilder.class),
+                new TaskExecutionTargetResolver());
+        CreateTaskRunRequest request = new CreateTaskRunRequest();
+        request.setTaskConfigId(1L);
+
+        TaskRun created = service.create(request);
+
+        assertEquals("word_clean_best_sentence_tts", created.getHandlerKey());
+        assertEquals("AI_PROVIDER", created.getExecutorType());
+        assertEquals("xiaomi-mimo-tts", created.getExecutorId());
+    }
+
     @Test
     void listsCurrentValidationRunsByTaskConfig() {
         TaskRunRepository repository = mock(TaskRunRepository.class);
@@ -39,12 +78,39 @@ class TaskRunServiceListTest {
                 mock(TaskRunResultRepository.class),
                 mock(TaskExecutionLogRepository.class),
                 mock(PythonWorkerClient.class),
-                mock(TaskRunPromptBuilder.class));
+                mock(TaskRunPromptBuilder.class),
+                new TaskExecutionTargetResolver());
 
         List<TaskRun> results = service.list(
                 null, null, 1L, null, null, TaskRecordType.VALIDATION_CURRENT);
 
         assertEquals(List.of(validationForTask), results);
+    }
+
+    @Test
+    void filtersLegacyTtsRunsByInferredProviderTarget() {
+        TaskRunRepository repository = mock(TaskRunRepository.class);
+        TaskRun legacyTts = taskRun(1L, TaskRecordType.FORMAL);
+        legacyTts.setSelectedTables("[\"public.word_clean_best_sentence\"]");
+        TaskRun scoring = taskRun(2L, TaskRecordType.FORMAL);
+        scoring.setSelectedTables("[\"public.word_clean_sentence\"]");
+        when(repository.findAllByOrderByCreatedAtDesc()).thenReturn(List.of(legacyTts, scoring));
+        TaskRunService service = service(
+                repository,
+                mock(TaskRunResultRepository.class),
+                mock(TaskExecutionLogRepository.class));
+
+        List<TaskRun> results = service.list(
+                null,
+                null,
+                null,
+                null,
+                "AI_PROVIDER",
+                "xiaomi-mimo-tts",
+                null,
+                TaskRecordType.FORMAL);
+
+        assertEquals(List.of(legacyTts), results);
     }
 
     @Test
@@ -69,6 +135,41 @@ class TaskRunServiceListTest {
         assertEquals(true, response.get("accepted"));
         assertEquals(1, response.get("queuedCount"));
         assertEquals("QUEUED", run.getStatus());
+        verify(repository).saveAll(List.of(run));
+    }
+
+    @Test
+    void queuesTtsRunWithoutCliSelectionAndKeepsExecutionTargetSnapshot() {
+        TaskRunRepository repository = mock(TaskRunRepository.class);
+        TaskRunResultRepository linkRepository = mock(TaskRunResultRepository.class);
+        TaskExecutionLogRepository executionRepository = mock(TaskExecutionLogRepository.class);
+        TaskRun run = taskRun(1L, TaskRecordType.FORMAL);
+        run.setId(6056L);
+        run.setHandlerKey("word_clean_best_sentence_tts");
+        run.setExecutorType("AI_PROVIDER");
+        run.setExecutorId("xiaomi-mimo-tts");
+        when(repository.findAllById(List.of(6056L))).thenReturn(List.of(run));
+        when(linkRepository.findByTaskRunIdInOrderByTaskRunIdAscIdAsc(List.of(6056L))).thenReturn(List.of());
+        when(executionRepository.countByTaskRunId(6056L)).thenReturn(0L);
+        TaskRunService service = service(repository, linkRepository, executionRepository);
+        StartTaskRunRequest request = new StartTaskRunRequest();
+        request.setTaskRunIds(List.of(6056L));
+        request.setExecutionMode("thread");
+        request.setWorkerCount(2);
+
+        Map<String, Object> response = service.startExecution(request);
+
+        assertEquals(true, response.get("accepted"));
+        assertEquals("AI_PROVIDER", run.getExecutorType());
+        assertEquals("xiaomi-mimo-tts", run.getExecutorId());
+        assertEquals("codex", run.getCliId());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<TaskExecutionLog>> executionCaptor = ArgumentCaptor.forClass(List.class);
+        verify(executionRepository).saveAll(executionCaptor.capture());
+        TaskExecutionLog execution = executionCaptor.getValue().get(0);
+        assertEquals("word_clean_best_sentence_tts", execution.getHandlerKey());
+        assertEquals("AI_PROVIDER", execution.getExecutorType());
+        assertEquals("xiaomi-mimo-tts", execution.getExecutorId());
         verify(repository).saveAll(List.of(run));
     }
 
@@ -125,7 +226,8 @@ class TaskRunServiceListTest {
                 linkRepository,
                 executionRepository,
                 mock(PythonWorkerClient.class),
-                mock(TaskRunPromptBuilder.class));
+                mock(TaskRunPromptBuilder.class),
+                new TaskExecutionTargetResolver());
     }
 
     private static TaskRun taskRun(Long taskConfigId, String recordType) {

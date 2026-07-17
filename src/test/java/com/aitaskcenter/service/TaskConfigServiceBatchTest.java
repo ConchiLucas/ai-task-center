@@ -1,6 +1,7 @@
 package com.aitaskcenter.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
@@ -41,7 +42,7 @@ class TaskConfigServiceBatchTest {
 
         assertEquals(1, response.get("createdRunCount"));
         assertEquals(1, response.get("linkedResultCount"));
-        assertEquals(TaskRecordType.VALIDATION_CURRENT, jdbcTemplate.insertArguments[14]);
+        assertEquals(TaskRecordType.VALIDATION_CURRENT, jdbcTemplate.insertArguments[17]);
         assertEquals(1, jdbcTemplate.linkRows.size());
         assertEquals(71L, jdbcTemplate.linkRows.get(0)[3]);
     }
@@ -84,6 +85,33 @@ class TaskConfigServiceBatchTest {
                 eq(1L), eq(TaskRecordType.FORMAL), any(Collection.class));
     }
 
+    @Test
+    void batchCopiesHandlerAndExecutionTargetSnapshot() {
+        TaskConfigRepository taskRepository = mock(TaskConfigRepository.class);
+        TaskResultRepository resultRepository = mock(TaskResultRepository.class);
+        CapturingJdbcTemplate jdbcTemplate = new CapturingJdbcTemplate();
+        TaskConfig task = task();
+        task.setHandlerKey("word_clean_best_sentence_tts");
+        task.setExecutorType("AI_PROVIDER");
+        task.setExecutorId("xiaomi-mimo-tts");
+        when(taskRepository.findById(1L)).thenReturn(Optional.of(task));
+        when(resultRepository.findByTaskConfigIdAndRecordTypeAndStatusInOrderByIdAsc(
+                eq(1L), eq(TaskRecordType.FORMAL), any(Collection.class)))
+                .thenReturn(List.of(ttsResult()));
+        TaskConfigService service = service(taskRepository, resultRepository, jdbcTemplate);
+        GenerateTaskRunBatchRequest request = request();
+        request.setCliId(null);
+
+        service.generateRunBatches(1L, request);
+
+        assertTrue(jdbcTemplate.insertSql.contains("handler_key"));
+        assertTrue(jdbcTemplate.insertSql.contains("executor_type"));
+        assertTrue(jdbcTemplate.insertSql.contains("executor_id"));
+        assertEquals("word_clean_best_sentence_tts", jdbcTemplate.insertArguments[5]);
+        assertEquals("AI_PROVIDER", jdbcTemplate.insertArguments[6]);
+        assertEquals("xiaomi-mimo-tts", jdbcTemplate.insertArguments[7]);
+    }
+
     private static TaskConfigService service(
             TaskConfigRepository taskRepository,
             TaskResultRepository resultRepository,
@@ -95,6 +123,8 @@ class TaskConfigServiceBatchTest {
                 resultRepository,
                 mock(PythonWorkerClient.class),
                 new TaskRunPromptBuilder(new ObjectMapper()),
+                new TaskExecutionTargetResolver(),
+                mock(AiConfigService.class),
                 jdbcTemplate);
     }
 
@@ -139,6 +169,7 @@ class TaskConfigServiceBatchTest {
     }
 
     private static final class CapturingJdbcTemplate extends JdbcTemplate {
+        private String insertSql;
         private Object[] insertArguments;
         private List<Object[]> linkRows = List.of();
 
@@ -149,6 +180,7 @@ class TaskConfigServiceBatchTest {
 
         @Override
         public <T> T queryForObject(String sql, Class<T> requiredType, Object... args) {
+            insertSql = sql;
             insertArguments = args;
             return requiredType.cast(99L);
         }

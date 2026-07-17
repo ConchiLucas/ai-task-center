@@ -133,7 +133,9 @@ class TtsBatchExecutionTest(unittest.TestCase):
             response = {
                 "itemKey": item_key,
                 "status": "SUCCESS",
-                "ttsResult": {"downloadUrl": f"http://word-agent/{item_key}.wav"},
+                "ttsResult": {
+                    "downloadUrl": f"http://127.0.0.1:19186/api/tts/files/{item_key}.wav"
+                },
             }
             return row, response
 
@@ -162,11 +164,11 @@ class TtsBatchExecutionTest(unittest.TestCase):
         task_run = run_snapshot(worker.RECORD_TYPE_VALIDATION_CURRENT)
         tts_result = {
             "fileName": "best-101.wav",
-            "downloadUrl": "http://word-agent/best-101.wav",
+            "downloadUrl": "http://127.0.0.1:19186/api/tts/files/best-101.wav",
         }
 
         with (
-            patch.object(worker, "post_word_agent_tts", return_value=tts_result),
+            patch.object(worker, "generate_mimo_tts", return_value=tts_result),
             patch.object(worker, "load_connection_config_snapshot") as load_connection,
             patch.object(worker, "backfill_word_clean_best_sentence_tts") as backfill,
         ):
@@ -196,7 +198,7 @@ class TtsBatchExecutionTest(unittest.TestCase):
         connection_context.__enter__.return_value = connection
         tts_result = {
             "fileName": "best-101.wav",
-            "downloadUrl": "http://127.0.0.1:8010/v1/tts/files/best-101.wav",
+            "downloadUrl": "http://127.0.0.1:19186/api/tts/files/best-101.wav",
             "model": "mimo-v2.5-tts",
             "voice": "Chloe",
             "format": "wav",
@@ -211,6 +213,7 @@ class TtsBatchExecutionTest(unittest.TestCase):
         self.assertIn("update public.word_clean_best_sentence", query)
         self.assertNotIn("word_clean_sentence_tts_job", query)
         self.assertIn("source_sentence_id", query)
+        self.assertEqual("xiaomi-mimo-tts", result["provider"])
         self.assertTrue(result["sourceGuardMatched"])
         self.assertEqual(101, result["bestSentenceId"])
         connection.commit.assert_called_once()

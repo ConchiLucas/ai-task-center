@@ -10,8 +10,11 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.aitaskcenter.dto.BatchProcessTaskResultRequest;
+import com.aitaskcenter.model.TaskConfig;
+import com.aitaskcenter.model.TaskExecutionLog;
 import com.aitaskcenter.model.TaskRecordType;
 import com.aitaskcenter.model.TaskResult;
+import com.aitaskcenter.model.TaskRun;
 import com.aitaskcenter.repository.ProjectConfigRepository;
 import com.aitaskcenter.repository.TaskConfigRepository;
 import com.aitaskcenter.repository.TaskExecutionLogRepository;
@@ -88,6 +91,97 @@ class TaskResultServiceListTest {
     }
 
     @Test
+    void allowsExecutingProviderValidationResultWithoutCliSelection() {
+        TaskResultRepository repository = mock(TaskResultRepository.class);
+        PythonWorkerClient pythonWorkerClient = mock(PythonWorkerClient.class);
+        TaskResult validationResult = result(7L, TaskRecordType.VALIDATION_CURRENT, "PENDING");
+        validationResult.setHandlerKey("word_clean_best_sentence_tts");
+        validationResult.setExecutorType("AI_PROVIDER");
+        validationResult.setExecutorId("xiaomi-mimo-tts");
+        when(repository.findById(7L)).thenReturn(Optional.of(validationResult));
+        when(pythonWorkerClient.processTaskResult(7L, ""))
+                .thenReturn(Map.of("accepted", true));
+
+        Map<String, Object> response = service(repository, pythonWorkerClient, mock(TaskRunResultRepository.class))
+                .process(7L, null);
+
+        assertEquals(true, response.get("accepted"));
+        verify(pythonWorkerClient).processTaskResult(7L, "");
+    }
+
+    @Test
+    void legacyValidationResultFallsBackToTaskConfigTarget() {
+        TaskResultRepository repository = mock(TaskResultRepository.class);
+        TaskConfigRepository taskConfigRepository = mock(TaskConfigRepository.class);
+        PythonWorkerClient pythonWorkerClient = mock(PythonWorkerClient.class);
+        TaskResult validationResult = result(7L, TaskRecordType.VALIDATION_CURRENT, "PENDING");
+        validationResult.setTaskConfigId(1L);
+        TaskConfig config = new TaskConfig();
+        config.setId(1L);
+        config.setCliId("codex");
+        config.setHandlerKey("word_clean_best_sentence_tts");
+        config.setExecutorType("AI_PROVIDER");
+        config.setExecutorId("xiaomi-mimo-tts");
+        when(repository.findById(7L)).thenReturn(Optional.of(validationResult));
+        when(taskConfigRepository.findById(1L)).thenReturn(Optional.of(config));
+        when(pythonWorkerClient.processTaskResult(7L, "")).thenReturn(Map.of("accepted", true));
+        TaskResultService service = new TaskResultService(
+                repository,
+                mock(ProjectConfigRepository.class),
+                mock(TaskRunResultRepository.class),
+                mock(TaskRunRepository.class),
+                taskConfigRepository,
+                mock(TaskExecutionLogRepository.class),
+                pythonWorkerClient,
+                mock(TaskRunPromptBuilder.class),
+                new TaskExecutionTargetResolver());
+
+        service.process(7L, null);
+
+        verify(pythonWorkerClient).processTaskResult(7L, "");
+    }
+
+    @Test
+    void queuesFormalProviderResultInsteadOfCallingValidationEndpoint() {
+        TaskResultRepository repository = mock(TaskResultRepository.class);
+        PythonWorkerClient pythonWorkerClient = mock(PythonWorkerClient.class);
+        TaskRunRepository taskRunRepository = mock(TaskRunRepository.class);
+        TaskRunResultRepository taskRunResultRepository = mock(TaskRunResultRepository.class);
+        TaskResult formalResult = result(7L, TaskRecordType.FORMAL, "PENDING");
+        formalResult.setTaskConfigId(1L);
+        formalResult.setProjectId(2L);
+        formalResult.setDatabaseConfigId(3L);
+        formalResult.setSourceTables("public.word_clean_best_sentence");
+        formalResult.setHandlerKey("word_clean_best_sentence_tts");
+        formalResult.setExecutorType("AI_PROVIDER");
+        formalResult.setExecutorId("xiaomi-mimo-tts");
+        when(repository.findById(7L)).thenReturn(Optional.of(formalResult));
+        when(taskRunResultRepository.findByTaskResultIdInOrderByIdDesc(List.of(7L))).thenReturn(List.of());
+        when(taskRunRepository.saveAll(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<TaskRun> runs = (List<TaskRun>) invocation.getArgument(0);
+            runs.get(0).setId(99L);
+            return runs;
+        });
+        TaskResultService service = new TaskResultService(
+                repository,
+                mock(ProjectConfigRepository.class),
+                taskRunResultRepository,
+                taskRunRepository,
+                mock(TaskConfigRepository.class),
+                mock(TaskExecutionLogRepository.class),
+                pythonWorkerClient,
+                mock(TaskRunPromptBuilder.class),
+                new TaskExecutionTargetResolver());
+
+        Map<String, Object> response = service.process(7L, null);
+
+        assertEquals("postgres-queue", response.get("mode"));
+        assertEquals(1, response.get("queuedResultCount"));
+        verify(pythonWorkerClient, never()).processTaskResult(any(), any());
+    }
+
+    @Test
     void rejectsExecutingHistoricalValidationResult() {
         TaskResultRepository repository = mock(TaskResultRepository.class);
         PythonWorkerClient pythonWorkerClient = mock(PythonWorkerClient.class);
@@ -128,6 +222,88 @@ class TaskResultServiceListTest {
     }
 
     @Test
+    void executesProviderValidationBatchWithoutCliSelection() {
+        TaskResultRepository repository = mock(TaskResultRepository.class);
+        PythonWorkerClient pythonWorkerClient = mock(PythonWorkerClient.class);
+        TaskRunResultRepository taskRunResultRepository = mock(TaskRunResultRepository.class);
+        TaskResult first = result(7L, TaskRecordType.VALIDATION_CURRENT, "PENDING");
+        TaskResult second = result(8L, TaskRecordType.VALIDATION_CURRENT, "FAILED");
+        for (TaskResult result : List.of(first, second)) {
+            result.setHandlerKey("word_clean_best_sentence_tts");
+            result.setExecutorType("AI_PROVIDER");
+            result.setExecutorId("xiaomi-mimo-tts");
+        }
+        when(repository.findAllById(List.of(7L, 8L))).thenReturn(List.of(first, second));
+        when(taskRunResultRepository.findByTaskResultIdInOrderByIdDesc(List.of(7L, 8L)))
+                .thenReturn(List.of());
+        when(pythonWorkerClient.processTaskResults(List.of(7L, 8L), "", 2))
+                .thenReturn(Map.of("mode", "validation-direct-batch"));
+        BatchProcessTaskResultRequest request = new BatchProcessTaskResultRequest();
+        request.setTaskResultIds(List.of(7L, 8L));
+        request.setWorkerCount(2);
+
+        Map<String, Object> response = service(repository, pythonWorkerClient, taskRunResultRepository)
+                .processBatch(request);
+
+        assertEquals("validation-direct-batch", response.get("mode"));
+        verify(pythonWorkerClient).processTaskResults(List.of(7L, 8L), "", 2);
+    }
+
+    @Test
+    void snapshotsProviderTargetWhenFormalResultsEnterQueue() {
+        TaskResultRepository repository = mock(TaskResultRepository.class);
+        TaskRunRepository taskRunRepository = mock(TaskRunRepository.class);
+        TaskExecutionLogRepository executionLogRepository = mock(TaskExecutionLogRepository.class);
+        TaskResult providerResult = result(7L, TaskRecordType.FORMAL, "PENDING");
+        providerResult.setTaskConfigId(1L);
+        providerResult.setProjectId(2L);
+        providerResult.setDatabaseConfigId(3L);
+        providerResult.setSourceTables("public.word_clean_best_sentence");
+        providerResult.setHandlerKey("word_clean_best_sentence_tts");
+        providerResult.setExecutorType("AI_PROVIDER");
+        providerResult.setExecutorId("xiaomi-mimo-tts");
+        when(repository.findAllById(List.of(7L))).thenReturn(List.of(providerResult));
+        when(taskRunRepository.saveAll(any())).thenAnswer(invocation -> {
+            @SuppressWarnings("unchecked")
+            List<TaskRun> runs = (List<TaskRun>) invocation.getArgument(0);
+            runs.get(0).setId(99L);
+            return runs;
+        });
+        BatchProcessTaskResultRequest request = new BatchProcessTaskResultRequest();
+        request.setTaskResultIds(List.of(7L));
+        request.setWorkerCount(1);
+        TaskResultService service = new TaskResultService(
+                repository,
+                mock(ProjectConfigRepository.class),
+                mock(TaskRunResultRepository.class),
+                taskRunRepository,
+                mock(TaskConfigRepository.class),
+                executionLogRepository,
+                mock(PythonWorkerClient.class),
+                mock(TaskRunPromptBuilder.class),
+                new TaskExecutionTargetResolver());
+
+        Map<String, Object> response = service.processBatch(request);
+
+        assertEquals("postgres-queue", response.get("mode"));
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<TaskRun>> runCaptor = ArgumentCaptor.forClass(List.class);
+        verify(taskRunRepository).saveAll(runCaptor.capture());
+        TaskRun run = runCaptor.getValue().get(0);
+        assertEquals("word_clean_best_sentence_tts", run.getHandlerKey());
+        assertEquals("AI_PROVIDER", run.getExecutorType());
+        assertEquals("xiaomi-mimo-tts", run.getExecutorId());
+        assertEquals("", run.getCliId());
+        @SuppressWarnings("unchecked")
+        ArgumentCaptor<List<TaskExecutionLog>> logCaptor = ArgumentCaptor.forClass(List.class);
+        verify(executionLogRepository).saveAll(logCaptor.capture());
+        TaskExecutionLog log = logCaptor.getValue().get(0);
+        assertEquals(run.getHandlerKey(), log.getHandlerKey());
+        assertEquals(run.getExecutorType(), log.getExecutorType());
+        assertEquals(run.getExecutorId(), log.getExecutorId());
+    }
+
+    @Test
     void allowsDeletingCurrentValidationButProtectsHistory() {
         TaskResultRepository repository = mock(TaskResultRepository.class);
         TaskResult current = result(7L, TaskRecordType.VALIDATION_CURRENT, "PENDING");
@@ -160,7 +336,8 @@ class TaskResultServiceListTest {
                 mock(TaskConfigRepository.class),
                 mock(TaskExecutionLogRepository.class),
                 pythonWorkerClient,
-                mock(TaskRunPromptBuilder.class));
+                mock(TaskRunPromptBuilder.class),
+                new TaskExecutionTargetResolver());
     }
 
     private static TaskResult result(Long id, String recordType, String status) {

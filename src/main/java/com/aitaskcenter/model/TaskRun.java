@@ -31,6 +31,15 @@ public class TaskRun extends BaseEntity {
     // 字段：执行 CLI 配置 ID
     private String cliId;
 
+    @Column(length = 100)
+    private String handlerKey;
+
+    @Column(length = 30)
+    private String executorType;
+
+    @Column(length = 128)
+    private String executorId;
+
     // 字段：执行使用的数据库配置 ID
     private Long databaseConfigId;
 
@@ -147,6 +156,30 @@ public class TaskRun extends BaseEntity {
     // 方法：setCliId
     public void setCliId(String cliId) {
         this.cliId = cliId;
+    }
+
+    public String getHandlerKey() {
+        return handlerKey;
+    }
+
+    public void setHandlerKey(String handlerKey) {
+        this.handlerKey = handlerKey;
+    }
+
+    public String getExecutorType() {
+        return executorType;
+    }
+
+    public void setExecutorType(String executorType) {
+        this.executorType = executorType;
+    }
+
+    public String getExecutorId() {
+        return executorId;
+    }
+
+    public void setExecutorId(String executorId) {
+        this.executorId = executorId;
     }
 
     // 方法：getDatabaseConfigId

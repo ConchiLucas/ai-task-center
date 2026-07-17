@@ -40,11 +40,15 @@ export interface ConnectionConfig {
 export interface AIProviderConfigItem {
   id: string;
   label: string;
-  type: 'openai-compatible' | 'anthropic-compatible';
+  type: 'openai-compatible' | 'anthropic-compatible' | 'mimo-tts';
   base_url: string;
   api_key: string;
   model: string;
   max_tokens: number;
+  voice?: string;
+  capabilities?: string[];
+  options?: Record<string, unknown>;
+  enabled?: boolean;
   active?: boolean;
 }
 
@@ -59,6 +63,7 @@ export interface LocalCliConfigItem {
   label: string;
   command: string;
   defaultArgs: string[];
+  capabilities?: string[];
   model?: string;
   reasoningEffort?: string;
   workingDirectory: string;
@@ -76,6 +81,10 @@ export interface TaskConfig {
   taskName: string;
   projectId: number;
   cliId: string;
+  onboardingCliId?: string;
+  handlerKey?: string;
+  executorType?: ExecutorType;
+  executorId?: string;
   databaseConfigId?: number | null;
   selectedTables?: string;
   taskDesc?: string;
@@ -147,6 +156,17 @@ export type TaskRunStatus = 'PENDING' | 'QUEUED' | 'RUNNING' | 'RETRY_WAIT' | 'S
 export type TaskResultStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED';
 export type TaskRecordType = 'VALIDATION_CURRENT' | 'VALIDATION_HISTORY' | 'FORMAL';
 export type TaskRecordTypeFilter = TaskRecordType | 'ALL';
+export type ExecutorType = 'CLI' | 'AI_PROVIDER';
+export type HandlerKey = 'word_clean_sentence_score' | 'word_clean_best_sentence_tts';
+
+export interface ExecutionTargetItem {
+  type: ExecutorType;
+  id: string;
+  label: string;
+  protocol: string;
+  capabilities: string[];
+  enabled: boolean;
+}
 
 export interface TaskRun {
   ID?: number;
@@ -154,6 +174,9 @@ export interface TaskRun {
   taskConfigId?: number;
   projectId: number;
   cliId: string;
+  handlerKey?: string;
+  executorType?: ExecutorType;
+  executorId?: string;
   databaseConfigId?: number | null;
   selectedTables?: string;
   status: TaskRunStatus;
@@ -193,6 +216,9 @@ export interface TaskResult {
   taskConfigId?: number;
   projectId: number;
   cliId?: string;
+  handlerKey?: string;
+  executorType?: ExecutorType;
+  executorId?: string;
   databaseConfigId?: number | null;
   sourceTables?: string;
   sourceDescription?: string;
@@ -223,6 +249,10 @@ export interface TaskExecutionLog {
   taskRunId: number;
   attemptNo: number;
   cliId: string;
+  handlerKey?: string;
+  executorType?: ExecutorType;
+  executorId?: string;
+  executorLabel?: string;
   executionMode: string;
   workerCount: number;
   status: TaskRunStatus;
@@ -366,6 +396,11 @@ export async function getLocalCliConfig() {
   return res.data.data;
 }
 
+export async function getExecutionTargets() {
+  const res = await request.get<ApiResponse<ExecutionTargetItem[]>>('/ai/execution-targets');
+  return res.data.data || [];
+}
+
 // 函数：saveLocalCliConfig
 export async function saveLocalCliConfig(data: LocalCliConfig) {
   const res = await request.post<ApiResponse<LocalCliConfig>>('/ai/cli/config', data);
@@ -476,6 +511,8 @@ export async function getTaskRuns(params?: {
   projectId?: number;
   taskConfigId?: number;
   cliId?: string;
+  executorType?: ExecutorType;
+  executorId?: string;
   status?: string;
   recordType?: TaskRecordTypeFilter;
 }) {
@@ -492,7 +529,7 @@ export async function createTaskRun(data: { taskConfigId: number; taskName?: str
 // 函数：startTaskRuns
 export async function startTaskRuns(data: {
   taskRunIds: number[];
-  cliId: string;
+  cliId?: string;
   executionMode: string;
   workerCount: number;
 }) {
@@ -565,7 +602,7 @@ export async function processTaskResult(id: number, cliId?: string) {
 // 函数：batchProcessTaskResults
 export async function batchProcessTaskResults(data: {
   taskResultIds: number[];
-  cliId: string;
+  cliId?: string;
   workerCount: number;
 }) {
   const res = await request.post<ApiResponse<Record<string, unknown>>>('/task-result/batch-process', data);

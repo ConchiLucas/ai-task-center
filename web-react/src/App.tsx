@@ -35,12 +35,16 @@ import {
   Switch,
   Table,
   Tag,
+  Tooltip,
   Typography,
 } from 'antd';
 import { useEffect, useMemo, useState } from 'react';
 import {
   AIProviderConfigItem,
   ConnectionConfig,
+  ExecutorType,
+  ExecutionTargetItem,
+  HandlerKey,
   LocalCliConfig,
   LocalCliConfigItem,
   ProjectConfig,
@@ -67,6 +71,7 @@ import {
   deleteTaskRun,
   getAIConfig,
   getConnections,
+  getExecutionTargets,
   getLocalCliConfig,
   getProjects,
   getTaskResult,
@@ -135,6 +140,11 @@ const taskRecordTypeOptions: { value: TaskRecordTypeFilter; label: string }[] = 
   { value: 'VALIDATION_CURRENT', label: '当前验证数据' },
   { value: 'VALIDATION_HISTORY', label: '历史验证数据' },
   { value: 'ALL', label: '全部数据' },
+];
+
+const taskHandlerOptions: { value: HandlerKey; label: string; capability: string }[] = [
+  { value: 'word_clean_sentence_score', label: '单词例句评分', capability: 'TEXT_GENERATION' },
+  { value: 'word_clean_best_sentence_tts', label: '最佳例句 TTS', capability: 'AUDIO_TTS' },
 ];
 
 const tablePageSizeOptions = ['10', '20', '50', '100', '200', '500'];
@@ -214,8 +224,10 @@ export default function App() {
 
   const [taskLoading, setTaskLoading] = useState(false);
   const [tasks, setTasks] = useState<TaskConfig[]>([]);
+  const [executionTargets, setExecutionTargets] = useState<ExecutionTargetItem[]>([]);
   const [taskModalOpen, setTaskModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<TaskConfig | null>(null);
+  const [selectedTaskHandlerKey, setSelectedTaskHandlerKey] = useState<HandlerKey>('word_clean_sentence_score');
   const [taskConnections, setTaskConnections] = useState<ConnectionConfig[]>([]);
   const [taskForm] = Form.useForm();
   const [taskSearchForm] = Form.useForm();
@@ -230,7 +242,7 @@ export default function App() {
   const [taskFilters, setTaskFilters] = useState<{
     taskName?: string;
     projectId?: number;
-    cliId?: string;
+    executorId?: string;
   }>({});
 
   const [taskRunLoading, setTaskRunLoading] = useState(false);
@@ -315,12 +327,33 @@ export default function App() {
     () => new Map(cliConfigs.map((config) => [config.id, config.label || config.id])),
     [cliConfigs],
   );
+  const executionTargetMap = useMemo(
+    () => new Map(executionTargets.map((target) => [executionTargetKey(target.type, target.id), target.label || target.id])),
+    [executionTargets],
+  );
+  const renderExecutionTarget = (record: TaskConfig | TaskRun | TaskResult | TaskExecutionLog) => {
+    const execution = resolveExecutionSnapshot(record);
+    const label = executionTargetMap.get(executionTargetKey(execution.executorType, execution.executorId))
+      || ('executorLabel' in record ? record.executorLabel : '')
+      || execution.executorId
+      || '未配置';
+    return <Tag color={execution.executorType === 'CLI' ? 'blue' : 'purple'}>{label}</Tag>;
+  };
+  const taskExecutionTargetOptions = useMemo(() => {
+    const capability = taskHandlerOptions.find((item) => item.value === selectedTaskHandlerKey)?.capability;
+    return executionTargets
+      .filter((target) => target.enabled && (!capability || target.capabilities.includes(capability)))
+      .map((target) => ({
+        value: executionTargetKey(target.type, target.id),
+        label: `${target.label || target.id} / ${target.type === 'CLI' ? 'CLI' : 'AI API'}`,
+      }));
+  }, [executionTargets, selectedTaskHandlerKey]);
   const filteredTasks = useMemo(
     () => tasks.filter((task) => {
       const keyword = (taskFilters.taskName || '').trim().toLowerCase();
       if (keyword && !task.taskName.toLowerCase().includes(keyword)) return false;
       if (taskFilters.projectId && task.projectId !== taskFilters.projectId) return false;
-      if (taskFilters.cliId && task.cliId !== taskFilters.cliId) return false;
+      if (taskFilters.executorId && resolveExecutionSnapshot(task).executorId !== taskFilters.executorId) return false;
       return true;
     }),
     [taskFilters, tasks],
@@ -353,7 +386,7 @@ export default function App() {
   useEffect(() => {
     if (activeModule !== 'taskRun' || !hasActiveTaskRuns) return undefined;
     const timer = window.setInterval(() => {
-      void getTaskRuns(taskRunSearchForm.getFieldsValue())
+      void getTaskRuns(toTaskRunApiFilters(taskRunSearchForm.getFieldsValue()))
         .then((runList) => {
           setTaskRuns(runList);
           setSelectedTaskRunIds((current) => current.filter((id) => runList.some((run) => run.ID === id)));
@@ -688,7 +721,7 @@ export default function App() {
           id: provider.id.trim(),
           label: provider.label.trim(),
           base_url: provider.base_url.trim(),
-          api_key: provider.api_key.trim(),
+          api_key: String(provider.api_key || '').trim(),
           model: provider.model.trim(),
           max_tokens: Number(provider.max_tokens) || 4096,
         })),
@@ -805,16 +838,18 @@ export default function App() {
   const loadTaskPageData = async () => {
     setTaskLoading(true);
     try {
-      const [taskList, connectionData, cliConfig, projectList] = await Promise.all([
+      const [taskList, connectionData, cliConfig, projectList, targetList] = await Promise.all([
         getTaskConfigs(),
         getConnections({}),
         getLocalCliConfig(),
         getProjects(),
+        getExecutionTargets(),
       ]);
       setTasks(taskList);
       setSelectedTaskId((current) => (current && taskList.some((task) => task.ID === current) ? current : null));
       setTaskConnections(connectionData.list || []);
       setProjects(projectList);
+      setExecutionTargets(targetList);
       const nextConfigs = cliConfig.configs || [];
       const nextActive = cliConfig.active || nextConfigs.find((item) => item.active)?.id || nextConfigs[0]?.id || '';
       setCliConfigs(nextConfigs);
@@ -829,11 +864,19 @@ export default function App() {
 
   // 函数：openTaskModal
   const openTaskModal = (task?: TaskConfig) => {
+    const execution = task ? resolveExecutionSnapshot(task) : {
+      handlerKey: 'word_clean_sentence_score' as HandlerKey,
+      executorType: 'CLI' as const,
+      executorId: activeCliId || cliConfigs[0]?.id || '',
+    };
+    setSelectedTaskHandlerKey(execution.handlerKey);
     setEditingTask(task || null);
     taskForm.setFieldsValue({
       taskName: task?.taskName || '',
       projectId: task?.projectId || activeProjectId || projects[0]?.ID,
-      cliId: task?.cliId || activeCliId || cliConfigs[0]?.id,
+      onboardingCliId: task?.onboardingCliId || task?.cliId || activeCliId || cliConfigs[0]?.id,
+      handlerKey: execution.handlerKey,
+      executorTarget: executionTargetKey(execution.executorType, execution.executorId),
       databaseConfigId: task?.databaseConfigId || undefined,
       taskDesc: task?.taskDesc || '',
     });
@@ -844,11 +887,21 @@ export default function App() {
   const saveTask = async () => {
     const values = await taskForm.validateFields();
     try {
+      const executorTarget = String(values.executorTarget || '');
+      const separatorIndex = executorTarget.indexOf(':');
+      const executorType = executorTarget.slice(0, separatorIndex) as ExecutorType;
+      const executorId = executorTarget.slice(separatorIndex + 1);
       const payload = {
         ...values,
+        cliId: values.onboardingCliId,
+        onboardingCliId: values.onboardingCliId,
+        handlerKey: values.handlerKey,
+        executorType,
+        executorId,
         databaseConfigId: values.databaseConfigId || null,
         selectedTables: editingTask?.selectedTables || '',
       };
+      delete payload.executorTarget;
       if (editingTask?.ID) {
         await updateTaskConfig({ ...payload, ID: editingTask.ID });
         message.success('任务配置更新成功');
@@ -928,23 +981,25 @@ export default function App() {
     taskName?: string;
     projectId?: number;
     taskConfigId?: number;
-    cliId?: string;
+    executorTarget?: string;
     status?: string;
     recordType?: TaskRecordTypeFilter;
   }) => {
     setTaskRunLoading(true);
     try {
-      const [runList, taskList, connectionData, cliConfig, projectList] = await Promise.all([
-        getTaskRuns(filters),
+      const [runList, taskList, connectionData, cliConfig, projectList, targetList] = await Promise.all([
+        getTaskRuns(toTaskRunApiFilters(filters)),
         getTaskConfigs(),
         getConnections({}),
         getLocalCliConfig(),
         getProjects(),
+        getExecutionTargets(),
       ]);
       setTaskRuns(runList);
       setTasks(taskList);
       setTaskConnections(connectionData.list || []);
       setProjects(projectList);
+      setExecutionTargets(targetList);
       const nextConfigs = cliConfig.configs || [];
       setCliConfigs(nextConfigs);
       setSelectedTaskRunIds((current) => current.filter((id) => runList.some((run) => run.ID === id)));
@@ -980,7 +1035,6 @@ export default function App() {
       .filter((run) => run.ID && startableTaskRunIds.includes(run.ID))
       .reduce((maximum, run) => Math.max(maximum, Number(run.requestedWorkerCount) || 0), 0);
     taskRunStartForm.setFieldsValue({
-      cliId: activeCliId || cliConfigs[0]?.id,
       executionMode: 'thread',
       workerCount: currentWorkerCount || 1,
     });
@@ -992,7 +1046,6 @@ export default function App() {
     if (!run.ID) return;
     setSelectedTaskRunIds([run.ID]);
     taskRunStartForm.setFieldsValue({
-      cliId: run.cliId || activeCliId || cliConfigs[0]?.id,
       executionMode: 'thread',
       workerCount: Number(run.requestedWorkerCount) || 1,
     });
@@ -1023,7 +1076,6 @@ export default function App() {
     try {
       const response = await startTaskRuns({
         taskRunIds: startableTaskRunIds,
-        cliId: values.cliId,
         executionMode: values.executionMode,
         workerCount: Number(values.workerCount) || 1,
       });
@@ -1143,13 +1195,14 @@ export default function App() {
   }, page = taskResultCurrentPage, pageSize = taskResultTablePageSize) => {
     setTaskResultLoading(true);
     try {
-      const [resultList, runList, taskList, connectionData, cliConfig, projectList] = await Promise.all([
+      const [resultList, runList, taskList, connectionData, cliConfig, projectList, targetList] = await Promise.all([
         getTaskResults({ ...filters, page, pageSize }),
         getTaskRuns(),
         getTaskConfigs(),
         getConnections({}),
         getLocalCliConfig(),
         getProjects(),
+        getExecutionTargets(),
       ]);
       setTaskResults(resultList.list);
       setTaskResultCurrentPage(resultList.page);
@@ -1159,6 +1212,7 @@ export default function App() {
       setTasks(taskList);
       setTaskConnections(connectionData.list || []);
       setProjects(projectList);
+      setExecutionTargets(targetList);
       setCliConfigs(cliConfig.configs || []);
       setSelectedTaskResultIds((current) => current.filter((id) => resultList.list.some((result) => result.ID === id)));
     } catch (error) {
@@ -1184,18 +1238,25 @@ export default function App() {
   const processResult = (result: TaskResult) => {
     if (!result.ID) return;
     const resultId = result.ID;
+    const execution = resolveExecutionSnapshot(result);
+    const executionLabel = executionTargetMap.get(executionTargetKey(execution.executorType, execution.executorId))
+      || execution.executorId;
     modal.confirm({
       title: result.recordType === 'VALIDATION_CURRENT' ? '执行验证结果' : '执行任务结果',
       content: result.recordType === 'VALIDATION_CURRENT'
         ? `将处理验证结果「${result.resultName}」。执行输出只保存到验证结果，不回填来源业务表。`
-        : `将调用「${result.cliId || '未配置 CLI'}」处理「${result.resultName}」。`,
+        : `将通过「${executionLabel || '未配置调用通道'}」处理「${result.resultName}」。`,
       okText: '执行',
       cancelText: '取消',
       async onOk() {
         setProcessingResultId(resultId);
         try {
-          const response = await processTaskResult(resultId, result.cliId);
-          const summary = typeof response?.summary === 'string' ? response.summary : '任务结果处理完成';
+          const response = await processTaskResult(resultId);
+          const summary = typeof response?.summary === 'string'
+            ? response.summary
+            : result.recordType === 'VALIDATION_CURRENT'
+              ? '验证结果处理完成'
+              : '任务结果已进入异步执行队列';
           message.success(summary);
           await loadTaskResultPageData(taskResultSearchForm.getFieldsValue());
           if (currentResult?.ID === resultId) {
@@ -1219,7 +1280,7 @@ export default function App() {
       return;
     }
     taskResultBatchForm.setFieldsValue({
-      cliId: activeCliId || cliConfigs[0]?.id,
+      cliId: undefined,
       workerCount: 4,
     });
     setTaskResultBatchOpen(true);
@@ -1232,7 +1293,7 @@ export default function App() {
     try {
       const response = await batchProcessTaskResults({
         taskResultIds: selectedTaskResultIds,
-        cliId: values.cliId,
+        cliId: values.cliId || undefined,
         workerCount: Number(values.workerCount) || 4,
       });
       const queuedResultCount = Number(response?.queuedResultCount || 0);
@@ -1471,6 +1532,7 @@ export default function App() {
                             options={[
                               { value: 'openai-compatible', label: 'openai-compatible' },
                               { value: 'anthropic-compatible', label: 'anthropic-compatible' },
+                              { value: 'mimo-tts', label: 'mimo-tts' },
                             ]}
                           />
                         </Form.Item>
@@ -1642,13 +1704,13 @@ export default function App() {
               options={projects.map((project) => ({ value: project.ID, label: project.projectName }))}
             />
           </Form.Item>
-          <Form.Item label="执行工具" name="cliId">
+          <Form.Item label="调用通道" name="executorId">
             <Select
               allowClear
               showSearch
-              placeholder="请选择 CLI"
+              placeholder="请选择 CLI 或 AI API"
               optionFilterProp="label"
-              options={cliConfigs.map((config) => ({ value: config.id, label: config.label || config.id }))}
+              options={executionTargets.map((target) => ({ value: target.id, label: target.label || target.id }))}
             />
           </Form.Item>
           <Form.Item className="task-search-actions">
@@ -1715,10 +1777,10 @@ export default function App() {
               render: (value: number) => projectMap.get(value) || <Text type="secondary">未找到项目</Text>,
             },
             {
-              title: '默认执行工具',
-              dataIndex: 'cliId',
+              title: '调用通道',
+              key: 'executionTarget',
               width: 180,
-              render: (value: string) => <Tag color="blue">{cliMap.get(value) || value}</Tag>,
+              render: (_, record) => renderExecutionTarget(record),
             },
             {
               title: '关联数据库',
@@ -1804,8 +1866,8 @@ export default function App() {
 
       <div className="task-run-log-summary">
         <div className="task-run-log-summary-item">
-          <Text type="secondary">执行工具</Text>
-          <Text strong>{currentLogRun ? cliMap.get(currentLogRun.cliId) || currentLogRun.cliId : '-'}</Text>
+          <Text type="secondary">调用通道</Text>
+          {currentLogRun ? renderExecutionTarget(currentLogRun) : <Text strong>-</Text>}
         </div>
         <div className="task-run-log-summary-item">
           <Text type="secondary">执行次数</Text>
@@ -1821,7 +1883,9 @@ export default function App() {
         </div>
         <div className="task-run-log-summary-item task-run-log-summary-wide">
           <Text type="secondary">最近结果</Text>
-          <Text strong>{currentLogRun?.reason || '暂无'}</Text>
+          <Tooltip title={currentLogRun?.reason || '暂无'}>
+            <Text strong>{currentLogRun?.reason || '暂无'}</Text>
+          </Tooltip>
         </div>
       </div>
 
@@ -1959,14 +2023,16 @@ export default function App() {
                         title: '本次结果',
                         width: 280,
                         ellipsis: true,
-                        render: (_, detail) => detail.summary || <Text type="secondary">暂无</Text>,
+                        render: (_, detail) => detail.summary
+                          ? <Tooltip title={detail.summary}><Text>{detail.summary}</Text></Tooltip>
+                          : <Text type="secondary">暂无</Text>,
                       },
                       {
                         title: '本次错误',
                         width: 300,
                         ellipsis: true,
                         render: (_, detail) => detail.errorMessage
-                          ? <Text type="danger">{detail.errorMessage}</Text>
+                          ? <Tooltip title={detail.errorMessage}><Text type="danger">{detail.errorMessage}</Text></Tooltip>
                           : <Text type="secondary">无</Text>,
                       },
                     ]}
@@ -1991,10 +2057,17 @@ export default function App() {
             render: (value: TaskRunStatus) => renderTaskRunStatus(value),
           },
           {
-            title: '执行工具',
-            dataIndex: 'cliId',
+            title: '调用通道',
+            key: 'executionTarget',
             width: 150,
-            render: (value: string) => <Tag color="blue">{cliMap.get(value) || value || '-'}</Tag>,
+            render: (_, execution) => renderExecutionTarget({
+              ...currentLogRun,
+              ...execution,
+              handlerKey: execution.handlerKey || currentLogRun?.handlerKey,
+              executorType: execution.executorType || currentLogRun?.executorType,
+              executorId: execution.executorId || currentLogRun?.executorId,
+              selectedTables: currentLogRun?.selectedTables,
+            } as TaskExecutionLog),
           },
           {
             title: '执行模式',
@@ -2031,7 +2104,9 @@ export default function App() {
             dataIndex: 'reason',
             width: 260,
             ellipsis: true,
-            render: (value?: string) => value || <Text type="secondary">暂无</Text>,
+            render: (value?: string) => value
+              ? <Tooltip title={value}><Text>{value}</Text></Tooltip>
+              : <Text type="secondary">暂无</Text>,
           },
         ]}
         scroll={{ x: 1340 }}
@@ -2071,13 +2146,16 @@ export default function App() {
               options={tasks.map((task) => ({ value: task.ID, label: task.taskName }))}
             />
           </Form.Item>
-          <Form.Item label="执行工具" name="cliId">
+          <Form.Item label="调用通道" name="executorTarget">
             <Select
               allowClear
               showSearch
-              placeholder="请选择 CLI"
+              placeholder="请选择调用通道"
               optionFilterProp="label"
-              options={cliConfigs.map((config) => ({ value: config.id, label: config.label || config.id }))}
+              options={executionTargets.map((target) => ({
+                value: executionTargetKey(target.type, target.id),
+                label: target.label || target.id,
+              }))}
             />
           </Form.Item>
           <Form.Item label="数据类型" name="recordType">
@@ -2190,10 +2268,10 @@ export default function App() {
               render: (value: number) => projectMap.get(value) || <Text type="secondary">未找到项目</Text>,
             },
             {
-              title: '执行工具',
-              dataIndex: 'cliId',
+              title: '调用通道',
+              key: 'executionTarget',
               width: 160,
-              render: (value: string) => <Tag color="blue">{cliMap.get(value) || value}</Tag>,
+              render: (_, record) => renderExecutionTarget(record),
             },
             {
               title: '数据源',
@@ -2447,6 +2525,12 @@ export default function App() {
                 const tables = parseSelectedTables(value);
                 return tables.length > 0 ? <Tag color="purple">{tables.length} 张表</Tag> : <Text type="secondary">无</Text>;
               },
+            },
+            {
+              title: '调用通道',
+              key: 'executionTarget',
+              width: 170,
+              render: (_, record) => renderExecutionTarget(record),
             },
             {
               title: '状态',
@@ -2753,16 +2837,45 @@ export default function App() {
               </Form.Item>
             </Col>
             <Col xs={24} md={12}>
-              <Form.Item label="默认执行工具" name="cliId" rules={[{ required: true, message: '请选择默认执行工具' }]}>
+              <Form.Item label="任务处理器" name="handlerKey" rules={[{ required: true, message: '请选择任务处理器' }]}>
                 <Select
                   showSearch
-                  placeholder="选择 CLI"
+                  placeholder="选择任务要完成的业务处理"
                   optionFilterProp="label"
-                  options={cliConfigs.map((config) => ({ value: config.id, label: config.label || config.id }))}
+                  options={taskHandlerOptions}
+                  onChange={(value: HandlerKey) => {
+                    setSelectedTaskHandlerKey(value);
+                    taskForm.setFieldValue('executorTarget', undefined);
+                  }}
                 />
               </Form.Item>
             </Col>
           </Row>
+          <Row gutter={16}>
+            <Col xs={24} md={12}>
+              <Form.Item label="运行调用通道" name="executorTarget" rules={[{ required: true, message: '请选择运行调用通道' }]}>
+                <Select
+                  showSearch
+                  placeholder="选择 CLI 或 AI API"
+                  optionFilterProp="label"
+                  options={taskExecutionTargetOptions}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="接入代码 CLI" name="onboardingCliId" rules={[{ required: true, message: '请选择接入代码 CLI' }]}>
+                <Select
+                  showSearch
+                  placeholder="仅用于生成和验证任务接入代码"
+                  optionFilterProp="label"
+                  options={cliConfigs.filter((config) => config.enabled).map((config) => ({ value: config.id, label: config.label || config.id }))}
+                />
+              </Form.Item>
+            </Col>
+          </Row>
+          <Text type="secondary">
+            运行调用通道决定任务实际调用 CLI 还是 AI API；接入代码 CLI 仅用于任务接入阶段，两者互不覆盖。
+          </Text>
           <Form.Item label="关联数据库" name="databaseConfigId">
             <Select
               allowClear
@@ -2843,7 +2956,7 @@ export default function App() {
             <Input placeholder="默认使用任务配置名称" />
           </Form.Item>
           <Text type="secondary">
-            创建后会生成一条待执行任务记录，后续执行器会根据任务配置中的项目、CLI、数据源和已选表运行。
+            创建后会生成一条待执行任务记录，运行调用通道从任务配置快照继承，开始执行时不会被临时覆盖。
           </Text>
         </Form>
       </Modal>
@@ -2859,22 +2972,12 @@ export default function App() {
         confirmLoading={startingTaskRuns}
       >
         <Form layout="vertical" form={taskRunStartForm}>
-          <Form.Item label="执行 CLI" name="cliId" rules={[{ required: true, message: '请选择执行 CLI' }]}>
-            <Select
-              showSearch
-              placeholder="选择 Codex 或 Antigravity"
-              optionFilterProp="label"
-              options={cliConfigs
-                .filter((config) => config.enabled)
-                .map((config) => ({ value: config.id, label: config.label || config.id }))}
-            />
-          </Form.Item>
           <Row gutter={16}>
             <Col xs={24} md={12}>
               <Form.Item label="执行方式" name="executionMode" rules={[{ required: true, message: '请选择执行方式' }]}>
                 <Select
                   options={[
-                    { value: 'thread', label: '多线程（独立 CLI 子进程）' },
+                    { value: 'thread', label: 'Python Worker 并发调度' },
                   ]}
                 />
               </Form.Item>
@@ -2893,6 +2996,7 @@ export default function App() {
               ? `，已过滤 ${selectedTaskRunIds.length - executableSelectedTaskRunIds.length} 条成功任务`
               : ''}
             。并发按调度组统一更新，正在执行的任务不会中断，Python Worker 会自动补足并发。
+            每条任务使用创建时保存的调用通道，不会在这里改成其他 CLI 或 AI API。
           </Text>
         </Form>
       </Modal>
@@ -2908,8 +3012,9 @@ export default function App() {
         confirmLoading={batchProcessingResults}
       >
         <Form layout="vertical" form={taskResultBatchForm}>
-          <Form.Item label="执行 CLI" name="cliId" rules={[{ required: true, message: '请选择执行 CLI' }]}>
+          <Form.Item label="旧结果 CLI 覆盖（可选）" name="cliId">
             <Select
+              allowClear
               showSearch
               placeholder="选择 Codex 或 Antigravity"
               optionFilterProp="label"
@@ -2922,8 +3027,8 @@ export default function App() {
             <InputNumber min={1} max={32} className="full-field" />
           </Form.Item>
           <Text type="secondary">
-            提交后窗口会立即关闭。系统按所选并发数拆分异步执行批次，Python Worker 在后台调用 CLI；
-            成功或已入队结果会自动过滤。
+            提交后窗口会立即关闭。系统按所选并发数拆分异步执行批次，Python Worker 在后台调用已保存的 CLI 或 AI API；
+            新结果使用自身保存的调用通道；此处 CLI 只兼容尚未保存调用通道的旧结果。成功或已入队结果会自动过滤。
           </Text>
         </Form>
       </Modal>
@@ -2943,7 +3048,7 @@ export default function App() {
               {' / '}
               任务结果：{currentPromptResults.length} 条
               {' / '}
-              执行工具：{currentPromptRun ? cliMap.get(currentPromptRun.cliId) || currentPromptRun.cliId : '-'}
+              调用通道：{currentPromptRun ? resolveExecutionSnapshot(currentPromptRun).executorId || '-' : '-'}
             </Text>
           </div>
           <pre className="task-log-box batch-prompt-box">{currentBatchAiPrompt}</pre>
@@ -2969,6 +3074,11 @@ export default function App() {
             <Text type="secondary">
               来源表：{parseSelectedTables(currentResult?.sourceTables).join(', ') || '无'}
             </Text>
+            {currentResult && (
+              <Text type="secondary">
+                调用通道：{resolveExecutionSnapshot(currentResult).executorId || '未配置'}
+              </Text>
+            )}
           </div>
           {currentResult?.summary && (
             <div className="table-picker-meta">
@@ -3047,6 +3157,48 @@ function isCodexCliConfig(config: LocalCliConfigItem) {
 // 函数：errorMessage
 function errorMessage(error: unknown, fallback: string) {
   return error instanceof Error ? error.message : fallback;
+}
+
+function executionTargetKey(type: ExecutorType, id: string) {
+  return `${type}:${id}`;
+}
+
+function toTaskRunApiFilters(filters?: {
+  taskName?: string;
+  projectId?: number;
+  taskConfigId?: number;
+  executorTarget?: string;
+  status?: string;
+  recordType?: TaskRecordTypeFilter;
+}) {
+  if (!filters) return undefined;
+  const separatorIndex = filters.executorTarget?.indexOf(':') ?? -1;
+  const executorType = separatorIndex > 0
+    ? filters.executorTarget?.slice(0, separatorIndex) as ExecutorType
+    : undefined;
+  const executorId = separatorIndex > 0
+    ? filters.executorTarget?.slice(separatorIndex + 1)
+    : undefined;
+  const { executorTarget: _executorTarget, ...rest } = filters;
+  return { ...rest, executorType, executorId };
+}
+
+function resolveExecutionSnapshot(record: {
+  handlerKey?: string;
+  executorType?: ExecutorType;
+  executorId?: string;
+  cliId?: string;
+  selectedTables?: string;
+  sourceTables?: string;
+}) {
+  const sourceTables = record.selectedTables || record.sourceTables || '';
+  const inferredTts = sourceTables.includes('word_clean_best_sentence');
+  const handlerKey = (record.handlerKey || (inferredTts
+    ? 'word_clean_best_sentence_tts'
+    : 'word_clean_sentence_score')) as HandlerKey;
+  const executorType = record.executorType || (handlerKey === 'word_clean_best_sentence_tts' ? 'AI_PROVIDER' : 'CLI');
+  const executorId = record.executorId || (executorType === 'AI_PROVIDER' ? 'xiaomi-mimo-tts' : record.cliId || '');
+  return { handlerKey, executorType, executorId };
 }
 
 // 函数：formatDateTime

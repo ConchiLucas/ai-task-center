@@ -43,6 +43,7 @@ public class TaskResultService {
     private final TaskExecutionLogRepository taskExecutionLogRepository;
     private final PythonWorkerClient pythonWorkerClient;
     private final TaskRunPromptBuilder taskRunPromptBuilder;
+    private final TaskExecutionTargetResolver executionTargetResolver;
 
     // 方法：TaskResultService
     public TaskResultService(
@@ -53,7 +54,8 @@ public class TaskResultService {
             TaskConfigRepository taskConfigRepository,
             TaskExecutionLogRepository taskExecutionLogRepository,
             PythonWorkerClient pythonWorkerClient,
-            TaskRunPromptBuilder taskRunPromptBuilder) {
+            TaskRunPromptBuilder taskRunPromptBuilder,
+            TaskExecutionTargetResolver executionTargetResolver) {
         this.repository = repository;
         this.projectRepository = projectRepository;
         this.taskRunResultRepository = taskRunResultRepository;
@@ -62,6 +64,7 @@ public class TaskResultService {
         this.taskExecutionLogRepository = taskExecutionLogRepository;
         this.pythonWorkerClient = pythonWorkerClient;
         this.taskRunPromptBuilder = taskRunPromptBuilder;
+        this.executionTargetResolver = executionTargetResolver;
     }
 
     // 方法：list
@@ -115,6 +118,7 @@ public class TaskResultService {
     }
 
     // 方法：process
+    @Transactional
     public Map<String, Object> process(Long id, String cliId) {
         if (id == null) {
             throw new IllegalArgumentException("缺少任务结果 ID");
@@ -122,11 +126,21 @@ public class TaskResultService {
         TaskResult result = repository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("任务结果不存在"));
         requireExecutable(result);
-        String effectiveCliId = StringUtils.hasText(cliId) ? cliId.trim() : result.getCliId();
-        if (!StringUtils.hasText(effectiveCliId)) {
+        ResolvedResultTarget target = resolveResultTarget(result, cliId);
+        if (TaskExecutionTargetResolver.EXECUTOR_CLI.equals(target.executorType())
+                && !StringUtils.hasText(target.legacyCliId())) {
             throw new IllegalArgumentException("任务结果未配置执行 CLI");
         }
-        return pythonWorkerClient.processTaskResult(id, effectiveCliId);
+        if (TaskRecordType.FORMAL.equals(result.getRecordType())) {
+            if (!List.of("PENDING", "FAILED").contains(result.getStatus())) {
+                throw new IllegalArgumentException("只有待处理或失败的正式结果可以执行");
+            }
+            if (findActiveQueuedResultIds(List.of(id)).contains(id)) {
+                throw new IllegalArgumentException("任务结果已进入执行队列");
+            }
+            return enqueueTaskResults(List.of(result), clean(cliId), 1, 0);
+        }
+        return pythonWorkerClient.processTaskResult(id, target.workerCliId());
     }
 
     @Transactional
@@ -136,7 +150,7 @@ public class TaskResultService {
         if (ids == null || ids.isEmpty()) {
             throw new IllegalArgumentException("请选择要批量执行的任务结果");
         }
-        String cliId = require(request.getCliId(), "请选择执行 CLI");
+        String cliId = clean(request.getCliId());
         int workerCount = request.getWorkerCount() == null ? 4 : request.getWorkerCount();
         if (workerCount < 1 || workerCount > 32) {
             throw new IllegalArgumentException("并发数量需在 1 到 32 之间");
@@ -163,6 +177,13 @@ public class TaskResultService {
         int skippedCount = requestedResults.size() - results.size();
         if (results.isEmpty()) {
             throw new IllegalArgumentException("没有可执行结果，成功结果或已入队结果已被过滤");
+        }
+        for (TaskResult result : results) {
+            ResolvedResultTarget target = resolveResultTarget(result, cliId);
+            if (TaskExecutionTargetResolver.EXECUTOR_CLI.equals(target.executorType())
+                    && !StringUtils.hasText(target.legacyCliId())) {
+                throw new IllegalArgumentException("请选择执行 CLI");
+            }
         }
         if (TaskRecordType.VALIDATION_CURRENT.equals(recordType)) {
             return pythonWorkerClient.processTaskResults(
@@ -199,7 +220,7 @@ public class TaskResultService {
         OffsetDateTime queuedAt = OffsetDateTime.now();
         Map<ResultQueueGroup, List<TaskResult>> groupedResults = results.stream()
                 .collect(Collectors.groupingBy(
-                        ResultQueueGroup::from,
+                        result -> ResultQueueGroup.from(result, resolveResultTarget(result, cliId)),
                         LinkedHashMap::new,
                         Collectors.toList()));
         Map<Long, String> taskConfigNames = taskConfigRepository.findAllById(
@@ -219,7 +240,6 @@ public class TaskResultService {
                         group,
                         partition,
                         runName,
-                        cliId,
                         workerCount,
                         dispatchGroupId,
                         queuedAt);
@@ -280,7 +300,6 @@ public class TaskResultService {
             ResultQueueGroup group,
             List<TaskResult> results,
             String runName,
-            String cliId,
             int workerCount,
             String dispatchGroupId,
             OffsetDateTime queuedAt) {
@@ -288,14 +307,17 @@ public class TaskResultService {
         run.setTaskName(runName);
         run.setTaskConfigId(group.taskConfigId());
         run.setProjectId(group.projectId());
-        run.setCliId(cliId);
+        run.setCliId(group.legacyCliId());
+        run.setHandlerKey(group.handlerKey());
+        run.setExecutorType(group.executorType());
+        run.setExecutorId(group.executorId());
         run.setDatabaseConfigId(group.databaseConfigId());
         run.setSelectedTables(group.sourceTables());
         run.setStatus("QUEUED");
         run.setReason("任务结果已进入 PostgreSQL 异步队列");
         run.setRunLog("等待 Python Worker 领取，第 1 次执行待开始。");
         run.setAiPromptJson(taskRunPromptBuilder.buildBatchPromptJson(
-                new TaskRunPromptBuilder.BatchPromptContext(runName, cliId, group.sourceTables()),
+                new TaskRunPromptBuilder.BatchPromptContext(runName, group.workerTargetId(), group.sourceTables()),
                 results));
         run.setAiResponseJson("");
         run.setExecutionMode("thread");
@@ -314,6 +336,10 @@ public class TaskResultService {
         execution.setTaskRunId(run.getId());
         execution.setAttemptNo(1);
         execution.setCliId(run.getCliId());
+        execution.setHandlerKey(run.getHandlerKey());
+        execution.setExecutorType(run.getExecutorType());
+        execution.setExecutorId(run.getExecutorId());
+        execution.setExecutorLabel(run.getExecutorId());
         execution.setExecutionMode("thread");
         execution.setWorkerCount(workerCount);
         execution.setStatus("QUEUED");
@@ -329,14 +355,26 @@ public class TaskResultService {
             Long taskConfigId,
             Long projectId,
             Long databaseConfigId,
-            String sourceTables) {
+            String sourceTables,
+            String handlerKey,
+            String executorType,
+            String executorId,
+            String legacyCliId) {
         // 方法：from
-        private static ResultQueueGroup from(TaskResult result) {
+        private static ResultQueueGroup from(TaskResult result, ResolvedResultTarget target) {
             return new ResultQueueGroup(
                     result.getTaskConfigId(),
                     result.getProjectId(),
                     result.getDatabaseConfigId(),
-                    result.getSourceTables());
+                    result.getSourceTables(),
+                    target.handlerKey(),
+                    target.executorType(),
+                    target.executorId(),
+                    target.workerCliId());
+        }
+
+        private String workerTargetId() {
+            return TaskExecutionTargetResolver.EXECUTOR_CLI.equals(executorType) ? legacyCliId : executorId;
         }
     }
 
@@ -387,6 +425,9 @@ public class TaskResultService {
         target.setTaskRunId(input.getTaskRunId());
         target.setTaskConfigId(input.getTaskConfigId());
         target.setCliId(clean(input.getCliId()));
+        target.setHandlerKey(clean(input.getHandlerKey()));
+        target.setExecutorType(clean(input.getExecutorType()));
+        target.setExecutorId(clean(input.getExecutorId()));
         target.setDatabaseConfigId(input.getDatabaseConfigId());
         target.setSourceTables(clean(input.getSourceTables()));
         target.setSourceDescription(clean(input.getSourceDescription()));
@@ -448,6 +489,52 @@ public class TaskResultService {
             throw new IllegalArgumentException("历史验证结果仅供查看，不能执行");
         }
     }
+
+    private ResolvedResultTarget resolveResultTarget(TaskResult result, String requestedCliId) {
+        TaskConfig config = null;
+        if (result.getTaskConfigId() != null
+                && (!StringUtils.hasText(result.getHandlerKey())
+                        || !StringUtils.hasText(result.getExecutorType())
+                        || !StringUtils.hasText(result.getExecutorId()))) {
+            config = taskConfigRepository.findById(result.getTaskConfigId()).orElse(null);
+        }
+        String legacyCliId = StringUtils.hasText(requestedCliId)
+                ? requestedCliId.trim()
+                : StringUtils.hasText(result.getCliId())
+                        ? result.getCliId().trim()
+                        : config == null ? "" : clean(config.getCliId());
+        TaskExecutionTargetResolver.ResolvedTarget resolved = executionTargetResolver.resolve(
+                StringUtils.hasText(result.getHandlerKey())
+                        ? result.getHandlerKey()
+                        : config == null ? "" : config.getHandlerKey(),
+                StringUtils.hasText(result.getExecutorType())
+                        ? result.getExecutorType()
+                        : config == null ? "" : config.getExecutorType(),
+                StringUtils.hasText(result.getExecutorId())
+                        ? result.getExecutorId()
+                        : config == null ? "" : config.getExecutorId(),
+                legacyCliId,
+                StringUtils.hasText(result.getSourceTables())
+                        ? result.getSourceTables()
+                        : config == null ? "" : config.getSelectedTables(),
+                result.getResultContent());
+        String workerCliId = TaskExecutionTargetResolver.EXECUTOR_CLI.equals(resolved.executorType())
+                ? resolved.executorId()
+                : "";
+        return new ResolvedResultTarget(
+                resolved.handlerKey(),
+                resolved.executorType(),
+                resolved.executorId(),
+                legacyCliId,
+                workerCliId);
+    }
+
+    private record ResolvedResultTarget(
+            String handlerKey,
+            String executorType,
+            String executorId,
+            String legacyCliId,
+            String workerCliId) {}
 
     // 方法：clean
     private static String clean(String value) {

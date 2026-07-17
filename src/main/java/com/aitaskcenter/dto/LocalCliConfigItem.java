@@ -9,6 +9,7 @@ public class LocalCliConfigItem {
     private String label = "Codex CLI";
     private String command = "/opt/homebrew/bin/codex";
     private List<String> defaultArgs = new ArrayList<>(List.of("exec"));
+    private List<String> capabilities = new ArrayList<>(List.of("TEXT_GENERATION", "CODE_EXECUTION"));
     // 字段：Codex CLI 显式使用的模型
     private String model = "";
     // 字段：Codex CLI 模型推理强度
@@ -65,6 +66,14 @@ public class LocalCliConfigItem {
     // 方法：setDefaultArgs
     public void setDefaultArgs(List<String> defaultArgs) {
         this.defaultArgs = defaultArgs;
+    }
+
+    public List<String> getCapabilities() {
+        return capabilities;
+    }
+
+    public void setCapabilities(List<String> capabilities) {
+        this.capabilities = capabilities == null ? new ArrayList<>() : capabilities;
     }
 
     // 方法：getModel

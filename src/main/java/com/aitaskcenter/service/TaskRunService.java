@@ -41,6 +41,7 @@ public class TaskRunService {
     private final TaskExecutionLogRepository taskExecutionLogRepository;
     private final PythonWorkerClient pythonWorkerClient;
     private final TaskRunPromptBuilder taskRunPromptBuilder;
+    private final TaskExecutionTargetResolver executionTargetResolver;
 
     public TaskRunService(
             TaskRunRepository repository,
@@ -50,7 +51,8 @@ public class TaskRunService {
             TaskRunResultRepository taskRunResultRepository,
             TaskExecutionLogRepository taskExecutionLogRepository,
             PythonWorkerClient pythonWorkerClient,
-            TaskRunPromptBuilder taskRunPromptBuilder) {
+            TaskRunPromptBuilder taskRunPromptBuilder,
+            TaskExecutionTargetResolver executionTargetResolver) {
         this.repository = repository;
         this.taskConfigRepository = taskConfigRepository;
         this.projectRepository = projectRepository;
@@ -59,6 +61,7 @@ public class TaskRunService {
         this.taskExecutionLogRepository = taskExecutionLogRepository;
         this.pythonWorkerClient = pythonWorkerClient;
         this.taskRunPromptBuilder = taskRunPromptBuilder;
+        this.executionTargetResolver = executionTargetResolver;
     }
 
     // 方法：list
@@ -69,6 +72,18 @@ public class TaskRunService {
             String cliId,
             String status,
             String recordType) {
+        return list(taskName, projectId, taskConfigId, cliId, null, null, status, recordType);
+    }
+
+    public List<TaskRun> list(
+            String taskName,
+            Long projectId,
+            Long taskConfigId,
+            String cliId,
+            String executorType,
+            String executorId,
+            String status,
+            String recordType) {
         String recordTypeFilter = TaskRecordType.normalizeFilter(recordType);
         return repository.findAllByOrderByCreatedAtDesc().stream()
                 .filter(item -> recordTypeFilter == null || recordTypeFilter.equals(item.getRecordType()))
@@ -77,8 +92,24 @@ public class TaskRunService {
                 .filter(item -> projectId == null || projectId.equals(item.getProjectId()))
                 .filter(item -> taskConfigId == null || taskConfigId.equals(item.getTaskConfigId()))
                 .filter(item -> !StringUtils.hasText(cliId) || cliId.trim().equals(item.getCliId()))
+                .filter(item -> matchesExecutionTarget(item, executorType, executorId))
                 .filter(item -> !StringUtils.hasText(status) || status.trim().equals(item.getStatus()))
                 .toList();
+    }
+
+    private boolean matchesExecutionTarget(TaskRun run, String executorType, String executorId) {
+        if (!StringUtils.hasText(executorType) && !StringUtils.hasText(executorId)) {
+            return true;
+        }
+        TaskExecutionTargetResolver.ResolvedTarget target = executionTargetResolver.resolve(
+                run.getHandlerKey(),
+                run.getExecutorType(),
+                run.getExecutorId(),
+                run.getCliId(),
+                run.getSelectedTables(),
+                run.getAiPromptJson());
+        return (!StringUtils.hasText(executorType) || executorType.trim().equals(target.executorType()))
+                && (!StringUtils.hasText(executorId) || executorId.trim().equals(target.executorId()));
     }
 
     @Transactional
@@ -95,6 +126,9 @@ public class TaskRunService {
         run.setTaskName(defaultText(request.getTaskName(), config.getTaskName()));
         run.setProjectId(config.getProjectId());
         run.setCliId(config.getCliId());
+        run.setHandlerKey(config.getHandlerKey());
+        run.setExecutorType(config.getExecutorType());
+        run.setExecutorId(config.getExecutorId());
         run.setDatabaseConfigId(config.getDatabaseConfigId());
         run.setSelectedTables(config.getSelectedTables());
         run.setStatus("PENDING");
@@ -188,7 +222,6 @@ public class TaskRunService {
         if (ids == null || ids.isEmpty()) {
             throw new IllegalArgumentException("请选择要执行的任务记录");
         }
-        String cliId = require(request.getCliId(), "请选择执行 CLI");
         String executionMode = StringUtils.hasText(request.getExecutionMode()) ? request.getExecutionMode().trim() : "thread";
         if (!"thread".equals(executionMode)) {
             throw new IllegalArgumentException("PostgreSQL 队列第一版仅支持多线程调度");
@@ -229,7 +262,6 @@ public class TaskRunService {
         for (TaskRun run : adjustableRuns) {
             run.setRequestedWorkerCount(workerCount);
             if (!"RUNNING".equals(run.getStatus())) {
-                run.setCliId(cliId);
                 run.setExecutionMode(executionMode);
             }
         }
@@ -265,7 +297,6 @@ public class TaskRunService {
             int previousAttempts = Math.max(
                     run.getAttemptNo() == null ? 0 : run.getAttemptNo(),
                     Math.toIntExact(taskExecutionLogRepository.countByTaskRunId(run.getId())));
-            run.setCliId(cliId);
             run.setStatus("QUEUED");
             run.setStartTime(null);
             run.setEndTime(null);
@@ -421,6 +452,10 @@ public class TaskRunService {
         legacy.setTaskRunId(run.getId());
         legacy.setAttemptNo(1);
         legacy.setCliId(defaultText(run.getCliId(), "未配置 CLI"));
+        legacy.setHandlerKey(run.getHandlerKey());
+        legacy.setExecutorType(run.getExecutorType());
+        legacy.setExecutorId(run.getExecutorId());
+        legacy.setExecutorLabel(defaultText(run.getExecutorId(), run.getCliId()));
         legacy.setExecutionMode("legacy");
         legacy.setWorkerCount(1);
         legacy.setStatus(defaultText(run.getStatus(), "PENDING"));
@@ -441,12 +476,18 @@ public class TaskRunService {
         execution.setTaskRunId(run.getId());
         execution.setAttemptNo((run.getAttemptNo() == null ? 0 : run.getAttemptNo()) + 1);
         execution.setCliId(run.getCliId());
+        execution.setHandlerKey(run.getHandlerKey());
+        execution.setExecutorType(run.getExecutorType());
+        execution.setExecutorId(run.getExecutorId());
+        execution.setExecutorLabel(defaultText(run.getExecutorId(), run.getCliId()));
         execution.setExecutionMode(executionMode);
         execution.setWorkerCount(workerCount);
         execution.setStatus("QUEUED");
         execution.setReason("等待 Python Worker 领取");
         execution.setRunLog("第 " + execution.getAttemptNo() + " 次执行已进入 PostgreSQL 队列。\n"
-                + "CLI=" + run.getCliId() + "，模式=" + executionMode + "，并发上限=" + workerCount + "。");
+                + "调用通道=" + defaultText(run.getExecutorType(), "CLI") + "/"
+                + defaultText(run.getExecutorId(), run.getCliId())
+                + "，模式=" + executionMode + "，并发上限=" + workerCount + "。");
         execution.setAiPromptJson(run.getAiPromptJson());
         execution.setAiResponseJson("");
         return execution;

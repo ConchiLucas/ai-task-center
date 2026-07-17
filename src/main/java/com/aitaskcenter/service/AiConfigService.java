@@ -2,6 +2,7 @@ package com.aitaskcenter.service;
 
 import com.aitaskcenter.dto.AiConfigRequest;
 import com.aitaskcenter.dto.AiProviderConfigItem;
+import com.aitaskcenter.dto.ExecutionTargetItem;
 import com.aitaskcenter.dto.LocalCliConfigItem;
 import com.aitaskcenter.dto.LocalCliConfigRequest;
 import com.aitaskcenter.model.AiConfig;
@@ -13,6 +14,7 @@ import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Locale;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 import org.springframework.util.StringUtils;
@@ -22,6 +24,7 @@ public class AiConfigService {
     private static final String DEFAULT_KEY = "default";
     private static final String OPENAI_COMPATIBLE = "openai-compatible";
     private static final String ANTHROPIC_COMPATIBLE = "anthropic-compatible";
+    private static final String MIMO_TTS = "mimo-tts";
 
     private final AiConfigRepository repository;
     private final ObjectMapper objectMapper;
@@ -42,7 +45,12 @@ public class AiConfigService {
     // 方法：getProviders
     public AiConfigRequest getProviders() {
         AiConfigRequest request = getConfig();
-        request.getProviders().forEach(provider -> provider.setApiKey(null));
+        request.getProviders().forEach(provider -> {
+            String protocol = effectiveProviderProtocol(provider);
+            provider.setType(protocol);
+            provider.setCapabilities(providerCapabilities(provider, protocol));
+            provider.setApiKey(null);
+        });
         return request;
     }
 
@@ -53,12 +61,45 @@ public class AiConfigService {
                 .orElseGet(this::defaultLocalCliConfig);
     }
 
+    public List<ExecutionTargetItem> getExecutionTargets() {
+        List<ExecutionTargetItem> targets = new ArrayList<>();
+        for (AiProviderConfigItem provider : getConfig().getProviders()) {
+            String protocol = effectiveProviderProtocol(provider);
+            targets.add(new ExecutionTargetItem(
+                    "AI_PROVIDER",
+                    provider.getId(),
+                    defaultText(provider.getLabel(), provider.getId()),
+                    protocol,
+                    providerCapabilities(provider, protocol),
+                    provider.isEnabled()));
+        }
+        for (LocalCliConfigItem cli : getLocalCliConfig().getConfigs()) {
+            targets.add(new ExecutionTargetItem(
+                    "CLI",
+                    cli.getId(),
+                    defaultText(cli.getLabel(), cli.getId()),
+                    "local-cli",
+                    cliCapabilities(cli),
+                    cli.isEnabled()));
+        }
+        return targets;
+    }
+
     @Transactional
     // 方法：save
     public List<AiProviderConfigItem> save(AiConfigRequest request) {
-        AiConfigRequest normalized = normalize(request);
-        String providersJson = toJson(toProviderMap(normalized.getProviders()));
         AiConfig config = repository.findByConfigKey(DEFAULT_KEY).orElseGet(AiConfig::new);
+        Map<String, AiProviderConfigItem> existingProviders = fromJson(config.getProviders());
+        AiConfigRequest normalized = normalize(request);
+        for (AiProviderConfigItem provider : normalized.getProviders()) {
+            AiProviderConfigItem existing = existingProviders.get(provider.getId());
+            if (!StringUtils.hasText(provider.getApiKey())
+                    && existing != null
+                    && StringUtils.hasText(existing.getApiKey())) {
+                provider.setApiKey(existing.getApiKey());
+            }
+        }
+        String providersJson = toJson(toProviderMap(normalized.getProviders()));
         config.setConfigKey(DEFAULT_KEY);
         config.setActive(normalized.getActive());
         config.setProviders(providersJson);
@@ -141,7 +182,9 @@ public class AiConfigService {
                 throw new IllegalArgumentException("AI 配置 ID「" + id + "」重复");
             }
             String type = defaultText(item.getType(), OPENAI_COMPATIBLE);
-            if (!OPENAI_COMPATIBLE.equals(type) && !ANTHROPIC_COMPATIBLE.equals(type)) {
+            if (!OPENAI_COMPATIBLE.equals(type)
+                    && !ANTHROPIC_COMPATIBLE.equals(type)
+                    && !MIMO_TTS.equals(type)) {
                 throw new IllegalArgumentException("AI 配置「" + id + "」的类型不支持");
             }
             AiProviderConfigItem normalized = new AiProviderConfigItem();
@@ -152,6 +195,10 @@ public class AiConfigService {
             normalized.setApiKey(clean(item.getApiKey()));
             normalized.setModel(require(item.getModel(), "请填写 AI 配置「" + id + "」的模型名称"));
             normalized.setMaxTokens(item.getMaxTokens() == null || item.getMaxTokens() <= 0 ? 4096 : item.getMaxTokens());
+            normalized.setVoice(clean(item.getVoice()));
+            normalized.setCapabilities(providerCapabilities(item, type));
+            normalized.setOptions(item.getOptions());
+            normalized.setEnabled(item.isEnabled());
             byId.put(id, normalized);
         }
         String active = clean(request.getActive());
@@ -222,6 +269,7 @@ public class AiConfigService {
                 .map(AiConfigService::clean)
                 .filter(StringUtils::hasText)
                 .toList());
+        normalized.setCapabilities(cliCapabilities(item));
         boolean codex = "codex".equalsIgnoreCase(normalized.getId())
                 || normalized.getCommand().toLowerCase().contains("codex");
         normalized.setModel(codex ? defaultText(item.getModel(), "gpt-5.6-sol") : clean(item.getModel()));
@@ -229,6 +277,43 @@ public class AiConfigService {
         normalized.setWorkingDirectory(defaultText(item.getWorkingDirectory(), "/Users/conchi/workforce/python_workforce/ai-task-center"));
         normalized.setTimeoutSeconds(item.getTimeoutSeconds() == null || item.getTimeoutSeconds() <= 0 ? 300 : item.getTimeoutSeconds());
         return normalized;
+    }
+
+    private static String effectiveProviderProtocol(AiProviderConfigItem provider) {
+        String type = defaultText(provider.getType(), OPENAI_COMPATIBLE);
+        String id = clean(provider.getId()).toLowerCase(Locale.ROOT);
+        String model = clean(provider.getModel()).toLowerCase(Locale.ROOT);
+        if (MIMO_TTS.equals(type) || id.contains("mimo-tts") || model.contains("tts")) {
+            return MIMO_TTS;
+        }
+        return type;
+    }
+
+    private static List<String> providerCapabilities(AiProviderConfigItem provider, String protocol) {
+        List<String> configured = normalizeCapabilities(provider.getCapabilities());
+        if (!configured.isEmpty()) {
+            return configured;
+        }
+        return MIMO_TTS.equals(protocol) ? List.of("AUDIO_TTS") : List.of("TEXT_GENERATION");
+    }
+
+    private static List<String> cliCapabilities(LocalCliConfigItem cli) {
+        List<String> configured = normalizeCapabilities(cli.getCapabilities());
+        return configured.isEmpty()
+                ? List.of("TEXT_GENERATION", "CODE_EXECUTION")
+                : configured;
+    }
+
+    private static List<String> normalizeCapabilities(List<String> capabilities) {
+        if (capabilities == null) {
+            return List.of();
+        }
+        return capabilities.stream()
+                .map(AiConfigService::clean)
+                .filter(StringUtils::hasText)
+                .map(value -> value.toUpperCase(Locale.ROOT))
+                .distinct()
+                .toList();
     }
 
     // 方法：defaultLocalCliConfig
