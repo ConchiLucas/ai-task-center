@@ -109,6 +109,7 @@ public class TaskRunService {
     // 方法：retry
     public TaskRun retry(Long id) {
         TaskRun run = get(id);
+        requireMutableRun(run);
         if ("RUNNING".equals(run.getStatus())) {
             throw new IllegalArgumentException("执行中的任务不能重试");
         }
@@ -122,6 +123,7 @@ public class TaskRunService {
     public TaskRun cancel(Long id) {
         TaskRun run = repository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("任务记录不存在"));
+        requireMutableRun(run);
         if (!List.of("PENDING", "QUEUED", "RETRY_WAIT", "RUNNING").contains(run.getStatus())) {
             throw new IllegalArgumentException("只有待执行、排队中、等待重试或执行中的任务可以取消");
         }
@@ -161,7 +163,9 @@ public class TaskRunService {
         if (id == null) {
             throw new IllegalArgumentException("缺少任务记录 ID");
         }
-        repository.deleteById(id);
+        TaskRun run = get(id);
+        requireMutableRun(run);
+        repository.delete(run);
     }
 
     // 方法：batchDelete
@@ -169,7 +173,12 @@ public class TaskRunService {
         if (ids == null || ids.isEmpty()) {
             throw new IllegalArgumentException("请选择要删除的任务记录");
         }
-        repository.deleteAllById(ids);
+        List<TaskRun> runs = repository.findAllById(ids);
+        if (runs.size() != ids.size()) {
+            throw new IllegalArgumentException("部分任务记录不存在");
+        }
+        runs.forEach(this::requireMutableRun);
+        repository.deleteAll(runs);
     }
 
     @Transactional
@@ -193,9 +202,7 @@ public class TaskRunService {
         if (requestedRuns.size() != ids.size()) {
             throw new IllegalArgumentException("部分任务记录不存在");
         }
-        if (requestedRuns.stream().anyMatch(run -> !TaskRecordType.FORMAL.equals(run.getRecordType()))) {
-            throw new IllegalArgumentException("验证批次不能进入正式执行队列");
-        }
+        requestedRuns.forEach(this::requireMutableRun);
         List<TaskRun> manageableRuns = requestedRuns.stream()
                 .filter(run -> isStartOrConcurrencyAdjustableStatus(run.getStatus()))
                 .toList();
@@ -297,6 +304,13 @@ public class TaskRunService {
                 "skippedCount", skippedCount,
                 "workerCount", workerCount,
                 "message", "任务已进入 PostgreSQL 队列");
+    }
+
+    // 方法：requireMutableRun
+    private void requireMutableRun(TaskRun run) {
+        if (TaskRecordType.VALIDATION_HISTORY.equals(run.getRecordType())) {
+            throw new IllegalArgumentException("历史验证批次仅供查看，不能执行、重试、取消或删除");
+        }
     }
 
     // 方法：processLinkedResults

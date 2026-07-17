@@ -30,6 +30,8 @@ WORD_CLEAN_SENTENCE_TABLE = "public.word_clean_sentence"
 WORD_CLEAN_BEST_SENTENCE_TABLE = "public.word_clean_best_sentence"
 RESULT_MODE_SCORE = "word_clean_sentence_score"
 RESULT_MODE_TTS = "word_clean_best_sentence_tts"
+RESULT_MODE_SCORE_BATCH = f"{RESULT_MODE_SCORE}_batch"
+RESULT_MODE_TTS_BATCH = f"{RESULT_MODE_TTS}_batch"
 WORD_AGENT_BASE_URL = os.getenv("WORD_AGENT_BASE_URL", "http://127.0.0.1:8010").rstrip("/")
 RECORD_TYPE_VALIDATION_CURRENT = "VALIDATION_CURRENT"
 RECORD_TYPE_VALIDATION_HISTORY = "VALIDATION_HISTORY"
@@ -162,6 +164,8 @@ class TaskRunSnapshot:
     ai_response_json: str
     # 字段：正式批次或验证批次
     record_type: str
+    # 字段：批次内部允许使用的并发数
+    requested_worker_count: int
 
 
 @dataclass(frozen=True)
@@ -281,7 +285,7 @@ def claim_next_queued_task() -> QueuedTaskClaim | None:
                     select task.id
                     from tb_task_run task
                     where task.status in ('QUEUED', 'RETRY_WAIT')
-                      and task.record_type = 'FORMAL'
+                      and task.record_type in ('FORMAL', 'VALIDATION_CURRENT')
                       and (task.next_retry_at is null or task.next_retry_at <= now())
                       and coalesce(task.attempt_no, 0) < coalesce(task.max_attempts, 3)
                       and (
@@ -403,8 +407,10 @@ def sync_task_run_result_links(task_run_id: int) -> None:
                 set status = result.status,
                     error_message = coalesce(result.error_message, ''),
                     updated_at = now()
-                from tb_task_result result
+                from tb_task_result result, tb_task_run task
                 where link.task_run_id = %s
+                  and task.id = link.task_run_id
+                  and task.record_type = 'FORMAL'
                   and link.task_result_id = result.id
                 """,
                 (task_run_id,),
@@ -542,7 +548,7 @@ def recover_expired_queued_tasks() -> int:
 # 函数：execute_queued_task
 def execute_queued_task(claim: QueuedTaskClaim) -> None:
     try:
-        response = process_word_clean_sentence_task_run_batch(claim.id, claim.cli_id)
+        response = process_task_run_batch_by_type(claim.id, claim.cli_id)
         failed_count = int(response.get("failedCount") or 0)
         success_count = int(response.get("successCount") or 0)
         if failed_count > 0:
@@ -809,7 +815,8 @@ def load_task_run_snapshot(task_run_id: int) -> TaskRunSnapshot:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    select id, task_name, cli_id, ai_prompt_json, ai_response_json, record_type
+                    select id, task_name, cli_id, ai_prompt_json, ai_response_json, record_type,
+                           greatest(1, least(32, coalesce(requested_worker_count, 1)))
                     from tb_task_run
                     where id = %s
                     """,
@@ -828,6 +835,7 @@ def load_task_run_snapshot(task_run_id: int) -> TaskRunSnapshot:
         ai_prompt_json=str(row[3] or ""),
         ai_response_json=str(row[4] or ""),
         record_type=str(row[5] or RECORD_TYPE_FORMAL),
+        requested_worker_count=int(row[6] or 1),
     )
 
 
@@ -918,6 +926,38 @@ def batch_update_task_result_states(rows: list[tuple[int, str, str, dict[str, An
                 """,
                 values,
                 template="(%s::bigint, %s::varchar, %s::varchar, %s::text, %s::varchar)",
+                page_size=1000,
+            )
+        connection.commit()
+
+
+# 函数：batch_update_task_run_result_link_states
+def batch_update_task_run_result_link_states(
+    task_run_id: int,
+    rows: list[tuple[int, str, str]],
+) -> None:
+    if not rows:
+        return
+    values = [
+        (task_run_id, item[0], item[1], limit_text(item[2], 4000))
+        for item in rows
+    ]
+    settings = load_database_settings()
+    with connect_database(settings) as connection:
+        with connection.cursor() as cursor:
+            execute_values(
+                cursor,
+                """
+                update tb_task_run_result as target
+                set status = data.status,
+                    error_message = data.error_message,
+                    updated_at = now()
+                from (values %s) as data(task_run_id, task_result_id, status, error_message)
+                where target.task_run_id = data.task_run_id
+                  and target.task_result_id = data.task_result_id
+                """,
+                values,
+                template="(%s::bigint, %s::bigint, %s::varchar, %s::varchar)",
                 page_size=1000,
             )
         connection.commit()
@@ -2283,7 +2323,7 @@ def parse_task_run_batch_prompt(task_run: TaskRunSnapshot) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail=f"批次 AI 提示词 JSON 解析失败: {exc}") from exc
     if not isinstance(prompt, dict):
         raise HTTPException(status_code=400, detail="批次 AI 提示词必须是 JSON 对象")
-    if prompt.get("taskType") != "word_clean_sentence_score_batch":
+    if prompt.get("taskType") != RESULT_MODE_SCORE_BATCH:
         raise HTTPException(status_code=400, detail="批次 AI 提示词类型不支持")
     items = prompt.get("items")
     if not isinstance(items, list) or not items:
@@ -2297,6 +2337,32 @@ def parse_task_run_batch_prompt(task_run: TaskRunSnapshot) -> dict[str, Any]:
             raise HTTPException(status_code=400, detail="批次 AI 提示词 item 缺少 itemKey")
         if item_key in item_keys:
             raise HTTPException(status_code=400, detail=f"批次 AI 提示词 itemKey 重复: {item_key}")
+        item_keys.add(item_key)
+    return prompt
+
+
+# 函数：parse_tts_task_run_batch_prompt
+def parse_tts_task_run_batch_prompt(task_run: TaskRunSnapshot) -> dict[str, Any]:
+    try:
+        prompt = json.loads(task_run.ai_prompt_json or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"TTS 批次执行载荷 JSON 解析失败: {exc}") from exc
+    if not isinstance(prompt, dict):
+        raise HTTPException(status_code=400, detail="TTS 批次执行载荷必须是 JSON 对象")
+    if prompt.get("taskType") != RESULT_MODE_TTS_BATCH:
+        raise HTTPException(status_code=400, detail="TTS 批次执行载荷类型不支持")
+    items = prompt.get("items")
+    if not isinstance(items, list) or not items:
+        raise HTTPException(status_code=400, detail="TTS 批次执行载荷缺少 items")
+    item_keys: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="TTS 批次 items 每一项必须是对象")
+        item_key = str(item.get("itemKey") or "").strip()
+        if not item_key:
+            raise HTTPException(status_code=400, detail="TTS 批次 item 缺少 itemKey")
+        if item_key in item_keys:
+            raise HTTPException(status_code=400, detail=f"TTS 批次 itemKey 重复: {item_key}")
         item_keys.add(item_key)
     return prompt
 
@@ -2402,8 +2468,9 @@ def fail_task_run_batch_results(task_results: list[TaskResultSnapshot], message:
 # 函数：process_word_clean_sentence_task_run_batch
 def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | None = None) -> dict[str, Any]:
     task_run = load_task_run_snapshot(task_run_id)
-    if task_run.record_type != RECORD_TYPE_FORMAL:
-        raise HTTPException(status_code=400, detail="验证批次不能执行")
+    if task_run.record_type == RECORD_TYPE_VALIDATION_HISTORY:
+        raise HTTPException(status_code=400, detail="历史验证批次仅供查看，不能执行")
+    validation_execution = task_run.record_type == RECORD_TYPE_VALIDATION_CURRENT
     prompt = parse_task_run_batch_prompt(task_run)
     task_result_ids = load_task_run_result_ids(task_run.id)
     if not task_result_ids:
@@ -2422,10 +2489,15 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
     if not access.get("accessible"):
         raise HTTPException(status_code=400, detail=f"CLI 不可访问: {access.get('message', '')}")
 
-    batch_update_task_result_states([
-        (item.id, "RUNNING", "批次 JSON 执行中，正在调用 CLI 评分", None, "")
-        for item in task_results
-    ])
+    if validation_execution:
+        batch_update_task_run_result_link_states(task_run.id, [
+            (item.id, "RUNNING", "") for item in task_results
+        ])
+    else:
+        batch_update_task_result_states([
+            (item.id, "RUNNING", "批次 JSON 执行中，正在调用 CLI 评分", None, "")
+            for item in task_results
+        ])
 
     try:
         cli_response = run_cli_prompt(cli_config, task_run.ai_prompt_json)
@@ -2447,6 +2519,8 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
                 "returnCode": cli_response["returnCode"],
                 "stderr": cli_response["stderr"],
                 "processedAt": datetime.now(timezone.utc).isoformat(),
+                "validationExecution": validation_execution,
+                "sourceWriteBackSkipped": validation_execution,
             },
         })
         prepared_items, failed_rows = prepare_items_from_task_run_batch_response(
@@ -2456,6 +2530,25 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
             cli_config,
             effective_cli_id,
         )
+
+        if validation_execution:
+            validation_rows = [
+                (item["taskResult"].id, "SUCCESS", "") for item in prepared_items
+            ] + [
+                (row[0], "FAILED", row[4]) for row in failed_rows
+            ]
+            batch_update_task_run_result_link_states(task_run.id, validation_rows)
+            return {
+                "accepted": True,
+                "mode": "task-run-json-batch",
+                "taskRunId": task_run.id,
+                "taskResultCount": len(task_results),
+                "successCount": len(prepared_items),
+                "failedCount": len(failed_rows),
+                "cliId": effective_cli_id,
+                "aiResponseJson": ai_response_json,
+                "validationExecution": True,
+            }
 
         grouped: dict[int, list[dict[str, Any]]] = {}
         for item in prepared_items:
@@ -2509,7 +2602,12 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
             "processedAt": datetime.now(timezone.utc).isoformat(),
             "mode": "task-run-json-batch",
         })
-        fail_task_run_batch_results(task_results, message, task_run.id)
+        if validation_execution:
+            batch_update_task_run_result_link_states(task_run.id, [
+                (item.id, "FAILED", message) for item in task_results
+            ])
+        else:
+            fail_task_run_batch_results(task_results, message, task_run.id)
         if isinstance(exc, HTTPException):
             raise
         raise HTTPException(status_code=500, detail=message) from exc
@@ -2744,6 +2842,258 @@ def post_word_agent_tts(tts_input: dict[str, Any]) -> dict[str, Any]:
     return response_payload
 
 
+# 函数：backfill_word_clean_best_sentence_tts
+def backfill_word_clean_best_sentence_tts(
+    connection_config: ConnectionConfigSnapshot,
+    payload: dict[str, Any],
+    tts_result: dict[str, Any],
+) -> dict[str, Any]:
+    write_back = payload.get("writeBack")
+    source = payload.get("source")
+    if not isinstance(write_back, dict) or not isinstance(source, dict):
+        raise ValueError("TTS 任务缺少来源回填契约")
+    best_sentence_id = int(payload["bestSentenceId"])
+    word_clean_id = int(payload["wordCleanId"])
+    source_sentence_id = int(source["sourceSentenceId"])
+    sentence = str(source.get("sentence") or "")
+    file_name = str(tts_result.get("fileName") or "")
+    object_url = str(tts_result.get("objectUrl") or tts_result.get("downloadUrl") or "")
+    normalized = {
+        "provider": str(tts_result.get("provider") or "word-agent"),
+        "model": str(tts_result.get("model") or ""),
+        "voice": str(tts_result.get("voice") or ""),
+        "audioFormat": str(tts_result.get("format") or payload["ttsInput"].get("defaultAudioFormat") or "wav"),
+        "bucket": str(tts_result.get("bucket") or ""),
+        "objectKey": str(tts_result.get("objectKey") or file_name),
+        "objectUrl": object_url,
+        "contentType": str(tts_result.get("contentType") or "audio/wav"),
+        "fileSize": int(tts_result.get("byteSize") or tts_result.get("fileSize") or 0),
+        "durationMs": int(tts_result["durationMs"]) if tts_result.get("durationMs") is not None else None,
+    }
+    with connect_source_database(connection_config) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                update public.word_clean_best_sentence
+                set tts_status = 'success',
+                    tts_provider = %s,
+                    tts_model = %s,
+                    tts_voice = %s,
+                    tts_audio_format = %s,
+                    tts_bucket = %s,
+                    tts_object_key = %s,
+                    tts_object_url = %s,
+                    tts_content_type = %s,
+                    tts_file_size = %s,
+                    tts_duration_ms = %s,
+                    tts_generated_at = now(),
+                    tts_error_message = '',
+                    updated_at = now()
+                where id = %s
+                  and word_clean_id = %s
+                  and source_sentence_id = %s
+                  and sentence = %s
+                """,
+                (
+                    normalized["provider"],
+                    normalized["model"],
+                    normalized["voice"],
+                    normalized["audioFormat"],
+                    normalized["bucket"],
+                    normalized["objectKey"],
+                    normalized["objectUrl"],
+                    normalized["contentType"],
+                    normalized["fileSize"],
+                    normalized["durationMs"],
+                    best_sentence_id,
+                    word_clean_id,
+                    source_sentence_id,
+                    sentence,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"最佳句子来源已变化或不存在: {best_sentence_id}")
+        connection.commit()
+    return {
+        **normalized,
+        "bestSentenceId": best_sentence_id,
+        "wordCleanId": word_clean_id,
+        "sourceGuardMatched": True,
+    }
+
+
+# 函数：process_tts_batch_item
+def process_tts_batch_item(
+    task_result: TaskResultSnapshot,
+    task_run: TaskRunSnapshot,
+    item_key: str,
+    validation_execution: bool = False,
+) -> tuple[tuple[int, str, str, dict[str, Any] | None, str], dict[str, Any]]:
+    try:
+        payload = parse_tts_task_result_payload(task_result)
+        tts_result = post_word_agent_tts(payload["ttsInput"])
+        if validation_execution:
+            backfill_result = {
+                "skipped": True,
+                "reason": "当前验证批次不回写业务源表",
+            }
+        else:
+            connection_config = load_connection_config_snapshot(task_result.database_config_id)
+            backfill_result = backfill_word_clean_best_sentence_tts(connection_config, payload, tts_result)
+        completed_payload = {
+            **payload,
+            "ttsResult": tts_result,
+            "execution": {
+                "mode": "task-run-tts-batch",
+                "taskRunId": task_run.id,
+                "itemKey": item_key,
+                "service": WORD_AGENT_BASE_URL,
+                "processedAt": datetime.now(timezone.utc).isoformat(),
+                "legacyJobTableDependency": False,
+                "validationExecution": validation_execution,
+                "sourceWriteBackSkipped": validation_execution,
+            },
+            "backfillResult": backfill_result,
+        }
+        file_name = str(tts_result.get("fileName") or payload["ttsInput"].get("fileName") or "音频")
+        summary = (
+            f"TTS 验证生成成功（未回填）：{file_name}"
+            if validation_execution
+            else f"TTS 生成并回填成功：{file_name}"
+        )
+        response_item = {
+            "itemKey": item_key,
+            "taskResultId": task_result.id,
+            "status": "SUCCESS",
+            "ttsResult": tts_result,
+            "backfillResult": backfill_result,
+            "validationExecution": validation_execution,
+        }
+        return (task_result.id, "SUCCESS", summary, completed_payload, ""), response_item
+    except Exception as exc:
+        try:
+            payload = parse_task_result_content(task_result)
+        except Exception:
+            payload = {"rawResultContent": task_result.result_content}
+        failed_payload = {
+            **payload,
+            "processorError": str(exc),
+            "processedAt": datetime.now(timezone.utc).isoformat(),
+            "mode": "task-run-tts-batch",
+            "taskRunId": task_run.id,
+            "itemKey": item_key,
+        }
+        response_item = {
+            "itemKey": item_key,
+            "taskResultId": task_result.id,
+            "status": "FAILED",
+            "errorMessage": str(exc),
+        }
+        return (task_result.id, "FAILED", "TTS 批次执行失败", failed_payload, str(exc)), response_item
+
+
+# 函数：process_word_clean_best_sentence_tts_task_run_batch
+def process_word_clean_best_sentence_tts_task_run_batch(
+    task_run_id: int,
+    cli_id: str | None = None,
+) -> dict[str, Any]:
+    del cli_id
+    task_run = load_task_run_snapshot(task_run_id)
+    if task_run.record_type == RECORD_TYPE_VALIDATION_HISTORY:
+        raise HTTPException(status_code=400, detail="历史验证批次仅供查看，不能执行")
+    validation_execution = task_run.record_type == RECORD_TYPE_VALIDATION_CURRENT
+    prompt = parse_tts_task_run_batch_prompt(task_run)
+    task_result_ids = load_task_run_result_ids(task_run.id)
+    if not task_result_ids:
+        raise HTTPException(status_code=400, detail="TTS 任务批次未关联任务结果")
+    task_results = load_task_result_snapshots(task_result_ids)
+    if any(item.record_type != RECORD_TYPE_FORMAL for item in task_results):
+        raise HTTPException(status_code=400, detail="TTS 正式批次不能关联验证结果")
+    prompt_items = prompt["items"]
+    if len(prompt_items) != len(task_results):
+        raise HTTPException(status_code=400, detail="TTS 批次 items 数量与关联任务结果数量不一致")
+
+    if validation_execution:
+        batch_update_task_run_result_link_states(task_run.id, [
+            (item.id, "RUNNING", "") for item in task_results
+        ])
+    else:
+        batch_update_task_result_states([
+            (item.id, "RUNNING", "TTS 批次执行中，正在调用 word-agent", None, "")
+            for item in task_results
+        ])
+    result_rows: list[tuple[int, str, str, dict[str, Any] | None, str]] = []
+    response_items: list[dict[str, Any]] = []
+    worker_count = min(task_run.requested_worker_count, len(task_results))
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(
+                process_tts_batch_item,
+                task_result,
+                task_run,
+                str(prompt_items[index]["itemKey"]),
+                validation_execution,
+            ): index
+            for index, task_result in enumerate(task_results)
+        }
+        completed_by_index: dict[int, tuple[tuple[int, str, str, dict[str, Any] | None, str], dict[str, Any]]] = {}
+        for future in as_completed(futures):
+            completed_by_index[futures[future]] = future.result()
+    for index in range(len(task_results)):
+        row, response_item = completed_by_index[index]
+        result_rows.append(row)
+        response_items.append(response_item)
+
+    if validation_execution:
+        batch_update_task_run_result_link_states(task_run.id, [
+            (row[0], row[1], row[4]) for row in result_rows
+        ])
+    else:
+        batch_update_task_result_states(result_rows)
+    success_count = sum(1 for row in result_rows if row[1] == "SUCCESS")
+    failed_count = len(result_rows) - success_count
+    ai_response_json = update_task_run_ai_response(task_run.id, {
+        "taskType": RESULT_MODE_TTS_BATCH,
+        "items": response_items,
+        "execution": {
+            "mode": "task-run-tts-batch",
+            "taskRunId": task_run.id,
+            "workerCount": worker_count,
+            "service": WORD_AGENT_BASE_URL,
+            "processedAt": datetime.now(timezone.utc).isoformat(),
+            "legacyJobTableDependency": False,
+            "validationExecution": validation_execution,
+            "sourceWriteBackSkipped": validation_execution,
+        },
+    })
+    return {
+        "accepted": True,
+        "mode": "task-run-tts-batch",
+        "taskRunId": task_run.id,
+        "taskResultCount": len(task_results),
+        "successCount": success_count,
+        "failedCount": failed_count,
+        "cliId": "",
+        "aiResponseJson": ai_response_json,
+        "validationExecution": validation_execution,
+    }
+
+
+# 函数：process_task_run_batch_by_type
+def process_task_run_batch_by_type(task_run_id: int, cli_id: str | None = None) -> dict[str, Any]:
+    task_run = load_task_run_snapshot(task_run_id)
+    try:
+        prompt = json.loads(task_run.ai_prompt_json or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"批次执行载荷 JSON 解析失败: {exc}") from exc
+    task_type = prompt.get("taskType") if isinstance(prompt, dict) else None
+    if task_type == RESULT_MODE_TTS_BATCH:
+        return process_word_clean_best_sentence_tts_task_run_batch(task_run_id, cli_id)
+    if task_type == RESULT_MODE_SCORE_BATCH:
+        return process_word_clean_sentence_task_run_batch(task_run_id, cli_id)
+    raise HTTPException(status_code=400, detail=f"批次执行载荷类型不支持: {task_type or '空'}")
+
+
 # 函数：process_tts_validation_task_result
 def process_tts_validation_task_result(task_result: TaskResultSnapshot) -> dict[str, Any]:
     if task_result.record_type != RECORD_TYPE_VALIDATION_CURRENT:
@@ -2925,7 +3275,7 @@ def load_queue_status_counts() -> dict[str, int]:
                 select status, count(*)
                 from tb_task_run
                 where status in ('QUEUED', 'RUNNING', 'RETRY_WAIT')
-                  and record_type = 'FORMAL'
+                  and record_type in ('FORMAL', 'VALIDATION_CURRENT')
                 group by status
                 """
             )
@@ -3003,7 +3353,7 @@ def process_task_run_batch_json_simple(
     taskRunId: int,
     cliId: str | None = None,
 ) -> dict[str, Any]:
-    return process_word_clean_sentence_task_run_batch(taskRunId, cliId)
+    return process_task_run_batch_by_type(taskRunId, cliId)
 
 
 # 函数：process_task_results_batch_simple

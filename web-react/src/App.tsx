@@ -20,7 +20,6 @@ import {
   App as AntApp,
   Button,
   Card,
-  Collapse,
   Col,
   Empty,
   Form,
@@ -50,6 +49,7 @@ import {
   TaskRecordType,
   TaskRecordTypeFilter,
   TaskResult,
+  TaskRunResultLink,
   TaskResultStatus,
   TaskRun,
   TaskRunStatus,
@@ -92,6 +92,18 @@ const { Title, Text, Paragraph } = Typography;
 
 type ActiveTab = 'project' | 'database' | 'ai' | 'cli';
 type PrimaryModule = 'config' | 'task' | 'taskRun' | 'taskResult';
+
+interface ExecutionTaskDetail {
+  result: TaskResult;
+  itemKey: string;
+  status: TaskResultStatus;
+  summary: string;
+  errorMessage: string;
+  input: unknown;
+  response: unknown;
+  processing: unknown;
+  audioUrl: string;
+}
 
 const defaultPorts: Record<string, number> = {
   mysql: 3306,
@@ -228,8 +240,9 @@ export default function App() {
   const [taskRunCreateOpen, setTaskRunCreateOpen] = useState(false);
   const [taskRunStartOpen, setTaskRunStartOpen] = useState(false);
   const [selectedTaskRunIds, setSelectedTaskRunIds] = useState<number[]>([]);
-  const [logModalOpen, setLogModalOpen] = useState(false);
+  const [taskRunLogLoading, setTaskRunLogLoading] = useState(false);
   const [currentLogRun, setCurrentLogRun] = useState<TaskRun | null>(null);
+  const [currentLogLinks, setCurrentLogLinks] = useState<TaskRunResultLink[]>([]);
   const [currentLogResults, setCurrentLogResults] = useState<TaskResult[]>([]);
   const [currentExecutions, setCurrentExecutions] = useState<TaskExecutionLog[]>([]);
   const [promptModalOpen, setPromptModalOpen] = useState(false);
@@ -242,13 +255,13 @@ export default function App() {
   const executableSelectedTaskRunIds = useMemo(
     () => selectedTaskRunIds.filter((id) => {
       const run = taskRuns.find((item) => item.ID === id);
-      return run ? isFormalRecord(run.recordType) && isTaskRunExecutable(run.status) : false;
+      return run ? isExecutableRunRecord(run.recordType) && isTaskRunExecutable(run.status) : false;
     }),
     [selectedTaskRunIds, taskRuns],
   );
   const executableFilteredTaskRunIds = useMemo(
     () => taskRuns
-      .filter((run) => run.ID && isFormalRecord(run.recordType) && isTaskRunExecutable(run.status))
+      .filter((run) => run.ID && isExecutableRunRecord(run.recordType) && isTaskRunExecutable(run.status))
       .map((run) => Number(run.ID)),
     [taskRuns],
   );
@@ -1083,15 +1096,26 @@ export default function App() {
   // 函数：showRunLog
   const showRunLog = async (run: TaskRun) => {
     if (!run.ID) return;
+    setTaskRunLogLoading(true);
     try {
       const data = await getTaskRunDetail(run.ID);
       setCurrentLogRun(data.taskRun || run);
+      setCurrentLogLinks(data.links || []);
       setCurrentLogResults(data.taskResults || []);
       setCurrentExecutions(data.executions || []);
-      setLogModalOpen(true);
     } catch (error) {
       message.error(errorMessage(error, '读取日志失败'));
+    } finally {
+      setTaskRunLogLoading(false);
     }
+  };
+
+  // 函数：closeRunLog
+  const closeRunLog = () => {
+    setCurrentLogRun(null);
+    setCurrentLogLinks([]);
+    setCurrentLogResults([]);
+    setCurrentExecutions([]);
   };
 
   // 函数：showRunPrompt
@@ -1754,6 +1778,267 @@ export default function App() {
     </section>
   );
 
+  // 函数：renderTaskRunLogView
+  const renderTaskRunLogView = () => (
+    <div className="task-run-log-page">
+      <div className="task-run-log-header">
+        <div>
+          <Title level={3}>任务日志</Title>
+          <Text type="secondary">
+            #{currentLogRun?.ID || '-'} {currentLogRun?.taskName || '未选择任务'}
+          </Text>
+        </div>
+        <Space wrap>
+          {currentLogRun && renderTaskRecordType(currentLogRun.recordType)}
+          {currentLogRun && renderTaskRunStatus(currentLogRun.status)}
+          <Button
+            icon={<ReloadOutlined />}
+            loading={taskRunLogLoading}
+            disabled={!currentLogRun}
+            onClick={() => currentLogRun && void showRunLog(currentLogRun)}
+          >
+            刷新
+          </Button>
+        </Space>
+      </div>
+
+      <div className="task-run-log-summary">
+        <div className="task-run-log-summary-item">
+          <Text type="secondary">执行工具</Text>
+          <Text strong>{currentLogRun ? cliMap.get(currentLogRun.cliId) || currentLogRun.cliId : '-'}</Text>
+        </div>
+        <div className="task-run-log-summary-item">
+          <Text type="secondary">执行次数</Text>
+          <Text strong>{currentExecutions.length} 次</Text>
+        </div>
+        <div className="task-run-log-summary-item">
+          <Text type="secondary">任务结果</Text>
+          <Text strong>{currentLogResults.length} 条</Text>
+        </div>
+        <div className="task-run-log-summary-item">
+          <Text type="secondary">开始时间</Text>
+          <Text strong>{formatDateTime(currentLogRun?.startTime)}</Text>
+        </div>
+        <div className="task-run-log-summary-item task-run-log-summary-wide">
+          <Text type="secondary">最近结果</Text>
+          <Text strong>{currentLogRun?.reason || '暂无'}</Text>
+        </div>
+      </div>
+
+      <div className="task-table-head task-run-log-section-head">
+        <div>
+          <Title level={4}>执行记录</Title>
+          <Text type="secondary">按执行次数查看请求载荷、运行日志和响应结果。</Text>
+        </div>
+      </div>
+      <Table<TaskExecutionLog>
+        rowKey={(record) => String(record.ID || record.attemptNo)}
+        dataSource={currentExecutions}
+        className="task-table task-run-log-table"
+        loading={taskRunLogLoading}
+        pagination={false}
+        locale={{ emptyText: <Empty description="暂无执行记录" /> }}
+        expandable={{
+          expandedRowRender: (execution) => {
+            const taskDetails = buildExecutionTaskDetails(
+              execution,
+              currentLogResults,
+              currentLogLinks,
+              currentExecutions,
+            );
+            return (
+              <div className="task-run-log-execution-detail">
+                <div className="task-run-log-row-detail">
+                  <div className="result-detail-section">
+                    <Text strong>运行日志</Text>
+                    <pre className="task-log-box result-detail-code">{execution.runLog || '暂无日志'}</pre>
+                  </div>
+                  {extractBatchAudioItems(execution.aiResponseJson).length > 0 && (
+                    <div className="result-detail-section">
+                      <Text strong>生成的 TTS 音频</Text>
+                      <div className="task-run-log-audio-grid">
+                        {extractBatchAudioItems(execution.aiResponseJson).map((item) => (
+                          <div className="task-run-log-audio-item" key={`${item.itemKey}-${item.url}`}>
+                            <Text type="secondary">{item.itemKey}</Text>
+                            <audio className="full-field" controls preload="metadata" src={item.url}>
+                              当前浏览器不支持音频播放。
+                            </audio>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                  {execution.aiPromptJson && (
+                    <div className="result-detail-section">
+                      <Text strong>执行请求载荷</Text>
+                      <pre className="task-log-box result-detail-code">{formatJsonText(execution.aiPromptJson)}</pre>
+                    </div>
+                  )}
+                  {execution.aiResponseJson && (
+                    <div className="result-detail-section">
+                      <Text strong>执行响应结果</Text>
+                      <pre className="task-log-box result-detail-code">{formatJsonText(execution.aiResponseJson)}</pre>
+                    </div>
+                  )}
+                </div>
+
+                <div className="task-run-log-attempt-results">
+                  <div className="task-table-head task-run-log-section-head">
+                    <div>
+                      <Title level={5}>第 {execution.attemptNo} 次批次任务明细</Title>
+                      <Text type="secondary">状态、输入和响应均属于本次执行，不与其他执行次数混用。</Text>
+                    </div>
+                  </div>
+                  <Table<ExecutionTaskDetail>
+                    rowKey={(detail) => `${execution.attemptNo}-${detail.result.ID || detail.itemKey}`}
+                    dataSource={taskDetails}
+                    className="task-table task-run-log-table task-run-log-attempt-table"
+                    pagination={taskDetails.length > 20 ? {
+                      pageSize: 20,
+                      showSizeChanger: true,
+                      pageSizeOptions: tablePageSizeOptions,
+                      showTotal: (total) => `共 ${total} 条`,
+                    } : false}
+                    locale={{ emptyText: <Empty description="本次执行暂无任务明细" /> }}
+                    expandable={{
+                      expandedRowRender: (detail) => (
+                        <div className="task-run-log-result-detail">
+                          <div className="result-detail-section">
+                            <Text strong>本次实际任务输入</Text>
+                            <pre className="task-log-box result-detail-code">{formatJsonText(detail.input)}</pre>
+                          </div>
+                          <div className="result-detail-section">
+                            <Text strong>本次执行响应</Text>
+                            {detail.audioUrl && (
+                              <audio className="full-field" controls preload="metadata" src={detail.audioUrl}>
+                                当前浏览器不支持音频播放。
+                              </audio>
+                            )}
+                            <pre className="task-log-box result-detail-code">{formatJsonText(detail.response)}</pre>
+                          </div>
+                          <div className="result-detail-section">
+                            <Text strong>本次数据处理详情</Text>
+                            <pre className="task-log-box result-detail-code">{formatJsonText(detail.processing)}</pre>
+                          </div>
+                        </div>
+                      ),
+                    }}
+                    columns={[
+                      {
+                        title: 'ID',
+                        width: 100,
+                        render: (_, detail) => (
+                          <Text strong className="task-name-link">{detail.result.ID || '-'}</Text>
+                        ),
+                      },
+                      {
+                        title: '结果名称',
+                        width: 280,
+                        render: (_, detail) => <Text strong>{detail.result.resultName}</Text>,
+                      },
+                      {
+                        title: '本次状态',
+                        width: 130,
+                        render: (_, detail) => renderTaskResultStatus(detail.status),
+                      },
+                      {
+                        title: '数据源',
+                        width: 190,
+                        render: (_, detail) => (
+                          detail.result.databaseConfigId
+                            ? connectionMap.get(detail.result.databaseConfigId) || '未找到数据库'
+                            : <Text type="secondary">未关联</Text>
+                        ),
+                      },
+                      {
+                        title: '来源表',
+                        width: 190,
+                        render: (_, detail) => parseSelectedTables(detail.result.sourceTables).join(', ') || '-',
+                      },
+                      {
+                        title: '本次结果',
+                        width: 280,
+                        ellipsis: true,
+                        render: (_, detail) => detail.summary || <Text type="secondary">暂无</Text>,
+                      },
+                      {
+                        title: '本次错误',
+                        width: 300,
+                        ellipsis: true,
+                        render: (_, detail) => detail.errorMessage
+                          ? <Text type="danger">{detail.errorMessage}</Text>
+                          : <Text type="secondary">无</Text>,
+                      },
+                    ]}
+                    scroll={{ x: 1470 }}
+                  />
+                </div>
+              </div>
+            );
+          },
+        }}
+        columns={[
+          {
+            title: '执行次数',
+            dataIndex: 'attemptNo',
+            width: 110,
+            render: (value: number) => <Text strong>第 {value} 次</Text>,
+          },
+          {
+            title: '状态',
+            dataIndex: 'status',
+            width: 120,
+            render: (value: TaskRunStatus) => renderTaskRunStatus(value),
+          },
+          {
+            title: '执行工具',
+            dataIndex: 'cliId',
+            width: 150,
+            render: (value: string) => <Tag color="blue">{cliMap.get(value) || value || '-'}</Tag>,
+          },
+          {
+            title: '执行模式',
+            dataIndex: 'executionMode',
+            width: 130,
+            render: (value?: string) => value || '-',
+          },
+          {
+            title: '并发数',
+            dataIndex: 'workerCount',
+            width: 100,
+            render: (value?: number) => value ?? '-',
+          },
+          {
+            title: '开始时间',
+            dataIndex: 'startTime',
+            width: 180,
+            render: (value?: string) => formatDateTime(value),
+          },
+          {
+            title: '结束时间',
+            dataIndex: 'endTime',
+            width: 180,
+            render: (value?: string) => formatDateTime(value),
+          },
+          {
+            title: '耗时(秒)',
+            dataIndex: 'durationSeconds',
+            width: 110,
+            render: (value?: number) => value ?? '-',
+          },
+          {
+            title: '执行结果',
+            dataIndex: 'reason',
+            width: 260,
+            ellipsis: true,
+            render: (value?: string) => value || <Text type="secondary">暂无</Text>,
+          },
+        ]}
+        scroll={{ x: 1340 }}
+      />
+    </div>
+  );
+
   // 函数：renderTaskRunView
   const renderTaskRunView = () => (
     <section className="panel-page">
@@ -1850,8 +2135,8 @@ export default function App() {
             selectedRowKeys: selectedTaskRunIds,
             onChange: (keys) => setSelectedTaskRunIds(keys.map((key) => Number(key)).filter(Boolean)),
             getCheckboxProps: (record) => ({
-              disabled: !isFormalRecord(record.recordType),
-              title: isFormalRecord(record.recordType) ? undefined : '验证批次仅供查看',
+              disabled: !isExecutableRunRecord(record.recordType),
+              title: isExecutableRunRecord(record.recordType) ? undefined : '历史验证批次仅供查看',
             }),
           }}
           pagination={{
@@ -1973,13 +2258,13 @@ export default function App() {
               fixed: 'right',
               render: (_, record) => (
                 <Space split={<span className="table-action-split" />}>
-                  {isFormalRecord(record.recordType)
+                  {isExecutableRunRecord(record.recordType)
                     && (record.status === 'PENDING' || record.status === 'CANCELLED') && (
                     <Button type="link" size="small" onClick={() => openSingleTaskRunStartModal(record)}>
                       执行
                     </Button>
                   )}
-                  {isFormalRecord(record.recordType) && record.status === 'FAILED' && (
+                  {isExecutableRunRecord(record.recordType) && record.status === 'FAILED' && (
                     <Button type="link" size="small" onClick={() => openSingleTaskRunStartModal(record)}>
                       重试
                     </Button>
@@ -1987,13 +2272,13 @@ export default function App() {
                   <Button type="link" size="small" onClick={() => void showRunLog(record)}>
                     日志
                   </Button>
-                  {isFormalRecord(record.recordType)
+                  {isExecutableRunRecord(record.recordType)
                     && (['PENDING', 'QUEUED', 'RETRY_WAIT', 'RUNNING'] as TaskRunStatus[]).includes(record.status) && (
                     <Button type="link" size="small" onClick={() => void cancelRun(record)}>
                       取消
                     </Button>
                   )}
-                  {isFormalRecord(record.recordType) && (
+                  {isExecutableRunRecord(record.recordType) && (
                     <Button type="link" size="small" danger onClick={() => removeTaskRun(record)}>
                       删除
                     </Button>
@@ -2265,7 +2550,10 @@ export default function App() {
           <button
             type="button"
             className={activeModule === 'taskRun' ? 'top-nav-item active' : 'top-nav-item'}
-            onClick={() => setActiveModule('taskRun')}
+            onClick={() => {
+              setActiveModule('taskRun');
+              closeRunLog();
+            }}
           >
             <RobotOutlined />
             <span>任务列表</span>
@@ -2326,6 +2614,18 @@ export default function App() {
           void loadTaskRunPageData();
         }}
       />
+
+      <Modal
+        open={Boolean(currentLogRun)}
+        onCancel={closeRunLog}
+        footer={null}
+        title={null}
+        width="100vw"
+        maskClosable={false}
+        className="task-run-log-modal"
+      >
+        {currentLogRun && renderTaskRunLogView()}
+      </Modal>
 
       <Modal
         title={editingProject ? '编辑项目' : '新增项目'}
@@ -2651,101 +2951,6 @@ export default function App() {
       </Modal>
 
       <Modal
-        title="任务日志"
-        open={logModalOpen}
-        onCancel={() => setLogModalOpen(false)}
-        footer={<Button onClick={() => setLogModalOpen(false)}>关闭</Button>}
-        width={760}
-      >
-        <Space direction="vertical" size={12} className="full-field">
-          <div className="table-picker-meta">
-            <Text strong>{currentLogRun?.taskName || '未选择任务'}</Text>
-            <Space wrap>
-              {currentLogRun && renderTaskRecordType(currentLogRun.recordType)}
-              <Text type="secondary">
-                最近状态：{currentLogRun ? taskRunStatusLabel(currentLogRun.status) : '-'} / 共 {currentExecutions.length} 次执行
-              </Text>
-            </Space>
-          </div>
-          {currentExecutions.length > 0 ? (
-            <Collapse
-              className="result-collapse"
-              defaultActiveKey={[String(currentExecutions[0]?.ID)]}
-              items={currentExecutions.map((execution) => ({
-                key: String(execution.ID || execution.attemptNo),
-                label: (
-                  <Space wrap>
-                    <Text strong>第 {execution.attemptNo} 次执行</Text>
-                    <Tag color={taskRunStatusColor(execution.status)}>{taskRunStatusLabel(execution.status)}</Tag>
-                    <Text type="secondary">{cliMap.get(execution.cliId) || execution.cliId}</Text>
-                    <Text type="secondary">{formatDateTime(execution.startTime)}</Text>
-                    <Text type="secondary">{execution.durationSeconds ?? '-'} 秒</Text>
-                  </Space>
-                ),
-                children: (
-                  <Space direction="vertical" size={12} className="full-field">
-                    {execution.reason && <Text type="secondary">执行结果：{execution.reason}</Text>}
-                    <pre className="task-log-box">{execution.runLog || '暂无日志'}</pre>
-                    {execution.aiPromptJson && (
-                      <div className="result-detail-section">
-                        <Text strong>发送给 AI 的 JSON</Text>
-                        <pre className="task-log-box result-detail-code">{formatJsonText(execution.aiPromptJson)}</pre>
-                      </div>
-                    )}
-                    {execution.aiResponseJson && (
-                      <div className="result-detail-section">
-                        <Text strong>AI 响应 JSON</Text>
-                        <pre className="task-log-box result-detail-code">{formatJsonText(execution.aiResponseJson)}</pre>
-                      </div>
-                    )}
-                  </Space>
-                ),
-              }))}
-            />
-          ) : (
-            <Text type="secondary">暂无执行记录。</Text>
-          )}
-          {currentLogResults.length > 0 ? (
-            <Collapse
-              className="result-collapse"
-              items={currentLogResults.map((result) => {
-                const payload = parseResultPayload(result.resultContent);
-                return {
-                  key: String(result.ID || result.resultName),
-                  label: (
-                    <Space>
-                      <Text strong>{result.resultName}</Text>
-                      <Tag>{taskResultStatusLabel(result.status)}</Tag>
-                    </Space>
-                  ),
-                  children: (
-                    <Space direction="vertical" size={12} className="full-field">
-                      <div className="result-detail-section">
-                        <Text strong>任务输入</Text>
-                        <pre className="task-log-box result-detail-code">
-                          {extractResultInput(payload, result.resultContent)}
-                        </pre>
-                      </div>
-                      <div className="result-detail-section">
-                        <Text strong>执行响应结果</Text>
-                        <pre className="task-log-box result-detail-code">{formatResultExecutionResponse(payload)}</pre>
-                      </div>
-                      <div className="result-detail-section">
-                        <Text strong>数据处理详情</Text>
-                        <pre className="task-log-box result-detail-code">{formatResultWriteBack(payload)}</pre>
-                      </div>
-                    </Space>
-                  ),
-                };
-              })}
-            />
-          ) : (
-            <Text type="secondary">暂无关联任务结果。</Text>
-          )}
-        </Space>
-      </Modal>
-
-      <Modal
         title="任务结果详情"
         open={resultDetailOpen}
         onCancel={() => setResultDetailOpen(false)}
@@ -2875,9 +3080,9 @@ function isTaskRunExecutable(status: TaskRunStatus) {
   return ['PENDING', 'FAILED', 'CANCELLED', 'QUEUED', 'RETRY_WAIT', 'RUNNING'].includes(status);
 }
 
-// 函数：isFormalRecord
-function isFormalRecord(recordType?: TaskRecordType) {
-  return !recordType || recordType === 'FORMAL';
+// 函数：isExecutableRunRecord
+function isExecutableRunRecord(recordType?: TaskRecordType) {
+  return recordType !== 'VALIDATION_HISTORY';
 }
 
 // 函数：isExecutableResultRecord
@@ -3071,6 +3276,153 @@ function extractResultAudioUrl(payload: Record<string, unknown> | null) {
   if (!isPlainRecord(ttsResult)) return '';
   const downloadUrl = ttsResult.downloadUrl;
   return typeof downloadUrl === 'string' ? downloadUrl : '';
+}
+
+// 函数：extractBatchAudioItems
+function extractBatchAudioItems(aiResponseJson?: string) {
+  if (!aiResponseJson?.trim()) return [];
+  try {
+    const response = JSON.parse(aiResponseJson) as unknown;
+    if (!isPlainRecord(response) || !Array.isArray(response.items)) return [];
+    return response.items.flatMap((item, index) => {
+      if (!isPlainRecord(item) || !isPlainRecord(item.ttsResult)) return [];
+      const downloadUrl = item.ttsResult.downloadUrl;
+      if (typeof downloadUrl !== 'string' || !downloadUrl.trim()) return [];
+      const itemKey = typeof item.itemKey === 'string' ? item.itemKey : `第 ${index + 1} 条`;
+      return [{ itemKey, url: downloadUrl }];
+    });
+  } catch {
+    return [];
+  }
+}
+
+// 函数：buildExecutionTaskDetails
+function buildExecutionTaskDetails(
+  execution: TaskExecutionLog,
+  results: TaskResult[],
+  links: TaskRunResultLink[],
+  executions: TaskExecutionLog[],
+): ExecutionTaskDetail[] {
+  const prompt = parseJsonRecord(execution.aiPromptJson);
+  const response = parseJsonRecord(execution.aiResponseJson);
+  const promptItems = recordArray(prompt?.items);
+  const parsedResponse = isPlainRecord(response?.parsed) ? response.parsed : null;
+  const responseItems = recordArray(response?.items).length > 0
+    ? recordArray(response?.items)
+    : recordArray(parsedResponse?.items);
+  const responseItemsByKey = new Map<string, Record<string, unknown>>();
+  const responseItemsByResultId = new Map<number, Record<string, unknown>>();
+  responseItems.forEach((item) => {
+    const itemKey = typeof item.itemKey === 'string' ? item.itemKey : '';
+    if (itemKey) responseItemsByKey.set(itemKey, item);
+    const taskResultId = Number(item.taskResultId);
+    if (Number.isFinite(taskResultId) && taskResultId > 0) {
+      responseItemsByResultId.set(taskResultId, item);
+    }
+  });
+  const linkMap = new Map(links.map((link) => [link.taskResultId, link]));
+  const latestAttempt = executions.reduce((max, item) => Math.max(max, item.attemptNo || 0), 0);
+
+  return results.map((result, index) => {
+    const promptItem = promptItems[index] || null;
+    const itemKey = typeof promptItem?.itemKey === 'string' ? promptItem.itemKey : batchItemKey(index);
+    const responseItem = (result.ID ? responseItemsByResultId.get(result.ID) : undefined)
+      || responseItemsByKey.get(itemKey)
+      || responseItems[index]
+      || null;
+    const explicitStatus = normalizeExecutionItemStatus(responseItem?.status);
+    const responseError = textValue(responseItem?.errorMessage)
+      || textValue(responseItem?.processorError)
+      || textValue(response?.processorError);
+    const latestLink = result.ID ? linkMap.get(result.ID) : undefined;
+    const latestLinkStatus = normalizeExecutionItemStatus(latestLink?.status);
+    const fallbackStatus = executionStatusToResultStatus(execution.status);
+    const status = explicitStatus
+      || (responseError ? 'FAILED' : null)
+      || (execution.status === 'SUCCESS' ? 'SUCCESS' : null)
+      || (execution.attemptNo === latestAttempt ? latestLinkStatus : null)
+      || fallbackStatus;
+    const errorMessage = status === 'FAILED'
+      ? responseError
+        || (execution.attemptNo === latestAttempt ? latestLink?.errorMessage || '' : '')
+        || execution.reason
+        || '本次执行失败'
+      : '';
+    const currentPayload = parseResultPayload(result.resultContent);
+    const input = promptItem
+      || (currentPayload ? extractResultInput(currentPayload, result.resultContent) : result.resultContent)
+      || '暂无本次任务输入';
+    const itemResponse = responseItem
+      || (responseError ? { errorMessage: responseError } : null)
+      || (execution.status === 'SUCCESS'
+        ? { status: 'SUCCESS', message: '本次执行成功，历史记录未保存单条响应。' }
+        : { status, message: execution.reason || '本次执行未返回单条响应。' });
+    const ttsResult = isPlainRecord(responseItem?.ttsResult) ? responseItem.ttsResult : null;
+    const audioUrl = textValue(ttsResult?.downloadUrl);
+    const processing: Record<string, unknown> = {
+      attemptNo: execution.attemptNo,
+      executionStatus: execution.status,
+      itemKey,
+    };
+    if (isPlainRecord(response?.execution)) processing.execution = response.execution;
+    if (responseItem?.backfillResult) processing.backfillResult = responseItem.backfillResult;
+    if (responseItem?.validationExecution !== undefined) {
+      processing.validationExecution = responseItem.validationExecution;
+    }
+    if (errorMessage) processing.errorMessage = errorMessage;
+
+    return {
+      result,
+      itemKey,
+      status,
+      summary: status === 'SUCCESS'
+        ? '本次执行成功'
+        : status === 'FAILED'
+          ? '本次执行失败'
+          : execution.reason || taskResultStatusLabel(status),
+      errorMessage,
+      input,
+      response: itemResponse,
+      processing,
+      audioUrl,
+    };
+  });
+}
+
+// 函数：parseJsonRecord
+function parseJsonRecord(value?: string) {
+  if (!value?.trim()) return null;
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return isPlainRecord(parsed) ? parsed : null;
+  } catch {
+    return null;
+  }
+}
+
+// 函数：recordArray
+function recordArray(value: unknown) {
+  return Array.isArray(value) ? value.filter(isPlainRecord) : [];
+}
+
+// 函数：normalizeExecutionItemStatus
+function normalizeExecutionItemStatus(value: unknown): TaskResultStatus | null {
+  return typeof value === 'string' && ['PENDING', 'RUNNING', 'SUCCESS', 'FAILED'].includes(value)
+    ? value as TaskResultStatus
+    : null;
+}
+
+// 函数：executionStatusToResultStatus
+function executionStatusToResultStatus(status: TaskRunStatus): TaskResultStatus {
+  if (status === 'SUCCESS') return 'SUCCESS';
+  if (status === 'FAILED' || status === 'CANCELLED') return 'FAILED';
+  if (status === 'RUNNING') return 'RUNNING';
+  return 'PENDING';
+}
+
+// 函数：textValue
+function textValue(value: unknown) {
+  return typeof value === 'string' ? value.trim() : '';
 }
 
 // 函数：formatResultWriteBack

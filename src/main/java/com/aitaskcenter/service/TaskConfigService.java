@@ -95,17 +95,31 @@ public class TaskConfigService {
     // 方法：generateRunBatches
     public Map<String, Object> generateRunBatches(Long id, GenerateTaskRunBatchRequest request) {
         archiveCurrentValidationRuns(id);
-        return generateRunBatches(id, request, TaskRecordType.FORMAL, null);
+        return generateRunBatches(
+                id,
+                request,
+                TaskRecordType.FORMAL,
+                TaskRecordType.FORMAL,
+                null);
     }
 
     @Transactional
     public Map<String, Object> generateValidationRunBatch(Long id, GenerateTaskRunBatchRequest request) {
         archiveCurrentValidationRuns(id);
-        return generateRunBatches(id, request, TaskRecordType.VALIDATION_CURRENT, 1);
+        return generateRunBatches(
+                id,
+                request,
+                TaskRecordType.FORMAL,
+                TaskRecordType.VALIDATION_CURRENT,
+                1);
     }
 
     private Map<String, Object> generateRunBatches(
-            Long id, GenerateTaskRunBatchRequest request, String recordType, Integer maxRunCount) {
+            Long id,
+            GenerateTaskRunBatchRequest request,
+            String candidateResultRecordType,
+            String runRecordType,
+            Integer maxRunCount) {
         if (id == null) {
             throw new IllegalArgumentException("缺少任务配置 ID");
         }
@@ -125,7 +139,8 @@ public class TaskConfigService {
         Set<String> statuses = buildBatchStatuses(request.getIncludeFailed());
 
         List<TaskResult> candidateResults = taskResultRepository
-                .findByTaskConfigIdAndRecordTypeAndStatusInOrderByIdAsc(id, TaskRecordType.FORMAL, statuses);
+                .findByTaskConfigIdAndRecordTypeAndStatusInOrderByIdAsc(
+                        id, candidateResultRecordType, statuses);
         if (candidateResults.isEmpty()) {
             return Map.of(
                     "createdRunCount", 0,
@@ -148,7 +163,7 @@ public class TaskConfigService {
                     new TaskRunPromptBuilder.BatchPromptContext(taskRunName, cliId, task.getSelectedTables()),
                     chunk);
             Long taskRunId = insertTaskRunBatch(
-                    task, taskRunName, cliId, chunk.size(), promptJson, recordType, now);
+                    task, taskRunName, cliId, chunk.size(), promptJson, runRecordType, now);
             for (TaskResult taskResult : chunk) {
                 linkRows.add(new Object[]{now, now, taskRunId, taskResult.getId(), "PENDING", ""});
             }

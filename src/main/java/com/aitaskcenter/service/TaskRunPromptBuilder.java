@@ -13,6 +13,10 @@ import org.springframework.util.StringUtils;
 
 @Service
 public class TaskRunPromptBuilder {
+    private static final String SCORE_TASK_TYPE = "word_clean_sentence_score";
+    private static final String SCORE_BATCH_TASK_TYPE = "word_clean_sentence_score_batch";
+    private static final String TTS_TASK_TYPE = "word_clean_best_sentence_tts";
+    private static final String TTS_BATCH_TASK_TYPE = "word_clean_best_sentence_tts_batch";
     private static final int SCORE_MIN = 1;
     private static final int SCORE_MAX = 100;
     private final ObjectMapper objectMapper;
@@ -31,8 +35,28 @@ public class TaskRunPromptBuilder {
     // 方法：buildBatchPromptJson
     public String buildBatchPromptJson(BatchPromptContext context, List<TaskResult> results) {
         try {
+            if (results == null || results.isEmpty()) {
+                throw new IllegalArgumentException("执行批次至少需要一条任务结果");
+            }
+            String taskType = detectTaskType(results);
+            if (TTS_TASK_TYPE.equals(taskType)) {
+                return buildTtsBatchJson(context, results);
+            }
+            if (!SCORE_TASK_TYPE.equals(taskType)) {
+                throw new IllegalArgumentException("批次任务类型不支持: " + taskType);
+            }
+            return buildScoreBatchJson(context, results);
+        } catch (IllegalArgumentException ex) {
+            throw ex;
+        } catch (Exception ex) {
+            throw new IllegalArgumentException("生成批次执行载荷失败: " + ex.getMessage(), ex);
+        }
+    }
+
+    private String buildScoreBatchJson(BatchPromptContext context, List<TaskResult> results) {
+        try {
             Map<String, Object> root = new LinkedHashMap<>();
-            root.put("taskType", "word_clean_sentence_score_batch");
+            root.put("taskType", SCORE_BATCH_TASK_TYPE);
             root.put("version", 1);
             root.put("batch", buildBatchMeta(context, results));
             root.put("instructions", buildInstructions());
@@ -44,6 +68,47 @@ public class TaskRunPromptBuilder {
         } catch (Exception ex) {
             throw new IllegalArgumentException("生成批次 AI 提示词失败: " + ex.getMessage(), ex);
         }
+    }
+
+    private String buildTtsBatchJson(BatchPromptContext context, List<TaskResult> results) {
+        try {
+            Map<String, Object> root = new LinkedHashMap<>();
+            root.put("taskType", TTS_BATCH_TASK_TYPE);
+            root.put("version", 1);
+            root.put("batch", buildBatchMeta(context, results));
+            root.put("instructions", List.of(
+                    "按 items 顺序处理每一条最佳句子 TTS 任务。",
+                    "每个 item 独立调用 TTS 服务，一个 item 失败不得覆盖其他 item 的结果。",
+                    "任务状态与执行结果记录在 AI Task Center，不读取业务库 TTS job 表。",
+                    "验证批次只保存执行输出；正式批次成功后才按 writeBack 契约回填最佳句子。"));
+            root.put("rules", Map.of(
+                    "callCli", false,
+                    "continueOnItemFailure", true,
+                    "legacyJobTableDependency", false));
+            List<Map<String, Object>> items = buildTtsItems(results);
+            root.put("items", items);
+            root.put("responseSchema", buildTtsResponseSchema(items));
+            return objectMapper.writerWithDefaultPrettyPrinter().writeValueAsString(root);
+        } catch (Exception ex) {
+            throw new IllegalArgumentException("生成 TTS 批次执行载荷失败: " + ex.getMessage(), ex);
+        }
+    }
+
+    private String detectTaskType(List<TaskResult> results) throws Exception {
+        String expected = null;
+        for (TaskResult result : results) {
+            JsonNode payload = objectMapper.readTree(result.getResultContent());
+            String taskType = text(payload, "taskType", "");
+            if (!StringUtils.hasText(taskType)) {
+                throw new IllegalArgumentException("任务结果缺少 taskType: " + result.getId());
+            }
+            if (expected == null) {
+                expected = taskType;
+            } else if (!expected.equals(taskType)) {
+                throw new IllegalArgumentException("同一执行批次不能混合不同任务类型");
+            }
+        }
+        return expected == null ? "" : expected;
     }
 
     // 方法：buildBatchMeta
@@ -92,13 +157,58 @@ public class TaskRunPromptBuilder {
             }
             Map<String, Object> item = new LinkedHashMap<>();
             item.put("itemKey", itemKey(index));
-            item.put("taskType", "word_clean_sentence_score");
+            item.put("taskType", SCORE_TASK_TYPE);
             item.put("word", promptSafeText(text(payload, "word", text(writeBack, "word", ""))));
             item.put("sourceTable", text(payload, "sourceTable", text(writeBack, "sourceTable", "")));
             item.put("candidates", buildCandidates(candidateMap));
             items.add(item);
         }
         return items;
+    }
+
+    private List<Map<String, Object>> buildTtsItems(List<TaskResult> results) throws Exception {
+        List<Map<String, Object>> items = new ArrayList<>();
+        for (int index = 0; index < results.size(); index++) {
+            TaskResult result = results.get(index);
+            JsonNode payload = objectMapper.readTree(result.getResultContent());
+            JsonNode ttsInput = payload.path("ttsInput");
+            if (!ttsInput.isObject() || !StringUtils.hasText(text(ttsInput, "text", ""))) {
+                throw new IllegalArgumentException("TTS 任务结果缺少 ttsInput.text: " + result.getId());
+            }
+            JsonNode writeBack = payload.path("writeBack");
+            if (!writeBack.isObject()) {
+                throw new IllegalArgumentException("TTS 任务结果缺少 writeBack: " + result.getId());
+            }
+            long bestSentenceId = payload.path("bestSentenceId").asLong();
+            long wordCleanId = payload.path("wordCleanId").asLong();
+            if (bestSentenceId <= 0 || wordCleanId <= 0) {
+                throw new IllegalArgumentException("TTS 任务结果缺少有效来源 ID: " + result.getId());
+            }
+            Map<String, Object> item = new LinkedHashMap<>();
+            item.put("itemKey", itemKey(index));
+            item.put("taskType", TTS_TASK_TYPE);
+            item.put("word", text(payload, "word", ""));
+            item.put("bestSentenceId", bestSentenceId);
+            item.put("wordCleanId", wordCleanId);
+            item.put("sourceTable", text(payload, "sourceTable", ""));
+            item.put("source", objectMapper.convertValue(payload.path("source"), Object.class));
+            item.put("ttsInput", objectMapper.convertValue(ttsInput, Object.class));
+            item.put("writeBack", objectMapper.convertValue(writeBack, Object.class));
+            items.add(item);
+        }
+        return items;
+    }
+
+    private Map<String, Object> buildTtsResponseSchema(List<Map<String, Object>> items) {
+        return Map.of("items", items.stream().map(item -> Map.of(
+                "itemKey", item.get("itemKey"),
+                "status", "SUCCESS|FAILED",
+                "ttsResult", Map.of(
+                        "fileName", "生成的音频文件名",
+                        "downloadUrl", "音频访问地址",
+                        "byteSize", "音频字节数"),
+                "errorMessage", "失败时的错误信息"
+        )).toList());
     }
 
     // 方法：buildCandidates
