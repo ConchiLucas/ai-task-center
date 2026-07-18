@@ -9,6 +9,7 @@ import com.aitaskcenter.dto.TaskOnboardingResponse;
 import com.aitaskcenter.dto.TaskOnboardingResultSummary;
 import com.aitaskcenter.dto.TaskOnboardingRunSummary;
 import com.aitaskcenter.dto.TaskOnboardingTaskSummary;
+import com.aitaskcenter.dto.TaskHandlerDescriptor;
 import com.aitaskcenter.model.TaskConfig;
 import com.aitaskcenter.model.TaskRecordType;
 import com.aitaskcenter.model.TaskResult;
@@ -20,6 +21,7 @@ import com.aitaskcenter.repository.TaskRunRepository;
 import com.aitaskcenter.repository.TaskRunResultRepository;
 import com.aitaskcenter.service.TaskConfigService;
 import com.aitaskcenter.service.AiConfigService;
+import com.aitaskcenter.service.PythonWorkerClient;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
@@ -52,6 +54,7 @@ public class TaskOnboardingService {
     private final TaskOnboardingPromptBuilder promptBuilder;
     private final ObjectMapper objectMapper;
     private final AiConfigService aiConfigService;
+    private final PythonWorkerClient pythonWorkerClient;
 
     public TaskOnboardingService(
             TaskConfigRepository taskConfigRepository,
@@ -61,7 +64,8 @@ public class TaskOnboardingService {
             TaskConfigService taskConfigService,
             TaskOnboardingPromptBuilder promptBuilder,
             ObjectMapper objectMapper,
-            AiConfigService aiConfigService) {
+            AiConfigService aiConfigService,
+            PythonWorkerClient pythonWorkerClient) {
         this.taskConfigRepository = taskConfigRepository;
         this.taskResultRepository = taskResultRepository;
         this.taskRunRepository = taskRunRepository;
@@ -70,6 +74,7 @@ public class TaskOnboardingService {
         this.promptBuilder = promptBuilder;
         this.objectMapper = objectMapper;
         this.aiConfigService = aiConfigService;
+        this.pythonWorkerClient = pythonWorkerClient;
     }
 
     @Transactional
@@ -118,11 +123,13 @@ public class TaskOnboardingService {
         OnboardingStep current = step(task);
         if (current == OnboardingStep.RESULT_CODE) {
             requireStageAndToken(request, "result", text(context.get("resultCodeToken")));
+            verifyHandlerReady(task, true);
             task.setOnboardingStep(OnboardingStep.RESULT_VALIDATION.name());
             context.remove("resultCodeToken");
             context.put("resultCodeReadyAt", OffsetDateTime.now().toString());
         } else if (current == OnboardingStep.BATCH_CODE) {
             requireStageAndToken(request, "batch", text(context.get("batchCodeToken")));
+            verifyHandlerReady(task, false);
             task.setOnboardingStep(OnboardingStep.BATCH_VALIDATION.name());
             context.remove("batchCodeToken");
             context.put("batchCodeReadyAt", OffsetDateTime.now().toString());
@@ -249,9 +256,11 @@ public class TaskOnboardingService {
         response.setAllowedActions(allowedActions(current, !validationResults.isEmpty(), validationRun != null));
         response.setErrorMessage(text(context.get("errorMessage")));
         if (current == OnboardingStep.RESULT_CODE) {
-            response.setPrompt(promptBuilder.build(task, current, text(context.get("resultCodeToken"))));
+            response.setPrompt(promptBuilder.build(
+                    task, current, text(context.get("resultCodeToken")), requireSelectedTarget(task)));
         } else if (current == OnboardingStep.BATCH_CODE) {
-            response.setPrompt(promptBuilder.build(task, current, text(context.get("batchCodeToken"))));
+            response.setPrompt(promptBuilder.build(
+                    task, current, text(context.get("batchCodeToken")), requireSelectedTarget(task)));
         }
         return response;
     }
@@ -323,6 +332,42 @@ public class TaskOnboardingService {
                 .filter(target -> type.equals(target.type()) && id.equals(target.id()))
                 .findFirst()
                 .orElseThrow(() -> new IllegalArgumentException("模型调用通道不存在或未启用"));
+    }
+
+    private void verifyHandlerReady(TaskConfig task, boolean resultStage) {
+        String expectedHandlerKey = "task_config_" + task.getId();
+        if (!resultStage && !expectedHandlerKey.equals(task.getHandlerKey())) {
+            throw new IllegalArgumentException("任务处理器尚未完成结果阶段注册");
+        }
+        TaskHandlerDescriptor handler = pythonWorkerClient.getTaskHandler(expectedHandlerKey);
+        if (handler == null || !expectedHandlerKey.equals(handler.handlerKey())) {
+            throw new IllegalArgumentException("Python Worker 返回了不匹配的任务处理器");
+        }
+        if (resultStage
+                && (!handler.supportsResultGeneration() || !handler.supportsSingleValidation())) {
+            throw new IllegalArgumentException("任务处理器尚未实现结果生成和单条验证");
+        }
+        if (!resultStage && (!handler.supportsBatchBuild() || !handler.supportsBatchExecution())) {
+            throw new IllegalArgumentException("任务处理器尚未实现批次构建和批次执行");
+        }
+        ExecutionTargetItem target = requireSelectedTarget(task);
+        if (handler.requiredCapability() == null
+                || !target.capabilities().contains(handler.requiredCapability())) {
+            throw new IllegalArgumentException(
+                    "模型调用通道不支持任务处理器所需能力 " + handler.requiredCapability());
+        }
+        if (resultStage) {
+            task.setHandlerKey(expectedHandlerKey);
+        }
+    }
+
+    private ExecutionTargetItem requireSelectedTarget(TaskConfig task) {
+        return aiConfigService.getExecutionTargets().stream()
+                .filter(ExecutionTargetItem::enabled)
+                .filter(target -> target.type().equals(task.getExecutorType()))
+                .filter(target -> target.id().equals(task.getExecutorId()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("已选择的模型调用通道不存在或未启用"));
     }
 
     private void requireStageAndToken(TaskOnboardingReportRequest request, String stage, String expectedToken) {

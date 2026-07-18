@@ -1,6 +1,7 @@
 package com.aitaskcenter.service;
 
 import com.aitaskcenter.dto.PythonWorkerStartRequest;
+import com.aitaskcenter.dto.TaskHandlerDescriptor;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.io.IOException;
@@ -169,6 +170,26 @@ public class PythonWorkerClient {
         } catch (InterruptedException ex) {
             Thread.currentThread().interrupt();
             throw new IllegalArgumentException("Python Worker 调用被中断");
+        }
+    }
+
+    public TaskHandlerDescriptor getTaskHandler(String handlerKey) {
+        String uri = baseUrl + "/api/task-handlers/" + encode(handlerKey);
+        HttpRequest request = HttpRequest.newBuilder(URI.create(uri))
+                .header("Accept", "application/json")
+                .GET()
+                .build();
+        try {
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 400) {
+                throw new IllegalArgumentException("Python Worker 任务处理器检查失败: " + response.body());
+            }
+            return objectMapper.readValue(response.body(), TaskHandlerDescriptor.class);
+        } catch (IOException ex) {
+            throw new IllegalArgumentException("Python Worker 任务处理器响应解析失败: " + ex.getMessage());
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new IllegalArgumentException("Python Worker 任务处理器检查被中断");
         }
     }
 

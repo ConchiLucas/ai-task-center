@@ -17,6 +17,7 @@ import com.aitaskcenter.repository.TaskRunRepository;
 import com.aitaskcenter.repository.TaskRunResultRepository;
 import com.aitaskcenter.service.AiConfigService;
 import com.aitaskcenter.service.TaskConfigService;
+import com.aitaskcenter.service.PythonWorkerClient;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Map;
@@ -114,7 +115,8 @@ class TaskOnboardingTargetSelectionTest {
                 mock(TaskConfigService.class),
                 new TaskOnboardingPromptBuilder(objectMapper),
                 objectMapper,
-                aiConfigService);
+                aiConfigService,
+                mock(PythonWorkerClient.class));
         return new Fixture(service, task, objectMapper);
     }
 

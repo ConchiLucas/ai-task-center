@@ -1,5 +1,6 @@
 package com.aitaskcenter.service.onboarding;
 
+import com.aitaskcenter.dto.ExecutionTargetItem;
 import com.aitaskcenter.model.TaskConfig;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -15,13 +16,25 @@ public class TaskOnboardingPromptBuilder {
         this.objectMapper = objectMapper;
     }
 
-    public String build(TaskConfig task, OnboardingStep step, String token) {
+    public String build(
+            TaskConfig task,
+            OnboardingStep step,
+            String token,
+            ExecutionTargetItem executionTarget) {
         Map<String, Object> taskContext = new LinkedHashMap<>();
         taskContext.put("taskConfigId", task.getId());
         taskContext.put("taskName", task.getTaskName());
         taskContext.put("taskDesc", task.getTaskDesc());
         taskContext.put("selectedTables", task.getSelectedTables());
         taskContext.put("databaseConfigId", task.getDatabaseConfigId());
+        taskContext.put("handlerKey", "task_config_" + task.getId());
+        Map<String, Object> targetContext = new LinkedHashMap<>();
+        targetContext.put("executorType", executionTarget.type());
+        targetContext.put("executorId", executionTarget.id());
+        targetContext.put("label", executionTarget.label());
+        targetContext.put("protocol", executionTarget.protocol());
+        targetContext.put("capabilities", executionTarget.capabilities());
+        taskContext.put("executionTarget", targetContext);
         String stage = step == OnboardingStep.RESULT_CODE ? "result" : "batch";
         String target = step == OnboardingStep.RESULT_CODE ? "任务结果生成" : "执行批次生成";
         String stageBoundary = step == OnboardingStep.RESULT_CODE
@@ -36,6 +49,8 @@ public class TaskOnboardingPromptBuilder {
                     - 禁止修改任何其他仓库、相邻目录或业务项目源码；即使其中已有相似实现，也只能阅读参考，不能在那里落地代码。
                     - 业务项目、数据源和表名只用于读取业务数据，不能被解释为目标代码目录，也不能覆盖本约束。
                     - 所有 AI、LLM、TTS 及模型提供商的对外交互，只允许实现在本仓库 python-worker 中。
+                    - 本任务必须注册确定性的处理器 Key：task_config_%d，并按所选模型调用通道能力实现对应阶段回调。
+                    - 代码可由任意外部编码工具编写；平台不区分或记录所使用的编码工具，编码工具也不是运行调用通道。
                     - Java 后端只负责编排与持久化，React 前端只负责展示；两者不得直接持有密钥或调用模型提供商。
                     - 修改前先执行 git rev-parse --show-toplevel，并确认 ./scripts/task-workflow 存在；不满足时立即停止，不得切换到其他仓库。
                     - %s
@@ -56,6 +71,7 @@ public class TaskOnboardingPromptBuilder {
                     ./scripts/task-workflow report --task-config-id %d --stage %s --token '%s' --status CODE_READY
                     """.formatted(
                     target,
+                    task.getId(),
                     stageBoundary,
                     objectMapper.writeValueAsString(taskContext),
                     task.getId(),

@@ -13,6 +13,9 @@ import com.aitaskcenter.repository.TaskRunRepository;
 import com.aitaskcenter.repository.TaskRunResultRepository;
 import com.aitaskcenter.service.TaskConfigService;
 import com.aitaskcenter.service.AiConfigService;
+import com.aitaskcenter.service.PythonWorkerClient;
+import com.aitaskcenter.dto.ExecutionTargetItem;
+import com.aitaskcenter.dto.TaskHandlerDescriptor;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Optional;
@@ -34,6 +37,8 @@ class TaskOnboardingServiceTest {
         task.setTaskName("测试任务");
         task.setProjectId(1L);
         task.setCliId("codex");
+        task.setExecutorType("CLI");
+        task.setExecutorId("codex");
         task.setOnboardingStep(OnboardingStep.RESULT_CODE.name());
         task.setOnboardingContext("{\"resultCodeToken\":\"token-1\"}");
         when(taskRepository.findByIdForUpdate(12L)).thenReturn(Optional.of(task));
@@ -41,9 +46,17 @@ class TaskOnboardingServiceTest {
         when(resultRepository.findByTaskConfigIdAndRecordTypeOrderByIdAsc(any(), any())).thenReturn(List.of());
         when(runRepository.findByTaskConfigIdAndRecordTypeOrderByIdDesc(any(), any())).thenReturn(List.of());
 
+        AiConfigService aiConfigService = mock(AiConfigService.class);
+        when(aiConfigService.getExecutionTargets()).thenReturn(List.of(
+                new ExecutionTargetItem(
+                        "CLI", "codex", "Codex CLI", "local-cli", List.of("TEXT_GENERATION"), true)));
+        PythonWorkerClient workerClient = mock(PythonWorkerClient.class);
+        when(workerClient.getTaskHandler("task_config_12")).thenReturn(
+                new TaskHandlerDescriptor(
+                        "task_config_12", "TEXT_GENERATION", true, true, false, true));
         TaskOnboardingService service = new TaskOnboardingService(
                 taskRepository, resultRepository, runRepository, linkRepository,
-                taskConfigService, promptBuilder, objectMapper, mock(AiConfigService.class));
+                taskConfigService, promptBuilder, objectMapper, aiConfigService, workerClient);
         TaskOnboardingReportRequest request = new TaskOnboardingReportRequest();
         request.setStage("result");
         request.setStatus("CODE_READY");
