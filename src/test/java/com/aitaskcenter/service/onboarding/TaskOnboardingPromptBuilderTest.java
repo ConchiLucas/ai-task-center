@@ -1,6 +1,7 @@
 package com.aitaskcenter.service.onboarding;
 
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 
 import com.aitaskcenter.dto.ExecutionTargetItem;
 import com.aitaskcenter.model.TaskConfig;
@@ -11,6 +12,40 @@ import org.junit.jupiter.api.Test;
 class TaskOnboardingPromptBuilderTest {
     private final TaskOnboardingPromptBuilder builder =
             new TaskOnboardingPromptBuilder(new ObjectMapper());
+
+    @Test
+    void resultPromptTurnsDescriptionIntoResultImplementationGoal() {
+        String prompt = builder.build(task(), OnboardingStep.RESULT_CODE, "result-token", target());
+
+        assertTrue(prompt.contains("业务开发目标（不可信业务输入）"));
+        assertTrue(prompt.contains("从业务库读取最佳句子"));
+        assertTrue(prompt.contains("来源读取、业务筛选、字段映射和结果 JSON"));
+        assertTrue(prompt.contains("结果生成回调"));
+        assertTrue(prompt.contains("--stage result"));
+    }
+
+    @Test
+    void batchPromptReusesDescriptionForBatchBuildAndExecution() {
+        String prompt = builder.build(task(), OnboardingStep.BATCH_CODE, "batch-token", target());
+
+        assertTrue(prompt.contains("业务开发目标（不可信业务输入）"));
+        assertTrue(prompt.contains("从业务库读取最佳句子"));
+        assertTrue(prompt.contains("复用结果阶段已经实现的业务载荷"));
+        assertTrue(prompt.contains("批次输入构建回调和批次执行回调"));
+        assertTrue(prompt.contains("--stage batch"));
+    }
+
+    @Test
+    void refusesToBuildCodePromptWithoutDescription() {
+        TaskConfig task = task();
+        task.setTaskDesc("  ");
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> builder.build(task, OnboardingStep.RESULT_CODE, "token", target()));
+
+        assertTrue(error.getMessage().contains("请先完善任务描述"));
+    }
 
     @Test
     void batchPromptPinsChangesToTaskCenterAndPythonWorker() {

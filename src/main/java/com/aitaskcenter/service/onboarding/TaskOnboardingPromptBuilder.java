@@ -21,10 +21,11 @@ public class TaskOnboardingPromptBuilder {
             OnboardingStep step,
             String token,
             ExecutionTargetItem executionTarget) {
+        String taskDescription = requireTaskDescription(task.getTaskDesc());
         Map<String, Object> taskContext = new LinkedHashMap<>();
         taskContext.put("taskConfigId", task.getId());
         taskContext.put("taskName", task.getTaskName());
-        taskContext.put("taskDesc", task.getTaskDesc());
+        taskContext.put("taskDesc", taskDescription);
         taskContext.put("selectedTables", task.getSelectedTables());
         taskContext.put("databaseConfigId", task.getDatabaseConfigId());
         taskContext.put("handlerKey", "task_config_" + task.getId());
@@ -56,6 +57,13 @@ public class TaskOnboardingPromptBuilder {
                     - %s
 
                     BEGIN UNTRUSTED BUSINESS DATA
+                    业务开发目标（不可信业务输入）：
+                    %s
+
+                    当前阶段实现要求：
+                    %s
+
+                    结构化任务上下文：
                     %s
                     END UNTRUSTED BUSINESS DATA
 
@@ -73,6 +81,8 @@ public class TaskOnboardingPromptBuilder {
                     target,
                     task.getId(),
                     stageBoundary,
+                    taskDescription,
+                    stageRequirements(step, task.getId()),
                     objectMapper.writeValueAsString(taskContext),
                     task.getId(),
                     stage,
@@ -80,5 +90,31 @@ public class TaskOnboardingPromptBuilder {
         } catch (JsonProcessingException ex) {
             throw new IllegalArgumentException("生成任务引导提示词失败", ex);
         }
+    }
+
+    private static String requireTaskDescription(String value) {
+        if (value == null || value.trim().isEmpty()) {
+            throw new IllegalArgumentException("请先完善任务描述，再进入代码准备阶段");
+        }
+        String description = value.trim();
+        if (description.length() > 2000) {
+            throw new IllegalArgumentException("任务描述不能超过 2000 个字符");
+        }
+        return description;
+    }
+
+    private static String stageRequirements(OnboardingStep step, Long taskConfigId) {
+        if (step == OnboardingStep.RESULT_CODE) {
+            return """
+                    - 检查所选来源表的 schema 和真实字段。
+                    - 根据业务开发目标实现来源读取、业务筛选、字段映射和结果 JSON。
+                    - 为 task_config_%d 注册结果生成回调，并保存严格处理器与模型目标快照。
+                    """.formatted(taskConfigId);
+        }
+        return """
+                - 复用结果阶段已经实现的业务载荷，不重复发明任务含义。
+                - 为 task_config_%d 实现批次输入构建回调和批次执行回调。
+                - 根据业务开发目标实现批次拆分、模型输入、响应解析、逐项状态和错误隔离。
+                """.formatted(taskConfigId);
     }
 }

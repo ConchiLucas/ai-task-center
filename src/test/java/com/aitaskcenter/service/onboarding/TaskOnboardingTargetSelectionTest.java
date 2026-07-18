@@ -26,6 +26,20 @@ import org.junit.jupiter.api.Test;
 
 class TaskOnboardingTargetSelectionTest {
     @Test
+    void taskWithoutDescriptionCannotEnterResultCodePreparation() {
+        TaskConfig task = task(OnboardingStep.TARGET_SELECTION, "{}");
+        task.setTaskDesc("  ");
+        Fixture fixture = fixture(task);
+
+        IllegalArgumentException error = assertThrows(
+                IllegalArgumentException.class,
+                () -> fixture.service.selectExecutionTarget(
+                        12L, new SelectExecutionTargetRequest("CLI", "codex")));
+
+        assertEquals("请先完善任务描述，再进入代码准备阶段", error.getMessage());
+    }
+
+    @Test
     void selectsOneEnabledRuntimeTargetAndAdvancesToResultCode() throws Exception {
         Fixture fixture = fixture(task(OnboardingStep.TARGET_SELECTION, "{}"));
 
@@ -124,6 +138,7 @@ class TaskOnboardingTargetSelectionTest {
         TaskConfig task = new TaskConfig();
         task.setId(12L);
         task.setTaskName("测试任务");
+        task.setTaskDesc("从来源表生成测试任务");
         task.setProjectId(1L);
         task.setOnboardingStep(step.name());
         task.setOnboardingContext(context);
