@@ -33,3 +33,13 @@
 - 已通过 13 个单元/接口测试和本次变更文件 Ruff 检查。
 - 已安全验证解析来源为 `database`，未调用真实 TTS，未输出 Key。
 - 已重启 word-agent，健康接口返回 `status=ok`。
+
+# 2026-07-18 任务接入与严格执行快照
+
+- 新建任务已简化为基础业务信息，生命周期从 `TARGET_SELECTION` 开始。
+- 模型通道选择已移动到接入流程；通用提示词支持任意外部编码工具，平台不再保存“接入代码 CLI”。
+- Python Worker 已增加处理器注册表、处理器描述接口和处理器批次输入构建接口。
+- `CODE_READY` 会校验确定性处理器键 `task_config_<id>`、阶段回调以及所选模型能力。
+- Java、Worker 和 React 已移除执行阶段的 `cliId` 覆盖、旧字段回退、按表名/载荷推断和旧执行接收接口。
+- 结果、批次、队列领取和执行日志统一只依赖 `handlerKey + executorType + executorId`。
+- Java 全量测试、Python Worker 50 个测试和 React 生产构建已通过；未执行真实任务、AI 或 TTS。
