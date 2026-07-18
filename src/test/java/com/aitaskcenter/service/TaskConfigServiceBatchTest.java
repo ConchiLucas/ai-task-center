@@ -100,7 +100,6 @@ class TaskConfigServiceBatchTest {
                 .thenReturn(List.of(ttsResult()));
         TaskConfigService service = service(taskRepository, resultRepository, jdbcTemplate);
         GenerateTaskRunBatchRequest request = request();
-        request.setCliId(null);
 
         service.generateRunBatches(1L, request);
 
@@ -136,13 +135,15 @@ class TaskConfigServiceBatchTest {
         task.setCliId("codex");
         task.setDatabaseConfigId(1L);
         task.setSelectedTables("[\"public.word_clean_best_sentence\"]");
+        task.setHandlerKey("word_clean_best_sentence_tts");
+        task.setExecutorType("AI_PROVIDER");
+        task.setExecutorId("xiaomi-mimo-tts");
         return task;
     }
 
     private static GenerateTaskRunBatchRequest request() {
         GenerateTaskRunBatchRequest request = new GenerateTaskRunBatchRequest();
         request.setBatchSize(3);
-        request.setCliId("codex");
         request.setTaskNamePrefix("生成 TTS 任务 - 验证");
         request.setIncludeFailed(false);
         return request;

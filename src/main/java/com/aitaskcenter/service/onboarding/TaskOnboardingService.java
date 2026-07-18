@@ -427,7 +427,6 @@ public class TaskOnboardingService {
     private static GenerateTaskRunBatchRequest validationBatchRequest(TaskConfig task) {
         GenerateTaskRunBatchRequest request = new GenerateTaskRunBatchRequest();
         request.setBatchSize(3);
-        request.setCliId(task.getCliId());
         request.setTaskNamePrefix(task.getTaskName() + " - 验证");
         request.setIncludeFailed(false);
         return request;

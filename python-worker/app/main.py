@@ -110,6 +110,12 @@ class StartExecutionRequest(BaseModel):
     taskRuns: list[WorkerTaskRunItem]
 
 
+class TaskHandlerBatchPromptRequest(BaseModel):
+    taskConfigId: int
+    taskRunName: str
+    taskResultIds: list[int] = Field(min_length=1)
+
+
 @dataclass
 class TaskConfigSnapshot:
     # 字段：任务配置 ID
@@ -3864,11 +3870,146 @@ def process_validation_task_results_batch(
     }
 
 
+def alphabetic_item_key(index: int) -> str:
+    value = index
+    chars: list[str] = []
+    while value >= 0:
+        chars.append(chr(ord("A") + value % 26))
+        value = value // 26 - 1
+    return "item_" + "".join(reversed(chars))
+
+
+def build_score_handler_batch_prompt(
+    task_config_id: int,
+    task_run_name: str,
+    task_result_ids: list[int],
+) -> dict[str, Any]:
+    task_results = load_task_result_snapshots(task_result_ids)
+    items: list[dict[str, Any]] = []
+    schema_items: list[dict[str, Any]] = []
+    for index, task_result in enumerate(task_results):
+        payload = parse_task_result_payload(task_result)
+        candidate_map = payload["writeBack"].get("candidateMap")
+        if not isinstance(candidate_map, dict) or not candidate_map:
+            raise HTTPException(
+                status_code=400,
+                detail=f"任务结果缺少 candidateMap: {task_result.id}",
+            )
+        candidates = []
+        for label, source in candidate_map.items():
+            if not isinstance(source, dict):
+                raise HTTPException(status_code=400, detail=f"候选句格式无效: {task_result.id}")
+            candidates.append({
+                "candidate": str(label),
+                "modelName": str(source.get("modelName") or "").translate(PROMPT_DIGIT_TRANSLATION),
+                "sentence": str(source.get("sentence") or "").translate(PROMPT_DIGIT_TRANSLATION),
+                "sentenceTranslation": str(source.get("sentenceTranslation") or "").translate(PROMPT_DIGIT_TRANSLATION),
+            })
+        item_key = alphabetic_item_key(index)
+        items.append({
+            "itemKey": item_key,
+            "taskType": RESULT_MODE_SCORE,
+            "word": str(payload.get("word") or payload["writeBack"].get("word") or "").translate(
+                PROMPT_DIGIT_TRANSLATION
+            ),
+            "sourceTable": str(payload.get("sourceTable") or payload["writeBack"].get("sourceTable") or ""),
+            "candidates": candidates,
+        })
+        first_candidate = candidates[0]["candidate"]
+        schema_items.append({
+            "itemKey": item_key,
+            "scores": [{"candidate": first_candidate, "score": 95, "reason": "简短原因"}],
+            "bestCandidate": first_candidate,
+        })
+    return {
+        "taskType": RESULT_MODE_SCORE_BATCH,
+        "version": 1,
+        "batch": {
+            "taskConfigId": task_config_id,
+            "taskName": task_run_name.strip(),
+            "resultCount": len(task_results),
+        },
+        "instructions": [
+            "你是英语例句质量评审助手。",
+            "请为 items 中每一个任务结果独立评分。",
+            "只返回 JSON，items 必须覆盖全部 itemKey。",
+            "每个 item 的 scores 必须覆盖全部 candidate，bestCandidate 必须为最高分。",
+        ],
+        "rules": {
+            "scoreMin": SCORE_MIN,
+            "scoreMax": SCORE_MAX,
+            "uniqueScorePerItem": True,
+            "returnOnlyJson": True,
+            "doNotReturnDatabaseIds": True,
+        },
+        "items": items,
+        "responseSchema": {"items": schema_items},
+    }
+
+
+def build_tts_handler_batch_prompt(
+    task_config_id: int,
+    task_run_name: str,
+    task_result_ids: list[int],
+) -> dict[str, Any]:
+    task_results = load_task_result_snapshots(task_result_ids)
+    items: list[dict[str, Any]] = []
+    for index, task_result in enumerate(task_results):
+        payload = parse_tts_task_result_payload(task_result)
+        best_sentence_id = int(payload.get("bestSentenceId") or 0)
+        word_clean_id = int(payload.get("wordCleanId") or 0)
+        write_back = payload.get("writeBack")
+        if best_sentence_id <= 0 or word_clean_id <= 0 or not isinstance(write_back, dict):
+            raise HTTPException(status_code=400, detail=f"TTS 任务结果来源信息无效: {task_result.id}")
+        items.append({
+            "itemKey": alphabetic_item_key(index),
+            "taskType": RESULT_MODE_TTS,
+            "word": str(payload.get("word") or ""),
+            "bestSentenceId": best_sentence_id,
+            "wordCleanId": word_clean_id,
+            "sourceTable": str(payload.get("sourceTable") or ""),
+            "source": payload.get("source"),
+            "ttsInput": payload["ttsInput"],
+            "writeBack": write_back,
+        })
+    return {
+        "taskType": RESULT_MODE_TTS_BATCH,
+        "version": 1,
+        "batch": {
+            "taskConfigId": task_config_id,
+            "taskName": task_run_name.strip(),
+            "resultCount": len(task_results),
+        },
+        "instructions": [
+            "按 items 顺序处理每一条最佳句子 TTS 任务。",
+            "每个 item 独立调用 TTS 服务，一个 item 失败不得覆盖其他 item 的结果。",
+        ],
+        "rules": {
+            "continueOnItemFailure": True,
+            "legacyJobTableDependency": False,
+        },
+        "items": items,
+        "responseSchema": {
+            "items": [{
+                "itemKey": item["itemKey"],
+                "status": "SUCCESS|FAILED",
+                "ttsResult": {
+                    "fileName": "生成的音频文件名",
+                    "downloadUrl": "音频访问地址",
+                    "byteSize": "音频字节数",
+                },
+                "errorMessage": "失败时的错误信息",
+            } for item in items],
+        },
+    }
+
+
 TASK_HANDLER_REGISTRY.register(TaskHandlerDefinition(
     handler_key=HANDLER_SCORE,
     required_capability="TEXT_GENERATION",
     result_generator=generate_word_clean_sentence_results,
     single_processor=process_word_clean_sentence_task_result,
+    batch_prompt_builder=build_score_handler_batch_prompt,
     batch_processor=process_word_clean_sentence_task_run_batch,
 ))
 TASK_HANDLER_REGISTRY.register(TaskHandlerDefinition(
@@ -3878,6 +4019,7 @@ TASK_HANDLER_REGISTRY.register(TaskHandlerDefinition(
     single_processor=lambda task_result_id, _executor_id=None: process_tts_validation_task_result(
         load_task_result_snapshot(task_result_id)
     ),
+    batch_prompt_builder=build_tts_handler_batch_prompt,
     batch_processor=process_word_clean_best_sentence_tts_task_run_batch,
 ))
 
@@ -3923,6 +4065,27 @@ def get_task_handler(handler_key: str) -> dict[str, Any]:
         return TASK_HANDLER_REGISTRY.describe(handler_key)
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+
+
+@app.post("/api/task-handlers/{handler_key}/batch-prompt")
+def build_task_handler_batch_prompt(
+    handler_key: str,
+    request: TaskHandlerBatchPromptRequest,
+) -> dict[str, Any]:
+    handler = require_registered_handler(handler_key)
+    callback = require_handler_phase(handler, "batch_prompt_builder", "批次构建")
+    prompt = callback(request.taskConfigId, request.taskRunName, request.taskResultIds)
+    if not isinstance(prompt, dict):
+        raise HTTPException(status_code=500, detail="任务处理器批次构建必须返回 JSON 对象")
+    meta = prompt.get("_meta") if isinstance(prompt.get("_meta"), dict) else {}
+    return {
+        **prompt,
+        "_meta": {
+            **meta,
+            "handlerKey": handler.handler_key,
+            "taskConfigId": request.taskConfigId,
+        },
+    }
 
 
 # 函数：health

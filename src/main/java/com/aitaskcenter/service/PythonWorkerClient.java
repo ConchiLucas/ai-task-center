@@ -193,6 +193,41 @@ public class PythonWorkerClient {
         }
     }
 
+    public String buildBatchPrompt(
+            String handlerKey,
+            Long taskConfigId,
+            String taskRunName,
+            List<Long> taskResultIds) {
+        String body;
+        try {
+            body = objectMapper.writeValueAsString(Map.of(
+                    "taskConfigId", taskConfigId,
+                    "taskRunName", taskRunName,
+                    "taskResultIds", taskResultIds));
+        } catch (JsonProcessingException ex) {
+            throw new IllegalArgumentException("Python Worker 批次构建请求序列化失败: " + ex.getMessage());
+        }
+        String uri = baseUrl + "/api/task-handlers/" + encode(handlerKey) + "/batch-prompt";
+        HttpRequest request = HttpRequest.newBuilder(URI.create(uri))
+                .header("Content-Type", "application/json")
+                .header("Accept", "application/json")
+                .POST(HttpRequest.BodyPublishers.ofString(body))
+                .build();
+        try {
+            HttpResponse<String> response = httpClient.send(request, HttpResponse.BodyHandlers.ofString());
+            if (response.statusCode() >= 400) {
+                throw new IllegalArgumentException("Python Worker 批次构建失败: " + response.body());
+            }
+            objectMapper.readTree(response.body());
+            return response.body();
+        } catch (IOException ex) {
+            throw new IllegalArgumentException("Python Worker 批次构建响应解析失败: " + ex.getMessage());
+        } catch (InterruptedException ex) {
+            Thread.currentThread().interrupt();
+            throw new IllegalArgumentException("Python Worker 批次构建被中断");
+        }
+    }
+
     // 方法：encode
     private static String encode(String value) {
         return URLEncoder.encode(value == null ? "" : value, StandardCharsets.UTF_8);

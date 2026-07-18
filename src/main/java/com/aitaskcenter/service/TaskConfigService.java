@@ -141,18 +141,23 @@ public class TaskConfigService {
         }
         TaskConfig task = repository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("任务配置不存在"));
+        if (request == null) {
+            request = new GenerateTaskRunBatchRequest();
+        }
         int batchSize = request.getBatchSize() == null ? 50 : request.getBatchSize();
         if (batchSize < 1 || batchSize > 1000) {
             throw new IllegalArgumentException("每个批次数量需在 1 到 1000 之间");
         }
-        String cliId = StringUtils.hasText(request.getCliId()) ? request.getCliId().trim() : task.getCliId();
-        TaskExecutionTargetResolver.ResolvedTarget executionTarget = taskExecutionTargetResolver.resolve(
-                task.getHandlerKey(),
-                task.getExecutorType(),
-                task.getExecutorId(),
-                cliId,
-                task.getSelectedTables(),
-                null);
+        if (!StringUtils.hasText(task.getHandlerKey())
+                || !StringUtils.hasText(task.getExecutorType())
+                || !StringUtils.hasText(task.getExecutorId())) {
+            throw new IllegalArgumentException("任务处理器或模型调用通道尚未就绪");
+        }
+        TaskExecutionTargetResolver.ResolvedTarget executionTarget =
+                new TaskExecutionTargetResolver.ResolvedTarget(
+                        task.getHandlerKey().trim(),
+                        task.getExecutorType().trim(),
+                        task.getExecutorId().trim());
         String namePrefix = StringUtils.hasText(request.getTaskNamePrefix())
                 ? request.getTaskNamePrefix().trim()
                 : task.getTaskName();
@@ -179,11 +184,13 @@ public class TaskConfigService {
             int end = Math.min(start + batchSize, candidateResults.size());
             List<TaskResult> chunk = candidateResults.subList(start, end);
             String taskRunName = namePrefix + " - 批次 " + batchIndex;
-            String promptJson = taskRunPromptBuilder.buildBatchPromptJson(
-                    new TaskRunPromptBuilder.BatchPromptContext(taskRunName, cliId, task.getSelectedTables()),
-                    chunk);
+            String promptJson = pythonWorkerClient.buildBatchPrompt(
+                    executionTarget.handlerKey(),
+                    task.getId(),
+                    taskRunName,
+                    chunk.stream().map(TaskResult::getId).toList());
             Long taskRunId = insertTaskRunBatch(
-                    task, taskRunName, cliId, executionTarget, chunk.size(), promptJson, runRecordType, now);
+                    task, taskRunName, null, executionTarget, chunk.size(), promptJson, runRecordType, now);
             for (TaskResult taskResult : chunk) {
                 linkRows.add(new Object[]{now, now, taskRunId, taskResult.getId(), "PENDING", ""});
             }
