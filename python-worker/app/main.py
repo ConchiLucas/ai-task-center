@@ -25,6 +25,8 @@ from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
+from app.handler_registry import TaskHandlerDefinition, TaskHandlerRegistry
+
 
 app = FastAPI(title="AI Task Center Python Worker")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -38,6 +40,7 @@ RESULT_MODE_SCORE_BATCH = f"{RESULT_MODE_SCORE}_batch"
 RESULT_MODE_TTS_BATCH = f"{RESULT_MODE_TTS}_batch"
 HANDLER_SCORE = RESULT_MODE_SCORE
 HANDLER_TTS = RESULT_MODE_TTS
+TASK_HANDLER_REGISTRY = TaskHandlerRegistry()
 PYTHON_WORKER_PUBLIC_BASE_URL = os.getenv(
     "PYTHON_WORKER_PUBLIC_BASE_URL",
     "http://127.0.0.1:19186",
@@ -3852,6 +3855,24 @@ def process_validation_task_results_batch(
     }
 
 
+TASK_HANDLER_REGISTRY.register(TaskHandlerDefinition(
+    handler_key=HANDLER_SCORE,
+    required_capability="TEXT_GENERATION",
+    result_generator=generate_word_clean_sentence_results,
+    single_processor=process_word_clean_sentence_task_result,
+    batch_processor=process_word_clean_sentence_task_run_batch,
+))
+TASK_HANDLER_REGISTRY.register(TaskHandlerDefinition(
+    handler_key=HANDLER_TTS,
+    required_capability="AUDIO_TTS",
+    result_generator=generate_word_clean_best_sentence_tts_results,
+    single_processor=lambda task_result_id, _executor_id=None: process_tts_validation_task_result(
+        load_task_result_snapshot(task_result_id)
+    ),
+    batch_processor=process_word_clean_best_sentence_tts_task_run_batch,
+))
+
+
 # 函数：load_queue_status_counts
 def load_queue_status_counts() -> dict[str, int]:
     settings = load_database_settings()
@@ -3879,6 +3900,20 @@ def download_tts_file(file_name: str) -> FileResponse:
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="TTS 文件不存在")
     return FileResponse(file_path, media_type="audio/wav", filename=file_name)
+
+
+@app.get("/api/task-handlers")
+def list_task_handlers() -> dict[str, Any]:
+    handlers = TASK_HANDLER_REGISTRY.list_descriptors()
+    return {"count": len(handlers), "handlers": handlers}
+
+
+@app.get("/api/task-handlers/{handler_key}")
+def get_task_handler(handler_key: str) -> dict[str, Any]:
+    try:
+        return TASK_HANDLER_REGISTRY.describe(handler_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
 
 
 # 函数：health
