@@ -867,7 +867,7 @@ export default function App() {
         projectId: values.projectId,
         databaseConfigId: values.databaseConfigId || null,
         selectedTables: editingTask?.selectedTables || '',
-        taskDesc: values.taskDesc || '',
+        taskDesc: String(values.taskDesc || '').trim(),
       };
       if (editingTask?.ID) {
         await updateTaskConfig({ ...payload, ID: editingTask.ID });
@@ -2810,8 +2810,20 @@ export default function App() {
               }))}
             />
           </Form.Item>
-          <Form.Item label="任务描述" name="taskDesc">
-            <Input.TextArea rows={4} placeholder="描述这个任务要做什么、适合什么时候使用" />
+          <Form.Item
+            label="任务描述"
+            name="taskDesc"
+            rules={[
+              { required: true, whitespace: true, message: '请填写任务描述' },
+              { max: 2000, message: '任务描述不能超过 2000 个字符' },
+            ]}
+          >
+            <Input.TextArea
+              rows={6}
+              maxLength={2000}
+              showCount
+              placeholder="请具体描述数据来源、业务筛选、结果内容以及批次执行流程"
+            />
           </Form.Item>
         </Form>
       </Modal>
