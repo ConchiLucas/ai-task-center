@@ -29,6 +29,9 @@ def run_snapshot(record_type=worker.RECORD_TYPE_FORMAL):
         ai_response_json="",
         record_type=record_type,
         requested_worker_count=2,
+        handler_key=worker.HANDLER_TTS,
+        executor_type="AI_PROVIDER",
+        executor_id="xiaomi-mimo-tts",
     )
 
 
@@ -73,20 +76,21 @@ class TtsBatchExecutionTest(unittest.TestCase):
 
     def test_dispatches_tts_batch_without_score_cli_processor(self):
         task_run = run_snapshot()
+        process_tts = MagicMock(return_value={"mode": "task-run-tts-batch"})
+        registry = worker.TaskHandlerRegistry()
+        registry.register(worker.TaskHandlerDefinition(
+            worker.HANDLER_TTS,
+            "AUDIO_TTS",
+            batch_processor=process_tts,
+        ))
         with (
             patch.object(worker, "load_task_run_snapshot", return_value=task_run),
-            patch.object(
-                worker,
-                "process_word_clean_best_sentence_tts_task_run_batch",
-                return_value={"mode": "task-run-tts-batch"},
-            ) as process_tts,
-            patch.object(worker, "process_word_clean_sentence_task_run_batch") as process_score,
+            patch.object(worker, "TASK_HANDLER_REGISTRY", registry),
         ):
             response = worker.process_task_run_batch_by_type(31, "codex")
 
         self.assertEqual("task-run-tts-batch", response["mode"])
-        process_tts.assert_called_once_with(31, "codex")
-        process_score.assert_not_called()
+        process_tts.assert_called_once_with(31, "xiaomi-mimo-tts")
 
     def test_tts_batch_updates_each_result_and_batch_response(self):
         task_run = run_snapshot()

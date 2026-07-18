@@ -2,7 +2,7 @@ import importlib.util
 import json
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "app" / "main.py"
@@ -42,6 +42,9 @@ def snapshot(
         status="PENDING",
         record_type=record_type,
         result_content=json.dumps(payload, ensure_ascii=False),
+        handler_key=worker.HANDLER_TTS if task_type == worker.RESULT_MODE_TTS else worker.HANDLER_SCORE,
+        executor_type="AI_PROVIDER" if task_type == worker.RESULT_MODE_TTS else "CLI",
+        executor_id="xiaomi-mimo-tts" if task_type == worker.RESULT_MODE_TTS else "codex",
     )
 
 
@@ -75,18 +78,23 @@ class ValidationExecutionTest(unittest.TestCase):
 
         self.assertEqual(400, raised.exception.status_code)
 
-    def test_dispatches_tts_validation_by_task_type(self):
+    def test_dispatches_tts_validation_by_registered_handler(self):
         task_result = snapshot()
+        process_tts = MagicMock(return_value={"status": "SUCCESS"})
+        registry = worker.TaskHandlerRegistry()
+        registry.register(worker.TaskHandlerDefinition(
+            worker.HANDLER_TTS,
+            "AUDIO_TTS",
+            single_processor=process_tts,
+        ))
         with (
             patch.object(worker, "load_task_result_snapshot", return_value=task_result),
-            patch.object(worker, "process_tts_validation_task_result", return_value={"status": "SUCCESS"}) as process_tts,
-            patch.object(worker, "process_word_clean_sentence_task_result") as process_score,
+            patch.object(worker, "TASK_HANDLER_REGISTRY", registry),
         ):
             result = worker.process_task_result_by_type(7, "codex")
 
         self.assertEqual("SUCCESS", result["status"])
-        process_tts.assert_called_once_with(task_result)
-        process_score.assert_not_called()
+        process_tts.assert_called_once_with(7, "xiaomi-mimo-tts")
 
     def test_score_validation_skips_source_database_backfill(self):
         task_result = snapshot(task_type=worker.RESULT_MODE_SCORE)

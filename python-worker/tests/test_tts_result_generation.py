@@ -21,6 +21,9 @@ def task_config(selected_tables: str = '["public.word_clean_best_sentence"]'):
         cli_id="codex",
         database_config_id=3,
         selected_tables=selected_tables,
+        handler_key=worker.HANDLER_TTS,
+        executor_type="AI_PROVIDER",
+        executor_id="xiaomi-mimo-tts",
     )
 
 
@@ -127,14 +130,16 @@ class TtsResultGenerationTest(unittest.TestCase):
 
     def test_dispatches_tts_task_config_to_tts_generator(self):
         expected = {"mode": worker.RESULT_MODE_TTS, "insertedCount": 3}
+        generate_tts = MagicMock(return_value=expected)
+        registry = worker.TaskHandlerRegistry()
+        registry.register(worker.TaskHandlerDefinition(
+            worker.HANDLER_TTS,
+            "AUDIO_TTS",
+            result_generator=generate_tts,
+        ))
         with (
             patch.object(worker, "load_task_config_snapshot", return_value=task_config()),
-            patch.object(
-                worker,
-                "generate_word_clean_best_sentence_tts_results",
-                return_value=expected,
-            ) as generate_tts,
-            patch.object(worker, "generate_word_clean_sentence_results") as generate_score,
+            patch.object(worker, "TASK_HANDLER_REGISTRY", registry),
         ):
             result = worker.generate_results_for_task_config(
                 1,
@@ -145,7 +150,6 @@ class TtsResultGenerationTest(unittest.TestCase):
 
         self.assertEqual(expected, result)
         generate_tts.assert_called_once_with(1, False, worker.RECORD_TYPE_VALIDATION_CURRENT, 3)
-        generate_score.assert_not_called()
 
 
 if __name__ == "__main__":

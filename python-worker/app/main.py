@@ -1006,13 +1006,10 @@ def load_task_result_snapshot(task_result_id: int) -> TaskResultSnapshot:
                 cursor.execute(
                     """
                     select result.id, result.result_name, result.task_config_id, result.project_id,
-                           coalesce(nullif(result.cli_id, ''), config.cli_id),
+                           result.cli_id,
                            result.database_config_id, result.status, result.result_content, result.record_type,
-                           coalesce(nullif(result.handler_key, ''), config.handler_key),
-                           coalesce(nullif(result.executor_type, ''), config.executor_type),
-                           coalesce(nullif(result.executor_id, ''), config.executor_id)
+                           result.handler_key, result.executor_type, result.executor_id
                     from tb_task_result result
-                    left join tb_task_config config on config.id = result.task_config_id
                     where result.id = %s
                     """,
                     (task_result_id,),
@@ -1052,13 +1049,10 @@ def load_task_result_snapshots(task_result_ids: list[int]) -> list[TaskResultSna
                 cursor.execute(
                     """
                     select result.id, result.result_name, result.task_config_id, result.project_id,
-                           coalesce(nullif(result.cli_id, ''), config.cli_id),
+                           result.cli_id,
                            result.database_config_id, result.status, result.result_content, result.record_type,
-                           coalesce(nullif(result.handler_key, ''), config.handler_key),
-                           coalesce(nullif(result.executor_type, ''), config.executor_type),
-                           coalesce(nullif(result.executor_id, ''), config.executor_id)
+                           result.handler_key, result.executor_type, result.executor_id
                     from tb_task_result result
-                    left join tb_task_config config on config.id = result.task_config_id
                     where result.id = any(%s)
                     """,
                     (task_result_ids,),
@@ -1101,14 +1095,11 @@ def load_task_run_snapshot(task_run_id: int) -> TaskRunSnapshot:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    select run.id, run.task_name, coalesce(nullif(run.cli_id, ''), config.cli_id),
+                    select run.id, run.task_name, run.cli_id,
                            run.ai_prompt_json, run.ai_response_json, run.record_type,
                            greatest(1, least(32, coalesce(run.requested_worker_count, 1))),
-                           coalesce(nullif(run.handler_key, ''), config.handler_key),
-                           coalesce(nullif(run.executor_type, ''), config.executor_type),
-                           coalesce(nullif(run.executor_id, ''), config.executor_id)
+                           run.handler_key, run.executor_type, run.executor_id
                     from tb_task_run run
-                    left join tb_task_config config on config.id = run.task_config_id
                     where run.id = %s
                     """,
                     (task_run_id,),
@@ -2168,10 +2159,10 @@ def generate_results_for_task_config(
     limit: int | None = None,
 ) -> dict[str, Any]:
     task_config = load_task_config_snapshot(task_config_id)
-    mode = detect_result_generation_mode(parse_selected_tables(task_config.selected_tables))
-    if mode == RESULT_MODE_TTS:
-        return generate_word_clean_best_sentence_tts_results(task_config_id, overwrite, record_type, limit)
-    return generate_word_clean_sentence_results(task_config_id, overwrite, record_type, limit)
+    handler = require_registered_handler(task_config.handler_key)
+    require_execution_snapshot(task_config.executor_type, task_config.executor_id)
+    callback = require_handler_phase(handler, "result_generator", "结果生成")
+    return callback(task_config_id, overwrite, record_type, limit)
 
 
 # 函数：parse_task_result_content
@@ -3617,18 +3608,10 @@ def process_word_clean_best_sentence_tts_task_run_batch(
 # 函数：process_task_run_batch_by_type
 def process_task_run_batch_by_type(task_run_id: int, cli_id: str | None = None) -> dict[str, Any]:
     task_run = load_task_run_snapshot(task_run_id)
-    try:
-        prompt = json.loads(task_run.ai_prompt_json or "{}")
-    except json.JSONDecodeError as exc:
-        raise HTTPException(status_code=400, detail=f"批次执行载荷 JSON 解析失败: {exc}") from exc
-    task_type = prompt.get("taskType") if isinstance(prompt, dict) else None
-    handler_key = str(task_run.handler_key or "").strip()
-    if handler_key == HANDLER_TTS or (not handler_key and task_type == RESULT_MODE_TTS_BATCH):
-        return process_word_clean_best_sentence_tts_task_run_batch(task_run_id, cli_id)
-    if handler_key == HANDLER_SCORE or (not handler_key and task_type == RESULT_MODE_SCORE_BATCH):
-        return process_word_clean_sentence_task_run_batch(task_run_id, cli_id)
-    unsupported = handler_key or task_type or "空"
-    raise HTTPException(status_code=400, detail=f"任务处理器不支持: {unsupported}")
+    handler = require_registered_handler(task_run.handler_key)
+    require_execution_snapshot(task_run.executor_type, task_run.executor_id)
+    callback = require_handler_phase(handler, "batch_processor", "批次执行")
+    return callback(task_run_id, task_run.executor_id)
 
 
 # 函数：process_tts_validation_task_result
@@ -3809,14 +3792,40 @@ def process_word_clean_sentence_task_result(task_result_id: int, cli_id: str | N
 # 函数：process_task_result_by_type
 def process_task_result_by_type(task_result_id: int, cli_id: str | None = None) -> dict[str, Any]:
     task_result = load_task_result_snapshot(task_result_id)
-    payload = parse_task_result_content(task_result)
-    handler_key = str(task_result.handler_key or "").strip()
-    if handler_key == HANDLER_TTS or (not handler_key and payload.get("taskType") == RESULT_MODE_TTS):
-        return process_tts_validation_task_result(task_result)
-    if handler_key == HANDLER_SCORE or (not handler_key and payload.get("taskType") == RESULT_MODE_SCORE):
-        return process_word_clean_sentence_task_result(task_result_id, cli_id)
-    unsupported = handler_key or payload.get("taskType") or "空"
-    raise HTTPException(status_code=400, detail=f"任务处理器不支持: {unsupported}")
+    handler = require_registered_handler(task_result.handler_key)
+    require_execution_snapshot(task_result.executor_type, task_result.executor_id)
+    callback = require_handler_phase(handler, "single_processor", "单条验证")
+    return callback(task_result_id, task_result.executor_id)
+
+
+def require_registered_handler(handler_key: str) -> TaskHandlerDefinition:
+    try:
+        return TASK_HANDLER_REGISTRY.require(handler_key)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+
+
+def require_execution_snapshot(executor_type: str, executor_id: str) -> None:
+    normalized_type = str(executor_type or "").strip().upper()
+    normalized_id = str(executor_id or "").strip()
+    if not normalized_type or not normalized_id:
+        raise HTTPException(status_code=400, detail="模型调用通道快照不完整")
+    if normalized_type not in {"CLI", "AI_PROVIDER"}:
+        raise HTTPException(status_code=400, detail=f"模型调用通道类型不支持: {normalized_type}")
+
+
+def require_handler_phase(
+    handler: TaskHandlerDefinition,
+    attribute: str,
+    phase_label: str,
+):
+    callback = getattr(handler, attribute, None)
+    if callback is None:
+        raise HTTPException(
+            status_code=400,
+            detail=f"任务处理器 {handler.handler_key} 不支持{phase_label}",
+        )
+    return callback
 
 
 # 函数：process_validation_task_results_batch

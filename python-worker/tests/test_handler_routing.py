@@ -54,59 +54,11 @@ def result_snapshot():
 
 
 class HandlerRoutingTest(unittest.TestCase):
-    def test_explicit_result_handler_wins_over_payload_task_type(self):
-        task_result = result_snapshot()
-        task_result.handler_key = worker.HANDLER_SCORE
-        with (
-            patch.object(worker, "load_task_result_snapshot", return_value=task_result),
-            patch.object(
-                worker,
-                "process_word_clean_sentence_task_result",
-                return_value={"mode": "score"},
-            ) as process_score,
-            patch.object(worker, "process_tts_validation_task_result") as process_tts,
-        ):
-            response = worker.process_task_result_by_type(task_result.id, "codex")
-
-        self.assertEqual("score", response["mode"])
-        process_score.assert_called_once_with(task_result.id, "codex")
-        process_tts.assert_not_called()
-
-    def test_explicit_handler_snapshot_wins_over_legacy_payload_type(self):
-        task_run = run_snapshot(
-            handler_key="word_clean_best_sentence_tts",
-            executor_type="AI_PROVIDER",
-            executor_id="custom-mimo",
-            payload_task_type=worker.RESULT_MODE_SCORE_BATCH,
-        )
-        with (
-            patch.object(worker, "load_task_run_snapshot", return_value=task_run),
-            patch.object(
-                worker,
-                "process_word_clean_best_sentence_tts_task_run_batch",
-                return_value={"mode": "task-run-tts-batch"},
-            ) as process_tts,
-            patch.object(worker, "process_word_clean_sentence_task_run_batch") as process_score,
-        ):
-            response = worker.process_task_run_batch_by_type(31)
-
-        self.assertEqual("task-run-tts-batch", response["mode"])
-        process_tts.assert_called_once_with(31, None)
-        process_score.assert_not_called()
-
-    def test_legacy_run_still_routes_by_payload_type(self):
+    def test_run_without_handler_never_routes_by_payload_type(self):
         task_run = run_snapshot(payload_task_type=worker.RESULT_MODE_TTS_BATCH)
-        with (
-            patch.object(worker, "load_task_run_snapshot", return_value=task_run),
-            patch.object(
-                worker,
-                "process_word_clean_best_sentence_tts_task_run_batch",
-                return_value={"mode": "task-run-tts-batch"},
-            ) as process_tts,
-        ):
-            worker.process_task_run_batch_by_type(31, "codex")
-
-        process_tts.assert_called_once_with(31, "codex")
+        with patch.object(worker, "load_task_run_snapshot", return_value=task_run):
+            with self.assertRaisesRegex(worker.HTTPException, "任务处理器未注册"):
+                worker.process_task_run_batch_by_type(31, "codex")
 
     def test_tts_item_uses_snapshotted_provider_id(self):
         task_result = result_snapshot()
