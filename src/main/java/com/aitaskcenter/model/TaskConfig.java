@@ -15,7 +15,7 @@ public class TaskConfig extends BaseEntity {
     // 字段：所属项目 ID
     private Long projectId;
 
-    @Column(nullable = false)
+    @Column
     // 字段：默认执行 CLI 配置 ID
     private String cliId;
 
@@ -42,8 +42,8 @@ public class TaskConfig extends BaseEntity {
     // 字段：任务关联的数据表 JSON
     private String selectedTables;
 
-    @Column(nullable = false, length = 40, columnDefinition = "varchar(40) default 'RESULT_CODE'")
-    private String onboardingStep = "RESULT_CODE";
+    @Column(nullable = false, length = 40, columnDefinition = "varchar(40) default 'TARGET_SELECTION'")
+    private String onboardingStep = "TARGET_SELECTION";
 
     @Column(nullable = false, length = 40, columnDefinition = "varchar(40) default 'ACTIVE'")
     private String onboardingStatus = "ACTIVE";

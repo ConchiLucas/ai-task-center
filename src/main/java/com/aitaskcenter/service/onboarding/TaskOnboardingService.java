@@ -32,6 +32,7 @@ import org.springframework.util.StringUtils;
 @Service
 public class TaskOnboardingService {
     private static final Map<OnboardingStep, String> LABELS = Map.of(
+            OnboardingStep.TARGET_SELECTION, "选择模型调用通道",
             OnboardingStep.RESULT_CODE, "结果代码准备",
             OnboardingStep.RESULT_VALIDATION, "结果手动验证",
             OnboardingStep.RESULT_GENERATION, "正式生成结果",
@@ -252,6 +253,7 @@ public class TaskOnboardingService {
 
     private List<String> allowedActions(OnboardingStep step, boolean hasResults, boolean hasRun) {
         return switch (step) {
+            case TARGET_SELECTION -> List.of("SELECT_EXECUTION_TARGET");
             case RESULT_CODE, BATCH_CODE -> List.of("COPY_PROMPT");
             case RESULT_VALIDATION -> hasResults
                     ? List.of("GENERATE_RESULT_VALIDATION", "CONFIRM_RESULT_VALIDATION")

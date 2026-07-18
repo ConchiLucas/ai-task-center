@@ -9,6 +9,7 @@ import com.aitaskcenter.repository.ConnectionConfigRepository;
 import com.aitaskcenter.repository.ProjectConfigRepository;
 import com.aitaskcenter.repository.TaskConfigRepository;
 import com.aitaskcenter.repository.TaskResultRepository;
+import com.aitaskcenter.service.onboarding.OnboardingStep;
 import java.util.ArrayList;
 import java.util.HashSet;
 import java.util.List;
@@ -66,7 +67,15 @@ public class TaskConfigService {
     // 方法：create
     public TaskConfig create(TaskConfig input) {
         TaskConfig task = new TaskConfig();
-        copyAndValidate(input, task);
+        copyBasicFields(input, task);
+        task.setCliId(null);
+        task.setOnboardingCliId(null);
+        task.setHandlerKey(null);
+        task.setExecutorType(null);
+        task.setExecutorId(null);
+        task.setOnboardingStep(OnboardingStep.TARGET_SELECTION.name());
+        task.setOnboardingStatus("ACTIVE");
+        task.setOnboardingContext("{}");
         return repository.save(task);
     }
 
@@ -280,7 +289,7 @@ public class TaskConfigService {
     public TaskConfig update(Long id, TaskConfig input) {
         TaskConfig task = repository.findById(id)
                 .orElseThrow(() -> new IllegalArgumentException("任务配置不存在"));
-        copyAndValidate(input, task);
+        copyBasicFields(input, task);
         return repository.save(task);
     }
 
@@ -292,30 +301,13 @@ public class TaskConfigService {
         repository.deleteById(id);
     }
 
-    // 方法：copyAndValidate
-    private void copyAndValidate(TaskConfig input, TaskConfig target) {
+    private void copyBasicFields(TaskConfig input, TaskConfig target) {
         target.setTaskName(require(input.getTaskName(), "请填写任务名称"));
         Long projectId = input.getProjectId();
         if (projectId == null || !projectRepository.existsById(projectId)) {
             throw new IllegalArgumentException("请选择有效项目");
         }
         target.setProjectId(projectId);
-        String onboardingCliId = StringUtils.hasText(input.getOnboardingCliId())
-                ? input.getOnboardingCliId().trim()
-                : require(input.getCliId(), "请选择接入 CLI");
-        TaskExecutionTargetResolver.ResolvedTarget executionTarget = taskExecutionTargetResolver.resolve(
-                input.getHandlerKey(),
-                input.getExecutorType(),
-                input.getExecutorId(),
-                input.getCliId(),
-                input.getSelectedTables(),
-                null);
-        validateExecutionTarget(executionTarget);
-        target.setCliId(onboardingCliId);
-        target.setOnboardingCliId(onboardingCliId);
-        target.setHandlerKey(executionTarget.handlerKey());
-        target.setExecutorType(executionTarget.executorType());
-        target.setExecutorId(executionTarget.executorId());
         Long databaseConfigId = input.getDatabaseConfigId();
         if (databaseConfigId != null && !connectionRepository.existsById(databaseConfigId)) {
             throw new IllegalArgumentException("关联数据库不存在");
