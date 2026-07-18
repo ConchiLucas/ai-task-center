@@ -66,8 +66,8 @@ class TaskConfigHandlerBatchTest {
         assertEquals("task_config_42", jdbcTemplate.insertArguments[5]);
         assertEquals("CLI", jdbcTemplate.insertArguments[6]);
         assertEquals("codex", jdbcTemplate.insertArguments[7]);
-        assertEquals(null, jdbcTemplate.insertArguments[8]);
-        assertEquals("{\"_meta\":{\"handlerKey\":\"task_config_42\"}}", jdbcTemplate.insertArguments[15]);
+        assertEquals(2L, jdbcTemplate.insertArguments[8]);
+        assertEquals("{\"_meta\":{\"handlerKey\":\"task_config_42\"}}", jdbcTemplate.insertArguments[14]);
     }
 
     private static final class CapturingJdbcTemplate extends JdbcTemplate {

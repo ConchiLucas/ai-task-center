@@ -113,6 +113,9 @@ class TaskResultServiceListTest {
         PythonWorkerClient pythonWorkerClient = mock(PythonWorkerClient.class);
         TaskResult validationResult = result(7L, TaskRecordType.VALIDATION_CURRENT, "PENDING");
         validationResult.setTaskConfigId(1L);
+        validationResult.setHandlerKey(null);
+        validationResult.setExecutorType(null);
+        validationResult.setExecutorId(null);
         when(repository.findById(7L)).thenReturn(Optional.of(validationResult));
 
         assertThrows(

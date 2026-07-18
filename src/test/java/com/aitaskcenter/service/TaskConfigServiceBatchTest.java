@@ -41,7 +41,7 @@ class TaskConfigServiceBatchTest {
 
         assertEquals(1, response.get("createdRunCount"));
         assertEquals(1, response.get("linkedResultCount"));
-        assertEquals(TaskRecordType.VALIDATION_CURRENT, jdbcTemplate.insertArguments[17]);
+        assertEquals(TaskRecordType.VALIDATION_CURRENT, jdbcTemplate.insertArguments[16]);
         assertEquals(1, jdbcTemplate.linkRows.size());
         assertEquals(71L, jdbcTemplate.linkRows.get(0)[3]);
     }
