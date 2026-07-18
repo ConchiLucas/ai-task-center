@@ -18,7 +18,7 @@ import {
 import { useCallback, useEffect, useMemo, useState } from 'react';
 import {
   ConnectionConfig,
-  LocalCliConfigItem,
+  ExecutionTargetItem,
   ProjectConfig,
   TaskConfig,
   TaskOnboardingResponse,
@@ -31,6 +31,7 @@ import {
   generateTaskOnboardingResultValidation,
   generateTaskOnboardingResults,
   getTaskOnboarding,
+  selectTaskOnboardingExecutionTarget,
 } from './api';
 
 const { Text, Paragraph } = Typography;
@@ -40,7 +41,7 @@ interface Props {
   task: TaskConfig | null;
   projects: ProjectConfig[];
   connections: ConnectionConfig[];
-  cliConfigs: LocalCliConfigItem[];
+  executionTargets: ExecutionTargetItem[];
   onClose: () => void;
   onReady: (task: TaskConfig) => void;
 }
@@ -73,16 +74,19 @@ export default function TaskOnboardingDrawer({
   task,
   projects,
   connections,
-  cliConfigs,
+  executionTargets,
   onClose,
   onReady,
 }: Props) {
-  const { message } = AntApp.useApp();
+  const { message, modal } = AntApp.useApp();
   const [state, setState] = useState<TaskOnboardingResponse | null>(null);
   const [loading, setLoading] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [loadError, setLoadError] = useState('');
+  const [reselectingTarget, setReselectingTarget] = useState(false);
   const [batchForm] = Form.useForm();
+  const [targetForm] = Form.useForm();
+  const targetKey = Form.useWatch('target', targetForm) as string | undefined;
 
   const projectName = useMemo(
     () => projects.find((item) => item.ID === state?.task.projectId)?.projectName || '-',
@@ -91,6 +95,12 @@ export default function TaskOnboardingDrawer({
   const connectionName = useMemo(
     () => connections.find((item) => item.ID === state?.task.databaseConfigId)?.connectionName || '-',
     [connections, state?.task.databaseConfigId],
+  );
+  const selectedTarget = useMemo(
+    () => executionTargets.find((item) => (
+      item.type === state?.task.executorType && item.id === state?.task.executorId
+    )) || null,
+    [executionTargets, state?.task.executorId, state?.task.executorType],
   );
 
   const refresh = useCallback(async () => {
@@ -127,11 +137,15 @@ export default function TaskOnboardingDrawer({
     if (!task || state?.currentStep !== 'BATCH_GENERATION') return;
     batchForm.setFieldsValue({
       batchSize: 50,
-      cliId: task.cliId || cliConfigs.find((item) => item.enabled)?.id,
       taskNamePrefix: task.taskName,
       includeFailed: false,
     });
-  }, [batchForm, cliConfigs, state?.currentStep, task]);
+  }, [batchForm, state?.currentStep, task]);
+
+  useEffect(() => {
+    if (!state?.task.executorType || !state.task.executorId) return;
+    targetForm.setFieldValue('target', `${state.task.executorType}:${state.task.executorId}`);
+  }, [state?.task.executorId, state?.task.executorType, targetForm]);
 
   const allowed = (action: string) => state?.allowedActions.includes(action) === true;
 
@@ -162,15 +176,9 @@ export default function TaskOnboardingDrawer({
 
   const generateValidationBatch = () => {
     if (!task?.ID) return;
-    const cliId = task.cliId || cliConfigs.find((item) => item.enabled)?.id;
-    if (!cliId) {
-      message.warning('请先为任务配置执行 CLI');
-      return;
-    }
     void submit(
       () => generateTaskOnboardingBatchValidation(task.ID!, {
         batchSize: 3,
-        cliId,
         taskNamePrefix: `${task.taskName} - 验证`,
         includeFailed: false,
       }),
@@ -184,7 +192,6 @@ export default function TaskOnboardingDrawer({
     await submit(
       () => generateTaskOnboardingBatches(task.ID!, {
         batchSize: Number(values.batchSize),
-        cliId: values.cliId,
         taskNamePrefix: values.taskNamePrefix,
         includeFailed: values.includeFailed === true,
       }),
@@ -193,12 +200,85 @@ export default function TaskOnboardingDrawer({
     );
   };
 
+  const applySelectedTarget = async () => {
+    if (!task?.ID) return;
+    const values = await targetForm.validateFields();
+    const targetKey = String(values.target || '');
+    const separator = targetKey.indexOf(':');
+    const executorType = targetKey.slice(0, separator) as 'CLI' | 'AI_PROVIDER';
+    const executorId = targetKey.slice(separator + 1);
+    await submit(
+      () => selectTaskOnboardingExecutionTarget(task.ID!, { executorType, executorId }),
+      '选择模型调用通道失败',
+    );
+    setReselectingTarget(false);
+  };
+
+  const confirmSelectedTarget = () => {
+    if (state?.currentStep === 'TARGET_SELECTION') {
+      void applySelectedTarget();
+      return;
+    }
+    modal.confirm({
+      title: '重新选择模型调用通道',
+      content: '更换通道会清空当前处理器就绪状态，并回到“结果代码准备”步骤。',
+      okText: '确认更换',
+      cancelText: '取消',
+      onOk: applySelectedTarget,
+    });
+  };
+
   const body = (step: TaskOnboardingStep) => {
-    if (!state || state.currentStep !== step) return null;
+    if (!state) return null;
+    if (step === 'TARGET_SELECTION') {
+      if (state.currentStep !== step && !reselectingTarget) return null;
+      const separator = targetKey?.indexOf(':') ?? -1;
+      const candidate = separator > 0
+        ? executionTargets.find((item) => (
+          item.type === targetKey?.slice(0, separator) && item.id === targetKey?.slice(separator + 1)
+        ))
+        : null;
+      return (
+        <div className="onboarding-node-body onboarding-target-picker">
+          <Paragraph type="secondary">
+            请选择任务运行时唯一使用的模型调用通道。CLI 与 AI API 都只负责返回模型结果，不参与编写接入代码。
+          </Paragraph>
+          <Form form={targetForm} layout="vertical">
+            <Form.Item label="模型调用通道" name="target" rules={[{ required: true, message: '请选择模型调用通道' }]}> 
+              <Select
+                showSearch
+                optionFilterProp="label"
+                placeholder="选择一个已启用通道"
+                onChange={() => targetForm.validateFields(['target']).catch(() => undefined)}
+                options={executionTargets.filter((item) => item.enabled).map((item) => ({
+                  value: `${item.type}:${item.id}`,
+                  label: `${item.label || item.id} / ${item.protocol} / ${item.capabilities.join(', ')}`,
+                }))}
+              />
+            </Form.Item>
+          </Form>
+          {candidate && (
+            <div className="onboarding-target-detail">
+              <Text strong>{candidate.label || candidate.id}</Text>
+              <Tag color={candidate.type === 'CLI' ? 'blue' : 'purple'}>{candidate.type}</Tag>
+              <Tag>{candidate.protocol}</Tag>
+              {candidate.capabilities.map((capability) => <Tag key={capability}>{capability}</Tag>)}
+            </div>
+          )}
+          <Space>
+            <Button type="primary" loading={submitting} onClick={confirmSelectedTarget}>确认通道</Button>
+            {state.currentStep !== 'TARGET_SELECTION' && (
+              <Button onClick={() => setReselectingTarget(false)}>取消</Button>
+            )}
+          </Space>
+        </div>
+      );
+    }
+    if (state.currentStep !== step) return null;
     if (step === 'RESULT_CODE' || step === 'BATCH_CODE') {
       return (
         <div className="onboarding-node-body">
-          <Paragraph type="secondary">将提示词交给 Codex。Codex只修改代码和测试，完成后回填 CODE_READY。</Paragraph>
+          <Paragraph type="secondary">将提示词复制到任意外部编码工具。工具只修改代码和测试，完成后回填 CODE_READY。</Paragraph>
           <pre className="onboarding-prompt">{state.prompt}</pre>
           <Button icon={<CopyOutlined />} onClick={() => void copyPrompt()}>复制提示词</Button>
         </div>
@@ -275,9 +355,6 @@ export default function TaskOnboardingDrawer({
             <Form.Item label="每个批次数量" name="batchSize" rules={[{ required: true }]}>
               <InputNumber min={1} max={1000} className="full-field" />
             </Form.Item>
-            <Form.Item label="执行 CLI" name="cliId" rules={[{ required: true }]}>
-              <Select options={cliConfigs.filter((item) => item.enabled).map((item) => ({ value: item.id, label: item.label || item.id }))} />
-            </Form.Item>
             <Form.Item label="任务名称前缀" name="taskNamePrefix" rules={[{ required: true }]}>
               <Input />
             </Form.Item>
@@ -315,6 +392,19 @@ export default function TaskOnboardingDrawer({
               <Text strong>{state.task.taskName}</Text>
               <Text type="secondary">项目：{projectName}</Text>
               <Text type="secondary">数据源：{connectionName}</Text>
+              {selectedTarget && (
+                <div className="onboarding-selected-target">
+                  <Text type="secondary">模型调用通道：</Text>
+                  <Tag color={selectedTarget.type === 'CLI' ? 'blue' : 'purple'}>
+                    {selectedTarget.label || selectedTarget.id}
+                  </Tag>
+                  <Tag>{selectedTarget.protocol}</Tag>
+                  {selectedTarget.capabilities.map((capability) => <Tag key={capability}>{capability}</Tag>)}
+                  {state.currentStep !== 'TARGET_SELECTION' && (
+                    <Button type="link" size="small" onClick={() => setReselectingTarget(true)}>重新选择</Button>
+                  )}
+                </div>
+              )}
               {state.errorMessage && <Text type="danger">{state.errorMessage}</Text>}
             </div>
             <div className="onboarding-flow">

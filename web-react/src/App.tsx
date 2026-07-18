@@ -142,11 +142,6 @@ const taskRecordTypeOptions: { value: TaskRecordTypeFilter; label: string }[] = 
   { value: 'ALL', label: '全部数据' },
 ];
 
-const taskHandlerOptions: { value: HandlerKey; label: string; capability: string }[] = [
-  { value: 'word_clean_sentence_score', label: '单词例句评分', capability: 'TEXT_GENERATION' },
-  { value: 'word_clean_best_sentence_tts', label: '最佳例句 TTS', capability: 'AUDIO_TTS' },
-];
-
 const tablePageSizeOptions = ['10', '20', '50', '100', '200', '500'];
 
 const codexModelOptions = [
@@ -227,7 +222,6 @@ export default function App() {
   const [executionTargets, setExecutionTargets] = useState<ExecutionTargetItem[]>([]);
   const [taskModalOpen, setTaskModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<TaskConfig | null>(null);
-  const [selectedTaskHandlerKey, setSelectedTaskHandlerKey] = useState<HandlerKey>('word_clean_sentence_score');
   const [taskConnections, setTaskConnections] = useState<ConnectionConfig[]>([]);
   const [taskForm] = Form.useForm();
   const [taskSearchForm] = Form.useForm();
@@ -339,15 +333,6 @@ export default function App() {
       || '未配置';
     return <Tag color={execution.executorType === 'CLI' ? 'blue' : 'purple'}>{label}</Tag>;
   };
-  const taskExecutionTargetOptions = useMemo(() => {
-    const capability = taskHandlerOptions.find((item) => item.value === selectedTaskHandlerKey)?.capability;
-    return executionTargets
-      .filter((target) => target.enabled && (!capability || target.capabilities.includes(capability)))
-      .map((target) => ({
-        value: executionTargetKey(target.type, target.id),
-        label: `${target.label || target.id} / ${target.type === 'CLI' ? 'CLI' : 'AI API'}`,
-      }));
-  }, [executionTargets, selectedTaskHandlerKey]);
   const filteredTasks = useMemo(
     () => tasks.filter((task) => {
       const keyword = (taskFilters.taskName || '').trim().toLowerCase();
@@ -864,19 +849,10 @@ export default function App() {
 
   // 函数：openTaskModal
   const openTaskModal = (task?: TaskConfig) => {
-    const execution = task ? resolveExecutionSnapshot(task) : {
-      handlerKey: 'word_clean_sentence_score' as HandlerKey,
-      executorType: 'CLI' as const,
-      executorId: activeCliId || cliConfigs[0]?.id || '',
-    };
-    setSelectedTaskHandlerKey(execution.handlerKey);
     setEditingTask(task || null);
     taskForm.setFieldsValue({
       taskName: task?.taskName || '',
       projectId: task?.projectId || activeProjectId || projects[0]?.ID,
-      onboardingCliId: task?.onboardingCliId || task?.cliId || activeCliId || cliConfigs[0]?.id,
-      handlerKey: execution.handlerKey,
-      executorTarget: executionTargetKey(execution.executorType, execution.executorId),
       databaseConfigId: task?.databaseConfigId || undefined,
       taskDesc: task?.taskDesc || '',
     });
@@ -887,21 +863,13 @@ export default function App() {
   const saveTask = async () => {
     const values = await taskForm.validateFields();
     try {
-      const executorTarget = String(values.executorTarget || '');
-      const separatorIndex = executorTarget.indexOf(':');
-      const executorType = executorTarget.slice(0, separatorIndex) as ExecutorType;
-      const executorId = executorTarget.slice(separatorIndex + 1);
       const payload = {
-        ...values,
-        cliId: values.onboardingCliId,
-        onboardingCliId: values.onboardingCliId,
-        handlerKey: values.handlerKey,
-        executorType,
-        executorId,
+        taskName: values.taskName,
+        projectId: values.projectId,
         databaseConfigId: values.databaseConfigId || null,
         selectedTables: editingTask?.selectedTables || '',
+        taskDesc: values.taskDesc || '',
       };
-      delete payload.executorTarget;
       if (editingTask?.ID) {
         await updateTaskConfig({ ...payload, ID: editingTask.ID });
         message.success('任务配置更新成功');
@@ -2690,7 +2658,7 @@ export default function App() {
         task={onboardingTask}
         projects={projects}
         connections={taskConnections}
-        cliConfigs={cliConfigs}
+        executionTargets={executionTargets}
         onClose={() => setOnboardingTask(null)}
         onReady={() => {
           setOnboardingTask(null);
@@ -2826,8 +2794,8 @@ export default function App() {
             <Input placeholder="生成单词练习页面" />
           </Form.Item>
           <Row gutter={16}>
-            <Col xs={24} md={12}>
-              <Form.Item label="所属项目" name="projectId" rules={[{ required: true, message: '请选择所属项目' }]}>
+            <Col xs={24}>
+              <Form.Item label="所属项目" name="projectId" rules={[{ required: true, message: '请选择所属项目' }]}> 
                 <Select
                   showSearch
                   placeholder="选择项目"
@@ -2836,46 +2804,7 @@ export default function App() {
                 />
               </Form.Item>
             </Col>
-            <Col xs={24} md={12}>
-              <Form.Item label="任务处理器" name="handlerKey" rules={[{ required: true, message: '请选择任务处理器' }]}>
-                <Select
-                  showSearch
-                  placeholder="选择任务要完成的业务处理"
-                  optionFilterProp="label"
-                  options={taskHandlerOptions}
-                  onChange={(value: HandlerKey) => {
-                    setSelectedTaskHandlerKey(value);
-                    taskForm.setFieldValue('executorTarget', undefined);
-                  }}
-                />
-              </Form.Item>
-            </Col>
           </Row>
-          <Row gutter={16}>
-            <Col xs={24} md={12}>
-              <Form.Item label="运行调用通道" name="executorTarget" rules={[{ required: true, message: '请选择运行调用通道' }]}>
-                <Select
-                  showSearch
-                  placeholder="选择 CLI 或 AI API"
-                  optionFilterProp="label"
-                  options={taskExecutionTargetOptions}
-                />
-              </Form.Item>
-            </Col>
-            <Col xs={24} md={12}>
-              <Form.Item label="接入代码 CLI" name="onboardingCliId" rules={[{ required: true, message: '请选择接入代码 CLI' }]}>
-                <Select
-                  showSearch
-                  placeholder="仅用于生成和验证任务接入代码"
-                  optionFilterProp="label"
-                  options={cliConfigs.filter((config) => config.enabled).map((config) => ({ value: config.id, label: config.label || config.id }))}
-                />
-              </Form.Item>
-            </Col>
-          </Row>
-          <Text type="secondary">
-            运行调用通道决定任务实际调用 CLI 还是 AI API；接入代码 CLI 仅用于任务接入阶段，两者互不覆盖。
-          </Text>
           <Form.Item label="关联数据库" name="databaseConfigId">
             <Select
               allowClear

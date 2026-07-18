@@ -625,6 +625,26 @@ body {
   gap: 8px;
 }
 
+.onboarding-selected-target,
+.onboarding-target-detail {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.onboarding-target-picker {
+  max-width: 720px;
+}
+
+.onboarding-target-detail {
+  margin: -4px 0 14px;
+  padding: 12px;
+  border: 1px solid var(--border-color);
+  border-radius: 8px;
+  background: rgba(255, 255, 255, 0.03);
+}
+
 .onboarding-error-state {
   padding: 36px 0;
 }

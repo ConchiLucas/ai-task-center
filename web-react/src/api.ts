@@ -80,8 +80,6 @@ export interface TaskConfig {
   ID?: number;
   taskName: string;
   projectId: number;
-  cliId: string;
-  onboardingCliId?: string;
   handlerKey?: string;
   executorType?: ExecutorType;
   executorId?: string;
@@ -93,6 +91,7 @@ export interface TaskConfig {
 }
 
 export type TaskOnboardingStep =
+  | 'TARGET_SELECTION'
   | 'RESULT_CODE'
   | 'RESULT_VALIDATION'
   | 'RESULT_GENERATION'
@@ -107,7 +106,9 @@ export interface TaskOnboardingTaskSummary {
   id: number;
   taskName: string;
   projectId: number;
-  cliId: string;
+  handlerKey: string | null;
+  executorType: ExecutorType | null;
+  executorId: string | null;
   databaseConfigId: number | null;
   taskDesc: string | null;
   selectedTables: string | null;
@@ -157,7 +158,7 @@ export type TaskResultStatus = 'PENDING' | 'RUNNING' | 'SUCCESS' | 'FAILED';
 export type TaskRecordType = 'VALIDATION_CURRENT' | 'VALIDATION_HISTORY' | 'FORMAL';
 export type TaskRecordTypeFilter = TaskRecordType | 'ALL';
 export type ExecutorType = 'CLI' | 'AI_PROVIDER';
-export type HandlerKey = 'word_clean_sentence_score' | 'word_clean_best_sentence_tts';
+export type HandlerKey = string;
 
 export interface ExecutionTargetItem {
   type: ExecutorType;
@@ -437,6 +438,17 @@ export async function getTaskOnboarding(id: number) {
   return res.data.data;
 }
 
+export async function selectTaskOnboardingExecutionTarget(id: number, data: {
+  executorType: ExecutorType;
+  executorId: string;
+}) {
+  const res = await request.post<ApiResponse<TaskOnboardingResponse>>(
+    `/task/${id}/onboarding/execution-target`,
+    data,
+  );
+  return res.data.data;
+}
+
 export async function generateTaskOnboardingResultValidation(id: number) {
   const res = await request.post<ApiResponse<TaskOnboardingResponse>>(
     `/task/${id}/onboarding/result-validation/generate`,
@@ -458,7 +470,6 @@ export async function generateTaskOnboardingResults(id: number) {
 
 export async function generateTaskOnboardingBatchValidation(id: number, data: {
   batchSize: number;
-  cliId: string;
   taskNamePrefix: string;
   includeFailed: boolean;
 }) {
@@ -478,7 +489,6 @@ export async function confirmTaskOnboardingBatchValidation(id: number) {
 
 export async function generateTaskOnboardingBatches(id: number, data: {
   batchSize: number;
-  cliId: string;
   taskNamePrefix: string;
   includeFailed: boolean;
 }) {
@@ -497,7 +507,6 @@ export async function generateTaskResults(id: number, overwrite = false) {
 // 函数：generateTaskRunBatches
 export async function generateTaskRunBatches(id: number, data: {
   batchSize: number;
-  cliId: string;
   taskNamePrefix: string;
   includeFailed: boolean;
 }) {
