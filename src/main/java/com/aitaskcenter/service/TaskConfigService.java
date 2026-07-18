@@ -22,6 +22,8 @@ import org.springframework.util.StringUtils;
 
 @Service
 public class TaskConfigService {
+    private static final int TASK_DESCRIPTION_MAX_LENGTH = 2000;
+
     private final TaskConfigRepository repository;
     private final ProjectConfigRepository projectRepository;
     private final ConnectionConfigRepository connectionRepository;
@@ -305,7 +307,7 @@ public class TaskConfigService {
             throw new IllegalArgumentException("关联数据库不存在");
         }
         target.setDatabaseConfigId(databaseConfigId);
-        target.setTaskDesc(clean(input.getTaskDesc()));
+        target.setTaskDesc(requireTaskDescription(input.getTaskDesc()));
         target.setSelectedTables(clean(input.getSelectedTables()));
     }
 
@@ -325,6 +327,14 @@ public class TaskConfigService {
             throw new IllegalArgumentException(message);
         }
         return value.trim();
+    }
+
+    private static String requireTaskDescription(String value) {
+        String description = require(value, "请填写任务描述");
+        if (description.length() > TASK_DESCRIPTION_MAX_LENGTH) {
+            throw new IllegalArgumentException("任务描述不能超过 2000 个字符");
+        }
+        return description;
     }
 
     // 方法：clean
