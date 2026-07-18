@@ -16,7 +16,6 @@ import com.aitaskcenter.repository.ConnectionConfigRepository;
 import com.aitaskcenter.repository.ProjectConfigRepository;
 import com.aitaskcenter.repository.TaskConfigRepository;
 import com.aitaskcenter.repository.TaskResultRepository;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Collection;
 import java.util.List;
 import java.util.Map;
@@ -121,9 +120,6 @@ class TaskConfigServiceBatchTest {
                 mock(ConnectionConfigRepository.class),
                 resultRepository,
                 mock(PythonWorkerClient.class),
-                new TaskRunPromptBuilder(new ObjectMapper()),
-                new TaskExecutionTargetResolver(),
-                mock(AiConfigService.class),
                 jdbcTemplate);
     }
 
@@ -132,7 +128,6 @@ class TaskConfigServiceBatchTest {
         task.setId(1L);
         task.setTaskName("生成 TTS 任务");
         task.setProjectId(1L);
-        task.setCliId("codex");
         task.setDatabaseConfigId(1L);
         task.setSelectedTables("[\"public.word_clean_best_sentence\"]");
         task.setHandlerKey("word_clean_best_sentence_tts");

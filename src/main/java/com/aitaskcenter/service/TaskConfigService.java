@@ -1,7 +1,6 @@
 package com.aitaskcenter.service;
 
 import com.aitaskcenter.dto.GenerateTaskRunBatchRequest;
-import com.aitaskcenter.dto.ExecutionTargetItem;
 import com.aitaskcenter.model.TaskConfig;
 import com.aitaskcenter.model.TaskResult;
 import com.aitaskcenter.model.TaskRecordType;
@@ -28,9 +27,6 @@ public class TaskConfigService {
     private final ConnectionConfigRepository connectionRepository;
     private final TaskResultRepository taskResultRepository;
     private final PythonWorkerClient pythonWorkerClient;
-    private final TaskRunPromptBuilder taskRunPromptBuilder;
-    private final TaskExecutionTargetResolver taskExecutionTargetResolver;
-    private final AiConfigService aiConfigService;
     private final JdbcTemplate jdbcTemplate;
 
     // 方法：TaskConfigService
@@ -40,18 +36,12 @@ public class TaskConfigService {
             ConnectionConfigRepository connectionRepository,
             TaskResultRepository taskResultRepository,
             PythonWorkerClient pythonWorkerClient,
-            TaskRunPromptBuilder taskRunPromptBuilder,
-            TaskExecutionTargetResolver taskExecutionTargetResolver,
-            AiConfigService aiConfigService,
             JdbcTemplate jdbcTemplate) {
         this.repository = repository;
         this.projectRepository = projectRepository;
         this.connectionRepository = connectionRepository;
         this.taskResultRepository = taskResultRepository;
         this.pythonWorkerClient = pythonWorkerClient;
-        this.taskRunPromptBuilder = taskRunPromptBuilder;
-        this.taskExecutionTargetResolver = taskExecutionTargetResolver;
-        this.aiConfigService = aiConfigService;
         this.jdbcTemplate = jdbcTemplate;
     }
 
@@ -68,8 +58,6 @@ public class TaskConfigService {
     public TaskConfig create(TaskConfig input) {
         TaskConfig task = new TaskConfig();
         copyBasicFields(input, task);
-        task.setCliId(null);
-        task.setOnboardingCliId(null);
         task.setHandlerKey(null);
         task.setExecutorType(null);
         task.setExecutorId(null);
@@ -190,7 +178,7 @@ public class TaskConfigService {
                     taskRunName,
                     chunk.stream().map(TaskResult::getId).toList());
             Long taskRunId = insertTaskRunBatch(
-                    task, taskRunName, null, executionTarget, chunk.size(), promptJson, runRecordType, now);
+                    task, taskRunName, executionTarget, chunk.size(), promptJson, runRecordType, now);
             for (TaskResult taskResult : chunk) {
                 linkRows.add(new Object[]{now, now, taskRunId, taskResult.getId(), "PENDING", ""});
             }
@@ -208,7 +196,6 @@ public class TaskConfigService {
     private Long insertTaskRunBatch(
             TaskConfig task,
             String taskRunName,
-            String cliId,
             TaskExecutionTargetResolver.ResolvedTarget executionTarget,
             int resultCount,
             String promptJson,
@@ -225,7 +212,6 @@ public class TaskConfigService {
                     handler_key,
                     executor_type,
                     executor_id,
-                    cli_id,
                     database_config_id,
                     selected_tables,
                     status,
@@ -235,7 +221,7 @@ public class TaskConfigService {
                     ai_prompt_json,
                     ai_response_json,
                     record_type
-                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ) values (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 returning id
                 """,
                 Long.class,
@@ -247,7 +233,6 @@ public class TaskConfigService {
                 executionTarget.handlerKey(),
                 executionTarget.executorType(),
                 executionTarget.executorId(),
-                cliId,
                 task.getDatabaseConfigId(),
                 task.getSelectedTables(),
                 "PENDING",
@@ -322,30 +307,6 @@ public class TaskConfigService {
         target.setDatabaseConfigId(databaseConfigId);
         target.setTaskDesc(clean(input.getTaskDesc()));
         target.setSelectedTables(clean(input.getSelectedTables()));
-    }
-
-    private void validateExecutionTarget(TaskExecutionTargetResolver.ResolvedTarget executionTarget) {
-        if (!List.of(
-                        TaskExecutionTargetResolver.HANDLER_SCORE,
-                        TaskExecutionTargetResolver.HANDLER_TTS)
-                .contains(executionTarget.handlerKey())) {
-            throw new IllegalArgumentException("任务处理器不支持: " + executionTarget.handlerKey());
-        }
-        ExecutionTargetItem target = aiConfigService.getExecutionTargets().stream()
-                .filter(item -> executionTarget.executorType().equals(item.type()))
-                .filter(item -> executionTarget.executorId().equals(item.id()))
-                .findFirst()
-                .orElseThrow(() -> new IllegalArgumentException(
-                        "调用通道「" + executionTarget.executorId() + "」不存在"));
-        if (!target.enabled()) {
-            throw new IllegalArgumentException("调用通道「" + target.id() + "」未启用");
-        }
-        String capability = TaskExecutionTargetResolver.HANDLER_TTS.equals(executionTarget.handlerKey())
-                ? "AUDIO_TTS"
-                : "TEXT_GENERATION";
-        if (!target.capabilities().contains(capability)) {
-            throw new IllegalArgumentException("调用通道「" + target.id() + "」不支持任务所需能力 " + capability);
-        }
     }
 
     // 方法：buildBatchStatuses

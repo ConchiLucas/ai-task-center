@@ -27,10 +27,6 @@ public class TaskRun extends BaseEntity {
     // 字段：所属项目 ID
     private Long projectId;
 
-    @Column(nullable = false)
-    // 字段：执行 CLI 配置 ID
-    private String cliId;
-
     @Column(length = 100)
     private String handlerKey;
 
@@ -146,16 +142,6 @@ public class TaskRun extends BaseEntity {
     // 方法：setProjectId
     public void setProjectId(Long projectId) {
         this.projectId = projectId;
-    }
-
-    // 方法：getCliId
-    public String getCliId() {
-        return cliId;
-    }
-
-    // 方法：setCliId
-    public void setCliId(String cliId) {
-        this.cliId = cliId;
     }
 
     public String getHandlerKey() {

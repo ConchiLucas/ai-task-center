@@ -11,7 +11,6 @@ import com.aitaskcenter.repository.ConnectionConfigRepository;
 import com.aitaskcenter.repository.ProjectConfigRepository;
 import com.aitaskcenter.repository.TaskConfigRepository;
 import com.aitaskcenter.repository.TaskResultRepository;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Optional;
 import org.junit.jupiter.api.Test;
 import org.springframework.jdbc.core.JdbcTemplate;
@@ -25,8 +24,6 @@ class TaskConfigNewLifecycleTest {
 
         TaskConfig created = service.create(basicTask("新任务"));
 
-        assertNull(created.getCliId());
-        assertNull(created.getOnboardingCliId());
         assertNull(created.getHandlerKey());
         assertNull(created.getExecutorType());
         assertNull(created.getExecutorId());
@@ -63,9 +60,6 @@ class TaskConfigNewLifecycleTest {
                 mock(ConnectionConfigRepository.class),
                 mock(TaskResultRepository.class),
                 mock(PythonWorkerClient.class),
-                new TaskRunPromptBuilder(new ObjectMapper()),
-                new TaskExecutionTargetResolver(),
-                mock(AiConfigService.class),
                 mock(JdbcTemplate.class));
     }
 

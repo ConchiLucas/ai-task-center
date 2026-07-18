@@ -134,7 +134,6 @@ export interface TaskOnboardingRunSummary {
   taskName: string;
   status: string;
   reason: string | null;
-  cliId: string;
   aiPromptJson: string | null;
   expectedResultCount: number | null;
 }
@@ -174,7 +173,6 @@ export interface TaskRun {
   taskName: string;
   taskConfigId?: number;
   projectId: number;
-  cliId: string;
   handlerKey?: string;
   executorType?: ExecutorType;
   executorId?: string;
@@ -216,7 +214,6 @@ export interface TaskResult {
   taskRunId?: number;
   taskConfigId?: number;
   projectId: number;
-  cliId?: string;
   handlerKey?: string;
   executorType?: ExecutorType;
   executorId?: string;
@@ -249,7 +246,6 @@ export interface TaskExecutionLog {
   ID?: number;
   taskRunId: number;
   attemptNo: number;
-  cliId: string;
   handlerKey?: string;
   executorType?: ExecutorType;
   executorId?: string;
@@ -519,7 +515,6 @@ export async function getTaskRuns(params?: {
   taskName?: string;
   projectId?: number;
   taskConfigId?: number;
-  cliId?: string;
   executorType?: ExecutorType;
   executorId?: string;
   status?: string;
@@ -538,7 +533,6 @@ export async function createTaskRun(data: { taskConfigId: number; taskName?: str
 // 函数：startTaskRuns
 export async function startTaskRuns(data: {
   taskRunIds: number[];
-  cliId?: string;
   executionMode: string;
   workerCount: number;
 }) {
@@ -601,17 +595,14 @@ export async function getTaskResult(id: number) {
 }
 
 // 函数：processTaskResult
-export async function processTaskResult(id: number, cliId?: string) {
-  const res = await request.post<ApiResponse<Record<string, unknown>>>(`/task-result/${id}/process`, null, {
-    params: { cliId },
-  });
+export async function processTaskResult(id: number) {
+  const res = await request.post<ApiResponse<Record<string, unknown>>>(`/task-result/${id}/process`);
   return res.data.data;
 }
 
 // 函数：batchProcessTaskResults
 export async function batchProcessTaskResults(data: {
   taskResultIds: number[];
-  cliId?: string;
   workerCount: number;
 }) {
   const res = await request.post<ApiResponse<Record<string, unknown>>>('/task-result/batch-process', data);

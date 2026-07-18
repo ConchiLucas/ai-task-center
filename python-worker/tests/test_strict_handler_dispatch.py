@@ -18,7 +18,6 @@ def config_snapshot(handler_key="task_config_42", executor_type="CLI", executor_
         id=42,
         task_name="测试任务",
         project_id=1,
-        cli_id="legacy-cli",
         database_config_id=1,
         selected_tables=json.dumps(["public.unrelated_table"]),
         handler_key=handler_key,
@@ -31,7 +30,6 @@ def run_snapshot(handler_key="task_config_42", executor_type="CLI", executor_id=
     return worker.TaskRunSnapshot(
         id=8,
         task_name="测试批次",
-        cli_id="legacy-cli",
         ai_prompt_json=json.dumps({"taskType": worker.RESULT_MODE_TTS_BATCH}),
         ai_response_json="",
         record_type=worker.RECORD_TYPE_FORMAL,
@@ -48,7 +46,6 @@ def result_snapshot(handler_key="task_config_42", executor_type="CLI", executor_
         result_name="测试结果",
         task_config_id=42,
         project_id=1,
-        cli_id="legacy-cli",
         database_config_id=1,
         status="PENDING",
         record_type=worker.RECORD_TYPE_VALIDATION_CURRENT,
@@ -83,9 +80,9 @@ def test_single_validation_uses_registered_handler_and_target_snapshot(monkeypat
     monkeypatch.setattr(worker, "TASK_HANDLER_REGISTRY", registry_with(single_processor=callback))
     monkeypatch.setattr(worker, "load_task_result_snapshot", lambda _: result_snapshot())
 
-    worker.process_task_result_by_type(9, "ignored-legacy-cli")
+    worker.process_task_result_by_type(9)
 
-    callback.assert_called_once_with(9, "codex")
+    callback.assert_called_once_with(9)
 
 
 def test_batch_execution_uses_registered_handler_and_target_snapshot(monkeypatch):
@@ -93,9 +90,9 @@ def test_batch_execution_uses_registered_handler_and_target_snapshot(monkeypatch
     monkeypatch.setattr(worker, "TASK_HANDLER_REGISTRY", registry_with(batch_processor=callback))
     monkeypatch.setattr(worker, "load_task_run_snapshot", lambda _: run_snapshot())
 
-    worker.process_task_run_batch_by_type(8, "ignored-legacy-cli")
+    worker.process_task_run_batch_by_type(8)
 
-    callback.assert_called_once_with(8, "codex")
+    callback.assert_called_once_with(8)
 
 
 @pytest.mark.parametrize("handler_key", ["", "missing"])

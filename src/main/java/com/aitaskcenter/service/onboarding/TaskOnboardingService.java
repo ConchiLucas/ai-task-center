@@ -94,8 +94,6 @@ public class TaskOnboardingService {
         task.setExecutorType(selected.type());
         task.setExecutorId(selected.id());
         task.setHandlerKey(null);
-        task.setCliId(null);
-        task.setOnboardingCliId(null);
         task.setOnboardingStep(OnboardingStep.RESULT_CODE.name());
         task.setOnboardingStatus("ACTIVE");
         context.clear();

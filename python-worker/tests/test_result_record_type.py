@@ -16,7 +16,6 @@ class ResultRecordTypeTest(unittest.TestCase):
             id=1,
             task_name="测试任务",
             project_id=2,
-            cli_id="codex",
             database_config_id=3,
             selected_tables='["public.word_clean_sentence"]',
         )
@@ -50,7 +49,6 @@ class ResultRecordTypeTest(unittest.TestCase):
             id=1,
             task_name="测试任务",
             project_id=2,
-            cli_id="codex",
             database_config_id=3,
             selected_tables='["public.word_clean_sentence"]',
             handler_key=worker.HANDLER_SCORE,
@@ -79,9 +77,9 @@ class ResultRecordTypeTest(unittest.TestCase):
             worker.RECORD_TYPE_FORMAL,
         )[0]
 
-        self.assertEqual(worker.HANDLER_SCORE, row[5])
-        self.assertEqual("AI_PROVIDER", row[6])
-        self.assertEqual("openai-main", row[7])
+        self.assertEqual(worker.HANDLER_SCORE, row[4])
+        self.assertEqual("AI_PROVIDER", row[5])
+        self.assertEqual("openai-main", row[6])
 
 
 if __name__ == "__main__":

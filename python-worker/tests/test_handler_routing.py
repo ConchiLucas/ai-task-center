@@ -16,7 +16,6 @@ def run_snapshot(handler_key="", executor_type="", executor_id="", payload_task_
     return worker.TaskRunSnapshot(
         id=31,
         task_name="测试批次",
-        cli_id="codex",
         ai_prompt_json=json.dumps({"taskType": payload_task_type or worker.RESULT_MODE_SCORE_BATCH}),
         ai_response_json="",
         record_type=worker.RECORD_TYPE_FORMAL,
@@ -33,7 +32,6 @@ def result_snapshot():
         result_name="TTS 41",
         task_config_id=1,
         project_id=1,
-        cli_id="codex",
         database_config_id=1,
         status="PENDING",
         record_type=worker.RECORD_TYPE_FORMAL,
@@ -58,7 +56,7 @@ class HandlerRoutingTest(unittest.TestCase):
         task_run = run_snapshot(payload_task_type=worker.RESULT_MODE_TTS_BATCH)
         with patch.object(worker, "load_task_run_snapshot", return_value=task_run):
             with self.assertRaisesRegex(worker.HTTPException, "任务处理器未注册"):
-                worker.process_task_run_batch_by_type(31, "codex")
+                worker.process_task_run_batch_by_type(31)
 
     def test_tts_item_uses_snapshotted_provider_id(self):
         task_result = result_snapshot()

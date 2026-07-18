@@ -84,32 +84,6 @@ QUEUE_STATE: dict[str, Any] = {
 QUEUE_SCHEDULER_THREAD: threading.Thread | None = None
 
 
-class WorkerTaskRunItem(BaseModel):
-    # 字段：任务执行记录 ID
-    id: int
-    # 字段：任务名称
-    taskName: str
-    # 字段：任务配置 ID
-    taskConfigId: int | None = None
-    # 字段：项目 ID
-    projectId: int
-    # 字段：数据库配置 ID
-    databaseConfigId: int | None = None
-    # 字段：选中的数据表 JSON
-    selectedTables: str | None = None
-
-
-class StartExecutionRequest(BaseModel):
-    # 字段：本次执行选择的 CLI 配置 ID
-    cliId: str
-    # 字段：并发模式，thread 或 process
-    executionMode: str = "thread"
-    # 字段：线程或进程数量
-    workerCount: int = Field(default=1, ge=1, le=32)
-    # 字段：要执行的任务记录快照
-    taskRuns: list[WorkerTaskRunItem]
-
-
 class TaskHandlerBatchPromptRequest(BaseModel):
     taskConfigId: int
     taskRunName: str
@@ -124,8 +98,6 @@ class TaskConfigSnapshot:
     task_name: str
     # 字段：所属项目 ID
     project_id: int
-    # 字段：默认执行 CLI 配置 ID
-    cli_id: str
     # 字段：关联数据库配置 ID
     database_config_id: int
     # 字段：任务关联的数据表 JSON
@@ -163,8 +135,6 @@ class TaskResultSnapshot:
     task_config_id: int | None
     # 字段：所属项目 ID
     project_id: int
-    # 字段：执行 CLI 配置 ID
-    cli_id: str
     # 字段：结果来源数据库配置 ID
     database_config_id: int
     # 字段：任务结果状态
@@ -184,8 +154,6 @@ class TaskRunSnapshot:
     id: int
     # 字段：任务执行批次名称
     task_name: str
-    # 字段：执行 CLI 配置 ID
-    cli_id: str
     # 字段：批次级发送给 AI 的 JSON 提示词
     ai_prompt_json: str
     # 字段：批次级 AI 原始响应 JSON
@@ -203,8 +171,6 @@ class TaskRunSnapshot:
 class QueuedTaskClaim:
     # 字段：领取的任务批次 ID
     id: int
-    # 字段：执行使用的 CLI 配置 ID
-    cli_id: str
     # 字段：本次执行序号
     attempt_no: int
     # 字段：允许执行的最大序号
@@ -388,16 +354,9 @@ def resolve_execution_target(
 
 def resolve_task_run_text_target(
     task_run: TaskRunSnapshot,
-    legacy_cli_id: str | None = None,
 ) -> ExecutionTarget:
-    explicit_type = str(task_run.executor_type or "").strip().upper()
-    explicit_id = str(task_run.executor_id or "").strip()
-    if explicit_type and explicit_id:
-        return resolve_execution_target(explicit_type, explicit_id, "TEXT_GENERATION")
-    fallback_cli_id = str(legacy_cli_id or task_run.cli_id or "").strip()
-    if not fallback_cli_id:
-        raise HTTPException(status_code=400, detail="任务批次未配置调用通道")
-    return resolve_execution_target("CLI", fallback_cli_id, "TEXT_GENERATION")
+    require_execution_snapshot(task_run.executor_type, task_run.executor_id)
+    return resolve_execution_target(task_run.executor_type, task_run.executor_id, "TEXT_GENERATION")
 
 
 def load_mimo_tts_config(
@@ -584,7 +543,6 @@ def claim_next_queued_task() -> QueuedTaskClaim | None:
                 from candidate
                 where task.id = candidate.id
                 returning task.id,
-                          task.cli_id,
                           task.attempt_no,
                           coalesce(task.max_attempts, 3),
                           task.claim_token,
@@ -601,12 +559,12 @@ def claim_next_queued_task() -> QueuedTaskClaim | None:
             cursor.execute(
                 """
                 insert into tb_task_execution_log (
-                    created_at, updated_at, task_run_id, attempt_no, cli_id,
+                    created_at, updated_at, task_run_id, attempt_no,
                     handler_key, executor_type, executor_id, executor_label,
                     execution_mode, worker_count, status, start_time, reason,
                     run_log, ai_prompt_json, ai_response_json
                 )
-                select now(), now(), task.id, task.attempt_no, task.cli_id,
+                select now(), now(), task.id, task.attempt_no,
                        task.handler_key, task.executor_type, task.executor_id, task.executor_id,
                        coalesce(task.execution_mode, 'thread'),
                        greatest(1, least(32, coalesce(task.requested_worker_count, 1))),
@@ -617,7 +575,6 @@ def claim_next_queued_task() -> QueuedTaskClaim | None:
                 where task.id = %s
                 on conflict (task_run_id, attempt_no) do update
                 set updated_at = now(),
-                    cli_id = excluded.cli_id,
                     handler_key = excluded.handler_key,
                     executor_type = excluded.executor_type,
                     executor_id = excluded.executor_id,
@@ -638,13 +595,12 @@ def claim_next_queued_task() -> QueuedTaskClaim | None:
         connection.commit()
     return QueuedTaskClaim(
         id=int(row[0]),
-        cli_id=str(row[1] or ""),
-        attempt_no=int(row[2]),
-        max_attempts=int(row[3]),
-        claim_token=str(row[4]),
-        requested_worker_count=int(row[5]),
-        execution_mode=str(row[6]),
-        dispatch_group_id=str(row[7]),
+        attempt_no=int(row[1]),
+        max_attempts=int(row[2]),
+        claim_token=str(row[3]),
+        requested_worker_count=int(row[4]),
+        execution_mode=str(row[5]),
+        dispatch_group_id=str(row[6]),
     )
 
 
@@ -820,7 +776,7 @@ def recover_expired_queued_tasks() -> int:
 # 函数：execute_queued_task
 def execute_queued_task(claim: QueuedTaskClaim) -> None:
     try:
-        response = process_task_run_batch_by_type(claim.id, claim.cli_id)
+        response = process_task_run_batch_by_type(claim.id)
         failed_count = int(response.get("failedCount") or 0)
         success_count = int(response.get("successCount") or 0)
         if failed_count > 0:
@@ -944,7 +900,7 @@ def load_task_config_snapshot(task_config_id: int) -> TaskConfigSnapshot:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    select id, task_name, project_id, cli_id, database_config_id, selected_tables,
+                    select id, task_name, project_id, database_config_id, selected_tables,
                            handler_key, executor_type, executor_id
                     from tb_task_config
                     where id = %s
@@ -957,18 +913,17 @@ def load_task_config_snapshot(task_config_id: int) -> TaskConfigSnapshot:
 
     if not row:
         raise HTTPException(status_code=404, detail=f"任务配置不存在: {task_config_id}")
-    if row[4] is None:
+    if row[3] is None:
         raise HTTPException(status_code=400, detail="任务配置未关联数据库")
     return TaskConfigSnapshot(
         id=int(row[0]),
         task_name=str(row[1] or ""),
         project_id=int(row[2]),
-        cli_id=str(row[3] or ""),
-        database_config_id=int(row[4]),
-        selected_tables=str(row[5] or ""),
-        handler_key=str(row[6] or ""),
-        executor_type=str(row[7] or ""),
-        executor_id=str(row[8] or ""),
+        database_config_id=int(row[3]),
+        selected_tables=str(row[4] or ""),
+        handler_key=str(row[5] or ""),
+        executor_type=str(row[6] or ""),
+        executor_id=str(row[7] or ""),
     )
 
 
@@ -1012,7 +967,6 @@ def load_task_result_snapshot(task_result_id: int) -> TaskResultSnapshot:
                 cursor.execute(
                     """
                     select result.id, result.result_name, result.task_config_id, result.project_id,
-                           result.cli_id,
                            result.database_config_id, result.status, result.result_content, result.record_type,
                            result.handler_key, result.executor_type, result.executor_id
                     from tb_task_result result
@@ -1026,21 +980,20 @@ def load_task_result_snapshot(task_result_id: int) -> TaskResultSnapshot:
 
     if not row:
         raise HTTPException(status_code=404, detail=f"任务结果不存在: {task_result_id}")
-    if row[5] is None:
+    if row[4] is None:
         raise HTTPException(status_code=400, detail="任务结果未关联源数据库")
     return TaskResultSnapshot(
         id=int(row[0]),
         result_name=str(row[1] or ""),
         task_config_id=int(row[2]) if row[2] is not None else None,
         project_id=int(row[3]),
-        cli_id=str(row[4] or ""),
-        database_config_id=int(row[5]),
-        status=str(row[6] or ""),
-        result_content=str(row[7] or ""),
-        record_type=str(row[8] or RECORD_TYPE_FORMAL),
-        handler_key=str(row[9] or ""),
-        executor_type=str(row[10] or ""),
-        executor_id=str(row[11] or ""),
+        database_config_id=int(row[4]),
+        status=str(row[5] or ""),
+        result_content=str(row[6] or ""),
+        record_type=str(row[7] or RECORD_TYPE_FORMAL),
+        handler_key=str(row[8] or ""),
+        executor_type=str(row[9] or ""),
+        executor_id=str(row[10] or ""),
     )
 
 
@@ -1055,7 +1008,6 @@ def load_task_result_snapshots(task_result_ids: list[int]) -> list[TaskResultSna
                 cursor.execute(
                     """
                     select result.id, result.result_name, result.task_config_id, result.project_id,
-                           result.cli_id,
                            result.database_config_id, result.status, result.result_content, result.record_type,
                            result.handler_key, result.executor_type, result.executor_id
                     from tb_task_result result
@@ -1073,14 +1025,13 @@ def load_task_result_snapshots(task_result_ids: list[int]) -> list[TaskResultSna
             result_name=str(row[1] or ""),
             task_config_id=int(row[2]) if row[2] is not None else None,
             project_id=int(row[3]),
-            cli_id=str(row[4] or ""),
-            database_config_id=int(row[5]) if row[5] is not None else 0,
-            status=str(row[6] or ""),
-            result_content=str(row[7] or ""),
-            record_type=str(row[8] or RECORD_TYPE_FORMAL),
-            handler_key=str(row[9] or ""),
-            executor_type=str(row[10] or ""),
-            executor_id=str(row[11] or ""),
+            database_config_id=int(row[4]) if row[4] is not None else 0,
+            status=str(row[5] or ""),
+            result_content=str(row[6] or ""),
+            record_type=str(row[7] or RECORD_TYPE_FORMAL),
+            handler_key=str(row[8] or ""),
+            executor_type=str(row[9] or ""),
+            executor_id=str(row[10] or ""),
         )
         for row in rows
     }
@@ -1101,7 +1052,7 @@ def load_task_run_snapshot(task_run_id: int) -> TaskRunSnapshot:
             with connection.cursor() as cursor:
                 cursor.execute(
                     """
-                    select run.id, run.task_name, run.cli_id,
+                    select run.id, run.task_name,
                            run.ai_prompt_json, run.ai_response_json, run.record_type,
                            greatest(1, least(32, coalesce(run.requested_worker_count, 1))),
                            run.handler_key, run.executor_type, run.executor_id
@@ -1119,14 +1070,13 @@ def load_task_run_snapshot(task_run_id: int) -> TaskRunSnapshot:
     return TaskRunSnapshot(
         id=int(row[0]),
         task_name=str(row[1] or ""),
-        cli_id=str(row[2] or ""),
-        ai_prompt_json=str(row[3] or ""),
-        ai_response_json=str(row[4] or ""),
-        record_type=str(row[5] or RECORD_TYPE_FORMAL),
-        requested_worker_count=int(row[6] or 1),
-        handler_key=str(row[7] or ""),
-        executor_type=str(row[8] or ""),
-        executor_id=str(row[9] or ""),
+        ai_prompt_json=str(row[2] or ""),
+        ai_response_json=str(row[3] or ""),
+        record_type=str(row[4] or RECORD_TYPE_FORMAL),
+        requested_worker_count=int(row[5] or 1),
+        handler_key=str(row[6] or ""),
+        executor_type=str(row[7] or ""),
+        executor_id=str(row[8] or ""),
     )
 
 
@@ -1830,7 +1780,7 @@ def build_score_result_rows(
     rows: list[tuple[Any, ...]] = []
     handler_key = str(task_config.handler_key or HANDLER_SCORE).strip() or HANDLER_SCORE
     executor_type = str(task_config.executor_type or "CLI").strip().upper() or "CLI"
-    executor_id = str(task_config.executor_id or task_config.cli_id).strip()
+    executor_id = str(task_config.executor_id or "").strip()
     for group in groups:
         word_clean_id = group["wordCleanId"]
         if word_clean_id in existing_word_clean_ids:
@@ -1860,7 +1810,6 @@ def build_score_result_rows(
                 None,
                 task_config.id,
                 task_config.project_id,
-                task_config.cli_id,
                 handler_key,
                 executor_type,
                 executor_id,
@@ -1972,7 +1921,6 @@ def build_tts_result_rows(
                 None,
                 task_config.id,
                 task_config.project_id,
-                task_config.cli_id,
                 handler_key,
                 executor_type,
                 executor_id,
@@ -2038,7 +1986,6 @@ def replace_task_result_rows(
                         task_run_id,
                         task_config_id,
                         project_id,
-                        cli_id,
                         handler_key,
                         executor_type,
                         executor_id,
@@ -2656,7 +2603,7 @@ def build_prepared_score_result(
         "scores": scores,
         "bestScoreItem": best_score_item,
         "cliResponse": cli_response,
-        "effectiveCliId": effective_cli_id,
+        "executorId": effective_cli_id,
         "cliConfig": cli_config,
         "sourceUpdates": source_updates,
         "bestUpsert": best_upsert,
@@ -2684,8 +2631,8 @@ def build_completed_payload(prepared: dict[str, Any]) -> dict[str, Any]:
             "bestCandidate": best_score_item["candidate"],
         },
         "execution": {
-            "cliId": prepared["effectiveCliId"],
-            "cliLabel": cli_config.get("label"),
+            "executorId": prepared["executorId"],
+            "executorLabel": cli_config.get("label"),
             "command": cli_response["command"],
             "defaultArgs": cli_response["defaultArgs"],
             "effectiveArgs": cli_response["effectiveArgs"],
@@ -2717,8 +2664,8 @@ def build_completed_payload_from_task_run_batch(prepared: dict[str, Any], task_r
             "mode": "task-run-json-batch",
             "taskRunId": task_run.id,
             "itemKey": prepared["itemKey"],
-            "cliId": prepared["effectiveCliId"],
-            "cliLabel": cli_config.get("label"),
+            "executorId": prepared["executorId"],
+            "executorLabel": cli_config.get("label"),
             "command": cli_response["command"],
             "defaultArgs": cli_response["defaultArgs"],
             "effectiveArgs": cli_response["effectiveArgs"],
@@ -2885,7 +2832,7 @@ def fail_task_run_batch_results(task_results: list[TaskResultSnapshot], message:
 
 
 # 函数：process_word_clean_sentence_task_run_batch
-def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | None = None) -> dict[str, Any]:
+def process_word_clean_sentence_task_run_batch(task_run_id: int) -> dict[str, Any]:
     task_run = load_task_run_snapshot(task_run_id)
     if task_run.record_type == RECORD_TYPE_VALIDATION_HISTORY:
         raise HTTPException(status_code=400, detail="历史验证批次仅供查看，不能执行")
@@ -2899,7 +2846,7 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
     if any(item.record_type != RECORD_TYPE_FORMAL for item in task_results):
         raise HTTPException(status_code=400, detail="验证结果不能执行")
     contexts = build_task_run_batch_item_contexts(prompt, task_results)
-    target = resolve_task_run_text_target(task_run, cli_id)
+    target = resolve_task_run_text_target(task_run)
     if target.executor_type == "AI_PROVIDER":
         effective_cli_id = target.executor_id
         cli_config = {"label": target.label, "model": target.config.get("model")}
@@ -2956,8 +2903,6 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
                 "executorId": executor_id,
                 "executorLabel": cli_config.get("label"),
                 "protocol": protocol,
-                "cliId": effective_cli_id,
-                "cliLabel": cli_config.get("label"),
                 "command": cli_response["command"],
                 "defaultArgs": cli_response["defaultArgs"],
                 "effectiveArgs": cli_response["effectiveArgs"],
@@ -2993,7 +2938,6 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
                 "taskResultCount": len(task_results),
                 "successCount": len(prepared_items),
                 "failedCount": len(failed_rows),
-                "cliId": effective_cli_id,
                 "executorType": executor_type,
                 "executorId": executor_id,
                 "aiResponseJson": ai_response_json,
@@ -3042,7 +2986,6 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
             "taskResultCount": len(task_results),
             "successCount": len(success_rows),
             "failedCount": len(failed_rows),
-            "cliId": effective_cli_id,
             "executorType": executor_type,
             "executorId": executor_id,
             "aiResponseJson": ai_response_json,
@@ -3063,30 +3006,6 @@ def process_word_clean_sentence_task_run_batch(task_run_id: int, cli_id: str | N
         if isinstance(exc, HTTPException):
             raise
         raise HTTPException(status_code=500, detail=message) from exc
-
-
-# 函数：prepare_task_result_for_batch
-def prepare_task_result_for_batch(
-    task_result: TaskResultSnapshot,
-    cli_config: dict[str, Any],
-    cli_id: str | None,
-) -> dict[str, Any]:
-    effective_cli_id = (cli_id or task_result.cli_id or "").strip()
-    if not effective_cli_id:
-        raise ValueError("任务结果未配置执行 CLI")
-    payload = parse_task_result_payload(task_result)
-    cli_response = run_cli_prompt(cli_config, payload["aiPrompt"])
-    ai_result = extract_json_payload(cli_response["stdout"])
-    scores, best_score_item = validate_ai_score_result(ai_result, payload["writeBack"])
-    return build_prepared_score_result(
-        task_result,
-        payload,
-        cli_response,
-        scores,
-        best_score_item,
-        cli_config,
-        effective_cli_id,
-    )
 
 
 # 函数：batch_backfill_word_clean_sentence_scores
@@ -3159,100 +3078,6 @@ def batch_backfill_word_clean_sentence_scores(
                 page_size=1000,
             )
         connection.commit()
-
-
-# 函数：process_word_clean_sentence_task_results_batch
-def process_word_clean_sentence_task_results_batch(
-    task_result_ids: list[int],
-    cli_id: str,
-    worker_count: int,
-) -> dict[str, Any]:
-    if not task_result_ids:
-        raise HTTPException(status_code=400, detail="任务结果 ID 不能为空")
-    if worker_count < 1 or worker_count > 32:
-        raise HTTPException(status_code=400, detail="workerCount 需在 1 到 32 之间")
-
-    cli_config = find_cli_config(cli_id)
-    access = cli_config.get("access", {})
-    if not access.get("accessible"):
-        raise HTTPException(status_code=400, detail=f"CLI 不可访问: {access.get('message', '')}")
-
-    task_results = load_task_result_snapshots(task_result_ids)
-    batch_update_task_result_states([
-        (item.id, "RUNNING", "批量执行中，正在调用 CLI 评分", None, "")
-        for item in task_results
-    ])
-
-    prepared_items: list[dict[str, Any]] = []
-    failed_rows: list[tuple[int, str, str, dict[str, Any] | None, str]] = []
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        future_map = {
-            executor.submit(prepare_task_result_for_batch, item, cli_config, cli_id): item
-            for item in task_results
-        }
-        for future in as_completed(future_map):
-            task_result = future_map[future]
-            try:
-                prepared_items.append(future.result())
-            except Exception as exc:
-                failed_rows.append(
-                    (
-                        task_result.id,
-                        "FAILED",
-                        "评分或校验失败",
-                        None,
-                        str(exc),
-                    )
-                )
-
-    grouped: dict[int, list[dict[str, Any]]] = {}
-    for item in prepared_items:
-        task_result = item["taskResult"]
-        grouped.setdefault(task_result.database_config_id, []).append(item)
-
-    success_rows: list[tuple[int, str, str, dict[str, Any] | None, str]] = []
-    for database_config_id, items in grouped.items():
-        try:
-            connection_config = load_connection_config_snapshot(database_config_id)
-            batch_backfill_word_clean_sentence_scores(connection_config, items)
-            for item in items:
-                success_rows.append(
-                    (
-                        item["taskResult"].id,
-                        "SUCCESS",
-                        item["summary"],
-                        build_completed_payload(item),
-                        "",
-                    )
-                )
-        except Exception as exc:
-            for item in items:
-                failed_payload = {
-                    **item["payload"],
-                    "processorError": str(exc),
-                    "processedAt": datetime.now(timezone.utc).isoformat(),
-                    "mode": "batch",
-                }
-                failed_rows.append(
-                    (
-                        item["taskResult"].id,
-                        "FAILED",
-                        "批量回填失败",
-                        failed_payload,
-                        str(exc),
-                    )
-                )
-
-    batch_update_task_result_states(success_rows + failed_rows)
-    return {
-        "accepted": True,
-        "mode": "batch",
-        "taskResultCount": len(task_results),
-        "successCount": len(success_rows),
-        "failedCount": len(failed_rows),
-        "workerCount": worker_count,
-        "cliId": cli_id,
-    }
 
 
 # 函数：safe_tts_file_name
@@ -3481,7 +3306,6 @@ def process_tts_batch_item(
                 "itemKey": item_key,
                 "service": "python-worker-mimo-tts",
                 "processedAt": datetime.now(timezone.utc).isoformat(),
-                "legacyJobTableDependency": False,
                 "validationExecution": validation_execution,
                 "sourceWriteBackSkipped": validation_execution,
             },
@@ -3527,9 +3351,7 @@ def process_tts_batch_item(
 # 函数：process_word_clean_best_sentence_tts_task_run_batch
 def process_word_clean_best_sentence_tts_task_run_batch(
     task_run_id: int,
-    cli_id: str | None = None,
 ) -> dict[str, Any]:
-    del cli_id
     task_run = load_task_run_snapshot(task_run_id)
     if task_run.record_type == RECORD_TYPE_VALIDATION_HISTORY:
         raise HTTPException(status_code=400, detail="历史验证批次仅供查看，不能执行")
@@ -3593,7 +3415,6 @@ def process_word_clean_best_sentence_tts_task_run_batch(
             "workerCount": worker_count,
             "service": "python-worker-mimo-tts",
             "processedAt": datetime.now(timezone.utc).isoformat(),
-            "legacyJobTableDependency": False,
             "validationExecution": validation_execution,
             "sourceWriteBackSkipped": validation_execution,
         },
@@ -3605,19 +3426,18 @@ def process_word_clean_best_sentence_tts_task_run_batch(
         "taskResultCount": len(task_results),
         "successCount": success_count,
         "failedCount": failed_count,
-        "cliId": "",
         "aiResponseJson": ai_response_json,
         "validationExecution": validation_execution,
     }
 
 
 # 函数：process_task_run_batch_by_type
-def process_task_run_batch_by_type(task_run_id: int, cli_id: str | None = None) -> dict[str, Any]:
+def process_task_run_batch_by_type(task_run_id: int) -> dict[str, Any]:
     task_run = load_task_run_snapshot(task_run_id)
     handler = require_registered_handler(task_run.handler_key)
     require_execution_snapshot(task_run.executor_type, task_run.executor_id)
     callback = require_handler_phase(handler, "batch_processor", "批次执行")
-    return callback(task_run_id, task_run.executor_id)
+    return callback(task_run_id)
 
 
 # 函数：process_tts_validation_task_result
@@ -3672,13 +3492,14 @@ def process_tts_validation_task_result(task_result: TaskResultSnapshot) -> dict[
 
 
 # 函数：process_word_clean_sentence_task_result
-def process_word_clean_sentence_task_result(task_result_id: int, cli_id: str | None = None) -> dict[str, Any]:
+def process_word_clean_sentence_task_result(task_result_id: int) -> dict[str, Any]:
     task_result = load_task_result_snapshot(task_result_id)
     if task_result.record_type == RECORD_TYPE_VALIDATION_HISTORY:
         raise HTTPException(status_code=400, detail="历史验证结果不能执行")
     payload = parse_task_result_payload(task_result)
     explicit_executor_type = str(task_result.executor_type or "").strip().upper()
     explicit_executor_id = str(task_result.executor_id or "").strip()
+    require_execution_snapshot(explicit_executor_type, explicit_executor_id)
     if explicit_executor_type == "AI_PROVIDER":
         target = resolve_execution_target("AI_PROVIDER", explicit_executor_id, "TEXT_GENERATION")
         text_execution = execute_text_generation(target, payload["aiPrompt"])
@@ -3701,13 +3522,9 @@ def process_word_clean_sentence_task_result(task_result_id: int, cli_id: str | N
         protocol = target.protocol
         running_summary = f"正在调用 AI Provider {target.label} 评分"
     else:
-        effective_cli_id = (
-            explicit_executor_id
-            if explicit_executor_type == "CLI" and explicit_executor_id
-            else str(cli_id or task_result.cli_id or "").strip()
-        )
-        if not effective_cli_id:
-            raise HTTPException(status_code=400, detail="任务结果未配置调用通道")
+        if explicit_executor_type != "CLI":
+            raise HTTPException(status_code=400, detail=f"评分不支持调用通道类型: {explicit_executor_type}")
+        effective_cli_id = explicit_executor_id
         target = resolve_execution_target("CLI", effective_cli_id, "TEXT_GENERATION")
         cli_config = find_cli_config(effective_cli_id)
         access = cli_config.get("access", {})
@@ -3752,8 +3569,6 @@ def process_word_clean_sentence_task_result(task_result_id: int, cli_id: str | N
                 "executorId": executor_id,
                 "executorLabel": cli_config.get("label"),
                 "protocol": protocol,
-                "cliId": effective_cli_id,
-                "cliLabel": cli_config.get("label"),
                 "command": cli_response["command"],
                 "defaultArgs": cli_response["defaultArgs"],
                 "effectiveArgs": cli_response["effectiveArgs"],
@@ -3796,12 +3611,12 @@ def process_word_clean_sentence_task_result(task_result_id: int, cli_id: str | N
 
 
 # 函数：process_task_result_by_type
-def process_task_result_by_type(task_result_id: int, cli_id: str | None = None) -> dict[str, Any]:
+def process_task_result_by_type(task_result_id: int) -> dict[str, Any]:
     task_result = load_task_result_snapshot(task_result_id)
     handler = require_registered_handler(task_result.handler_key)
     require_execution_snapshot(task_result.executor_type, task_result.executor_id)
     callback = require_handler_phase(handler, "single_processor", "单条验证")
-    return callback(task_result_id, task_result.executor_id)
+    return callback(task_result_id)
 
 
 def require_registered_handler(handler_key: str) -> TaskHandlerDefinition:
@@ -3837,7 +3652,6 @@ def require_handler_phase(
 # 函数：process_validation_task_results_batch
 def process_validation_task_results_batch(
     task_result_ids: list[int],
-    cli_id: str | None,
     worker_count: int,
 ) -> dict[str, Any]:
     if not task_result_ids:
@@ -3850,7 +3664,7 @@ def process_validation_task_results_batch(
     failed_count = 0
     with ThreadPoolExecutor(max_workers=min(worker_count, len(task_results))) as executor:
         futures = {
-            executor.submit(process_task_result_by_type, item.id, cli_id): item.id
+            executor.submit(process_task_result_by_type, item.id): item.id
             for item in task_results
         }
         for future in as_completed(futures):
@@ -3866,7 +3680,6 @@ def process_validation_task_results_batch(
         "successCount": success_count,
         "failedCount": failed_count,
         "workerCount": worker_count,
-        "cliId": cli_id,
     }
 
 
@@ -3986,7 +3799,6 @@ def build_tts_handler_batch_prompt(
         ],
         "rules": {
             "continueOnItemFailure": True,
-            "legacyJobTableDependency": False,
         },
         "items": items,
         "responseSchema": {
@@ -4016,7 +3828,7 @@ TASK_HANDLER_REGISTRY.register(TaskHandlerDefinition(
     handler_key=HANDLER_TTS,
     required_capability="AUDIO_TTS",
     result_generator=generate_word_clean_best_sentence_tts_results,
-    single_processor=lambda task_result_id, _executor_id=None: process_tts_validation_task_result(
+    single_processor=lambda task_result_id: process_tts_validation_task_result(
         load_task_result_snapshot(task_result_id)
     ),
     batch_prompt_builder=build_tts_handler_batch_prompt,
@@ -4145,93 +3957,23 @@ def generate_results_from_task_config_simple(
 @app.post("/api/task-result/process-simple")
 def process_task_result_simple(
     taskResultId: int,
-    cliId: str | None = None,
 ) -> dict[str, Any]:
-    return process_task_result_by_type(taskResultId, cliId)
+    return process_task_result_by_type(taskResultId)
 
 
 # 函数：process_task_run_batch_json_simple
 @app.post("/api/task-run/process-batch-json-simple")
 def process_task_run_batch_json_simple(
     taskRunId: int,
-    cliId: str | None = None,
 ) -> dict[str, Any]:
-    return process_task_run_batch_by_type(taskRunId, cliId)
+    return process_task_run_batch_by_type(taskRunId)
 
 
 # 函数：process_task_results_batch_simple
 @app.post("/api/task-result/process-batch-simple")
 def process_task_results_batch_simple(
     taskResultIds: str,
-    cliId: str | None = None,
     workerCount: int = Query(default=4, ge=1, le=32),
 ) -> dict[str, Any]:
     task_result_ids = [int(item) for item in taskResultIds.split(",") if item.strip().isdigit()]
-    return process_validation_task_results_batch(task_result_ids, cliId, workerCount)
-
-
-# 函数：start_execution
-@app.post("/api/execution/start")
-def start_execution(request: StartExecutionRequest) -> dict[str, Any]:
-    if not request.taskRuns:
-        raise HTTPException(status_code=400, detail="任务列表不能为空")
-
-    mode = normalize_execution_mode(request.executionMode)
-    cli_config = find_cli_config(request.cliId)
-    access = cli_config.get("access", {})
-    if not access.get("accessible"):
-        raise HTTPException(status_code=400, detail=f"CLI 不可访问: {access.get('message', '')}")
-
-    task_ids = [item.id for item in request.taskRuns]
-    return {
-        "accepted": True,
-        "message": "Python Worker 已接收执行请求",
-        "cli": {
-            "id": cli_config.get("id"),
-            "label": cli_config.get("label"),
-            "command": cli_config.get("command"),
-            "resolvedPath": access.get("resolvedPath", ""),
-        },
-        "execution": {
-            "mode": mode,
-            "workerCount": request.workerCount,
-            "taskCount": len(request.taskRuns),
-            "taskRunIds": task_ids,
-        },
-    }
-
-
-# 函数：start_execution_simple
-@app.post("/api/execution/start-simple")
-def start_execution_simple(
-    cliId: str,
-    executionMode: str = "thread",
-    workerCount: int = Query(default=1, ge=1, le=32),
-    taskRunIds: str = "",
-) -> dict[str, Any]:
-    mode = normalize_execution_mode(executionMode)
-    cli_config = find_cli_config(cliId)
-    access = cli_config.get("access", {})
-    if not access.get("accessible"):
-        raise HTTPException(status_code=400, detail=f"CLI 不可访问: {access.get('message', '')}")
-
-    task_ids = [int(item) for item in taskRunIds.split(",") if item.strip().isdigit()]
-    if not task_ids:
-        raise HTTPException(status_code=400, detail="任务 ID 不能为空")
-
-    return {
-        "accepted": True,
-        "message": "Python Worker 已接收执行请求",
-        "cli": {
-            "id": cli_config.get("id"),
-            "label": cli_config.get("label"),
-            "command": cli_config.get("command"),
-            "resolvedPath": access.get("resolvedPath", ""),
-        },
-        "execution": {
-            "mode": mode,
-            "workerCount": workerCount,
-            "taskCount": len(task_ids),
-            "taskRunIds": task_ids,
-        },
-    }
+    return process_validation_task_results_batch(task_result_ids, workerCount)

@@ -21,10 +21,6 @@ public class TaskExecutionLog extends BaseEntity {
     @Column(nullable = false)
     private Integer attemptNo;
 
-    // 字段：本次执行使用的 CLI 配置 ID
-    @Column(nullable = false)
-    private String cliId;
-
     @Column(length = 100)
     private String handlerKey;
 
@@ -92,16 +88,6 @@ public class TaskExecutionLog extends BaseEntity {
     // 方法：setAttemptNo
     public void setAttemptNo(Integer attemptNo) {
         this.attemptNo = attemptNo;
-    }
-
-    // 方法：getCliId
-    public String getCliId() {
-        return cliId;
-    }
-
-    // 方法：setCliId
-    public void setCliId(String cliId) {
-        this.cliId = cliId;
     }
 
     public String getHandlerKey() {

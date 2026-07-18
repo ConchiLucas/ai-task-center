@@ -10,7 +10,6 @@ import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 import com.aitaskcenter.dto.BatchProcessTaskResultRequest;
-import com.aitaskcenter.model.TaskConfig;
 import com.aitaskcenter.model.TaskExecutionLog;
 import com.aitaskcenter.model.TaskRecordType;
 import com.aitaskcenter.model.TaskResult;
@@ -78,16 +77,15 @@ class TaskResultServiceListTest {
         TaskResultRepository repository = mock(TaskResultRepository.class);
         PythonWorkerClient pythonWorkerClient = mock(PythonWorkerClient.class);
         TaskResult validationResult = result(7L, TaskRecordType.VALIDATION_CURRENT, "PENDING");
-        validationResult.setCliId("codex");
         when(repository.findById(7L)).thenReturn(Optional.of(validationResult));
-        when(pythonWorkerClient.processTaskResult(7L, "codex"))
+        when(pythonWorkerClient.processTaskResult(7L))
                 .thenReturn(Map.of("accepted", true));
 
         Map<String, Object> response = service(repository, pythonWorkerClient, mock(TaskRunResultRepository.class))
-                .process(7L, null);
+                .process(7L);
 
         assertEquals(true, response.get("accepted"));
-        verify(pythonWorkerClient).processTaskResult(7L, "codex");
+        verify(pythonWorkerClient).processTaskResult(7L);
     }
 
     @Test
@@ -99,46 +97,28 @@ class TaskResultServiceListTest {
         validationResult.setExecutorType("AI_PROVIDER");
         validationResult.setExecutorId("xiaomi-mimo-tts");
         when(repository.findById(7L)).thenReturn(Optional.of(validationResult));
-        when(pythonWorkerClient.processTaskResult(7L, ""))
+        when(pythonWorkerClient.processTaskResult(7L))
                 .thenReturn(Map.of("accepted", true));
 
         Map<String, Object> response = service(repository, pythonWorkerClient, mock(TaskRunResultRepository.class))
-                .process(7L, null);
+                .process(7L);
 
         assertEquals(true, response.get("accepted"));
-        verify(pythonWorkerClient).processTaskResult(7L, "");
+        verify(pythonWorkerClient).processTaskResult(7L);
     }
 
     @Test
-    void legacyValidationResultFallsBackToTaskConfigTarget() {
+    void validationResultWithoutSnapshotIsRejected() {
         TaskResultRepository repository = mock(TaskResultRepository.class);
-        TaskConfigRepository taskConfigRepository = mock(TaskConfigRepository.class);
         PythonWorkerClient pythonWorkerClient = mock(PythonWorkerClient.class);
         TaskResult validationResult = result(7L, TaskRecordType.VALIDATION_CURRENT, "PENDING");
         validationResult.setTaskConfigId(1L);
-        TaskConfig config = new TaskConfig();
-        config.setId(1L);
-        config.setCliId("codex");
-        config.setHandlerKey("word_clean_best_sentence_tts");
-        config.setExecutorType("AI_PROVIDER");
-        config.setExecutorId("xiaomi-mimo-tts");
         when(repository.findById(7L)).thenReturn(Optional.of(validationResult));
-        when(taskConfigRepository.findById(1L)).thenReturn(Optional.of(config));
-        when(pythonWorkerClient.processTaskResult(7L, "")).thenReturn(Map.of("accepted", true));
-        TaskResultService service = new TaskResultService(
-                repository,
-                mock(ProjectConfigRepository.class),
-                mock(TaskRunResultRepository.class),
-                mock(TaskRunRepository.class),
-                taskConfigRepository,
-                mock(TaskExecutionLogRepository.class),
-                pythonWorkerClient,
-                mock(TaskRunPromptBuilder.class),
-                new TaskExecutionTargetResolver());
 
-        service.process(7L, null);
-
-        verify(pythonWorkerClient).processTaskResult(7L, "");
+        assertThrows(
+                IllegalArgumentException.class,
+                () -> service(repository, pythonWorkerClient, mock(TaskRunResultRepository.class)).process(7L));
+        verify(pythonWorkerClient, never()).processTaskResult(any());
     }
 
     @Test
@@ -171,14 +151,13 @@ class TaskResultServiceListTest {
                 mock(TaskConfigRepository.class),
                 mock(TaskExecutionLogRepository.class),
                 pythonWorkerClient,
-                mock(TaskRunPromptBuilder.class),
                 new TaskExecutionTargetResolver());
 
-        Map<String, Object> response = service.process(7L, null);
+        Map<String, Object> response = service.process(7L);
 
         assertEquals("postgres-queue", response.get("mode"));
         assertEquals(1, response.get("queuedResultCount"));
-        verify(pythonWorkerClient, never()).processTaskResult(any(), any());
+        verify(pythonWorkerClient, never()).processTaskResult(any());
     }
 
     @Test
@@ -186,15 +165,14 @@ class TaskResultServiceListTest {
         TaskResultRepository repository = mock(TaskResultRepository.class);
         PythonWorkerClient pythonWorkerClient = mock(PythonWorkerClient.class);
         TaskResult validationResult = result(8L, TaskRecordType.VALIDATION_HISTORY, "PENDING");
-        validationResult.setCliId("codex");
         when(repository.findById(8L)).thenReturn(Optional.of(validationResult));
 
         IllegalArgumentException exception = assertThrows(
                 IllegalArgumentException.class,
-                () -> service(repository, pythonWorkerClient, mock(TaskRunResultRepository.class)).process(8L, null));
+                () -> service(repository, pythonWorkerClient, mock(TaskRunResultRepository.class)).process(8L));
 
         assertEquals("历史验证结果仅供查看，不能执行", exception.getMessage());
-        verify(pythonWorkerClient, never()).processTaskResult(any(), any());
+        verify(pythonWorkerClient, never()).processTaskResult(any());
     }
 
     @Test
@@ -207,18 +185,17 @@ class TaskResultServiceListTest {
         when(repository.findAllById(List.of(7L, 8L))).thenReturn(List.of(first, second));
         when(taskRunResultRepository.findByTaskResultIdInOrderByIdDesc(List.of(7L, 8L)))
                 .thenReturn(List.of());
-        when(pythonWorkerClient.processTaskResults(List.of(7L, 8L), "codex", 2))
+        when(pythonWorkerClient.processTaskResults(List.of(7L, 8L), 2))
                 .thenReturn(Map.of("mode", "validation-direct-batch"));
         BatchProcessTaskResultRequest request = new BatchProcessTaskResultRequest();
         request.setTaskResultIds(List.of(7L, 8L));
-        request.setCliId("codex");
         request.setWorkerCount(2);
 
         Map<String, Object> response = service(repository, pythonWorkerClient, taskRunResultRepository)
                 .processBatch(request);
 
         assertEquals("validation-direct-batch", response.get("mode"));
-        verify(pythonWorkerClient).processTaskResults(List.of(7L, 8L), "codex", 2);
+        verify(pythonWorkerClient).processTaskResults(List.of(7L, 8L), 2);
     }
 
     @Test
@@ -236,7 +213,7 @@ class TaskResultServiceListTest {
         when(repository.findAllById(List.of(7L, 8L))).thenReturn(List.of(first, second));
         when(taskRunResultRepository.findByTaskResultIdInOrderByIdDesc(List.of(7L, 8L)))
                 .thenReturn(List.of());
-        when(pythonWorkerClient.processTaskResults(List.of(7L, 8L), "", 2))
+        when(pythonWorkerClient.processTaskResults(List.of(7L, 8L), 2))
                 .thenReturn(Map.of("mode", "validation-direct-batch"));
         BatchProcessTaskResultRequest request = new BatchProcessTaskResultRequest();
         request.setTaskResultIds(List.of(7L, 8L));
@@ -246,7 +223,7 @@ class TaskResultServiceListTest {
                 .processBatch(request);
 
         assertEquals("validation-direct-batch", response.get("mode"));
-        verify(pythonWorkerClient).processTaskResults(List.of(7L, 8L), "", 2);
+        verify(pythonWorkerClient).processTaskResults(List.of(7L, 8L), 2);
     }
 
     @Test
@@ -280,7 +257,6 @@ class TaskResultServiceListTest {
                 mock(TaskConfigRepository.class),
                 executionLogRepository,
                 mock(PythonWorkerClient.class),
-                mock(TaskRunPromptBuilder.class),
                 new TaskExecutionTargetResolver());
 
         Map<String, Object> response = service.processBatch(request);
@@ -293,7 +269,6 @@ class TaskResultServiceListTest {
         assertEquals("word_clean_best_sentence_tts", run.getHandlerKey());
         assertEquals("AI_PROVIDER", run.getExecutorType());
         assertEquals("xiaomi-mimo-tts", run.getExecutorId());
-        assertEquals("", run.getCliId());
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<TaskExecutionLog>> logCaptor = ArgumentCaptor.forClass(List.class);
         verify(executionLogRepository).saveAll(logCaptor.capture());
@@ -336,7 +311,6 @@ class TaskResultServiceListTest {
                 mock(TaskConfigRepository.class),
                 mock(TaskExecutionLogRepository.class),
                 pythonWorkerClient,
-                mock(TaskRunPromptBuilder.class),
                 new TaskExecutionTargetResolver());
     }
 
@@ -345,6 +319,9 @@ class TaskResultServiceListTest {
         result.setId(id);
         result.setRecordType(recordType);
         result.setStatus(status);
+        result.setHandlerKey("task_config_1");
+        result.setExecutorType("CLI");
+        result.setExecutorId("codex");
         return result;
     }
 }

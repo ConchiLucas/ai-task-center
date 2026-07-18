@@ -1,6 +1,5 @@
 package com.aitaskcenter.service;
 
-import com.aitaskcenter.dto.PythonWorkerStartRequest;
 import com.aitaskcenter.dto.TaskHandlerDescriptor;
 import com.fasterxml.jackson.core.JsonProcessingException;
 import com.fasterxml.jackson.databind.ObjectMapper;
@@ -27,42 +26,6 @@ public class PythonWorkerClient {
     public PythonWorkerClient(@Value("${python-worker.base-url}") String baseUrl, ObjectMapper objectMapper) {
         this.baseUrl = baseUrl;
         this.objectMapper = objectMapper;
-    }
-
-    // 方法：startExecution
-    @SuppressWarnings("unchecked")
-    public Map<String, Object> startExecution(PythonWorkerStartRequest request) {
-        String json;
-        try {
-            json = objectMapper.writeValueAsString(request);
-        } catch (JsonProcessingException ex) {
-            throw new IllegalArgumentException("Python Worker 请求序列化失败: " + ex.getMessage());
-        }
-        String taskRunIds = request.getTaskRuns().stream()
-                .map(item -> String.valueOf(item.getId()))
-                .collect(Collectors.joining(","));
-        String uri = baseUrl
-                + "/api/execution/start-simple?cliId=" + encode(request.getCliId())
-                + "&executionMode=" + encode(request.getExecutionMode())
-                + "&workerCount=" + request.getWorkerCount()
-                + "&taskRunIds=" + encode(taskRunIds);
-        HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(uri))
-                .header("Content-Type", "application/json")
-                .header("Accept", "application/json")
-                .POST(HttpRequest.BodyPublishers.noBody())
-                .build();
-        try {
-            HttpResponse<String> response = httpClient.send(httpRequest, HttpResponse.BodyHandlers.ofString());
-            if (response.statusCode() >= 400) {
-                throw new IllegalArgumentException("Python Worker 调用失败: " + response.body());
-            }
-            return objectMapper.readValue(response.body(), Map.class);
-        } catch (IOException ex) {
-            throw new IllegalArgumentException("Python Worker 响应解析失败: " + ex.getMessage());
-        } catch (InterruptedException ex) {
-            Thread.currentThread().interrupt();
-            throw new IllegalArgumentException("Python Worker 调用被中断");
-        }
     }
 
     // 方法：generateTaskResults
@@ -99,10 +62,8 @@ public class PythonWorkerClient {
 
     // 方法：processTaskResult
     @SuppressWarnings("unchecked")
-    public Map<String, Object> processTaskResult(Long taskResultId, String cliId) {
-        String uri = baseUrl
-                + "/api/task-result/process-simple?taskResultId=" + taskResultId
-                + "&cliId=" + encode(cliId);
+    public Map<String, Object> processTaskResult(Long taskResultId) {
+        String uri = baseUrl + "/api/task-result/process-simple?taskResultId=" + taskResultId;
         HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(uri))
                 .header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.noBody())
@@ -123,13 +84,12 @@ public class PythonWorkerClient {
 
     // 方法：processTaskResults
     @SuppressWarnings("unchecked")
-    public Map<String, Object> processTaskResults(List<Long> taskResultIds, String cliId, Integer workerCount) {
+    public Map<String, Object> processTaskResults(List<Long> taskResultIds, Integer workerCount) {
         String ids = taskResultIds.stream()
                 .map(String::valueOf)
                 .collect(Collectors.joining(","));
         String uri = baseUrl
                 + "/api/task-result/process-batch-simple?taskResultIds=" + encode(ids)
-                + "&cliId=" + encode(cliId)
                 + "&workerCount=" + (workerCount == null ? 4 : workerCount);
         HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(uri))
                 .header("Accept", "application/json")
@@ -151,10 +111,8 @@ public class PythonWorkerClient {
 
     // 方法：processTaskRunBatch
     @SuppressWarnings("unchecked")
-    public Map<String, Object> processTaskRunBatch(Long taskRunId, String cliId) {
-        String uri = baseUrl
-                + "/api/task-run/process-batch-json-simple?taskRunId=" + taskRunId
-                + "&cliId=" + encode(cliId);
+    public Map<String, Object> processTaskRunBatch(Long taskRunId) {
+        String uri = baseUrl + "/api/task-run/process-batch-json-simple?taskRunId=" + taskRunId;
         HttpRequest httpRequest = HttpRequest.newBuilder(URI.create(uri))
                 .header("Accept", "application/json")
                 .POST(HttpRequest.BodyPublishers.noBody())

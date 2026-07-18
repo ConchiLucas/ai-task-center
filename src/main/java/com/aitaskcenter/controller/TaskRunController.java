@@ -34,13 +34,12 @@ public class TaskRunController {
             @RequestParam(required = false) String taskName,
             @RequestParam(required = false) Long projectId,
             @RequestParam(required = false) Long taskConfigId,
-            @RequestParam(required = false) String cliId,
             @RequestParam(required = false) String executorType,
             @RequestParam(required = false) String executorId,
             @RequestParam(required = false) String status,
             @RequestParam(defaultValue = TaskRecordType.FORMAL) String recordType) {
         return ApiResponse.ok(service.list(
-                taskName, projectId, taskConfigId, cliId, executorType, executorId, status, recordType));
+                taskName, projectId, taskConfigId, executorType, executorId, status, recordType));
     }
 
     @PostMapping("/create")

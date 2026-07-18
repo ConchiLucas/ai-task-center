@@ -5,8 +5,6 @@ import java.util.List;
 public class StartTaskRunRequest {
     // 字段：要启动的任务执行记录 ID 列表
     private List<Long> taskRunIds;
-    // 字段：本次执行选择的 CLI 配置 ID
-    private String cliId;
     // 字段：Python Worker 使用的并发模式
     private String executionMode;
     // 字段：Python Worker 并发线程或进程数量
@@ -20,16 +18,6 @@ public class StartTaskRunRequest {
     // 方法：setTaskRunIds
     public void setTaskRunIds(List<Long> taskRunIds) {
         this.taskRunIds = taskRunIds;
-    }
-
-    // 方法：getCliId
-    public String getCliId() {
-        return cliId;
-    }
-
-    // 方法：setCliId
-    public void setCliId(String cliId) {
-        this.cliId = cliId;
     }
 
     // 方法：getExecutionMode

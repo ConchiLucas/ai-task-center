@@ -6,47 +6,23 @@ import org.springframework.util.StringUtils;
 
 @Component
 public class TaskExecutionTargetResolver {
-    public static final String HANDLER_SCORE = "word_clean_sentence_score";
-    public static final String HANDLER_TTS = "word_clean_best_sentence_tts";
     public static final String EXECUTOR_CLI = "CLI";
     public static final String EXECUTOR_AI_PROVIDER = "AI_PROVIDER";
-    public static final String DEFAULT_MIMO_TTS_PROVIDER = "xiaomi-mimo-tts";
 
-    public ResolvedTarget resolve(
+    public ResolvedTarget require(
             String handlerKey,
             String executorType,
-            String executorId,
-            String legacyCliId,
-            String selectedTables,
-            String payloadTaskType) {
-        String effectiveHandler = clean(handlerKey);
-        if (!StringUtils.hasText(effectiveHandler)) {
-            effectiveHandler = isTts(selectedTables, payloadTaskType) ? HANDLER_TTS : HANDLER_SCORE;
+            String executorId) {
+        if (!StringUtils.hasText(handlerKey)) {
+            throw new IllegalArgumentException("任务处理器未注册");
         }
-
-        String effectiveType = clean(executorType).toUpperCase(Locale.ROOT);
-        String effectiveId = clean(executorId);
-        if (!StringUtils.hasText(effectiveType) || !StringUtils.hasText(effectiveId)) {
-            if (HANDLER_TTS.equals(effectiveHandler)) {
-                effectiveType = EXECUTOR_AI_PROVIDER;
-                effectiveId = DEFAULT_MIMO_TTS_PROVIDER;
-            } else {
-                effectiveType = EXECUTOR_CLI;
-                effectiveId = StringUtils.hasText(legacyCliId) ? legacyCliId.trim() : "codex";
-            }
+        if (!StringUtils.hasText(executorType) || !StringUtils.hasText(executorId)) {
+            throw new IllegalArgumentException("任务未配置模型调用通道");
         }
-        return new ResolvedTarget(effectiveHandler, effectiveType, effectiveId);
-    }
-
-    private static boolean isTts(String selectedTables, String payloadTaskType) {
-        String tables = clean(selectedTables).toLowerCase(Locale.ROOT);
-        String taskType = clean(payloadTaskType).toLowerCase(Locale.ROOT);
-        return tables.contains("word_clean_best_sentence")
-                || taskType.contains("word_clean_best_sentence_tts");
-    }
-
-    private static String clean(String value) {
-        return value == null ? "" : value.trim();
+        return new ResolvedTarget(
+                handlerKey.trim(),
+                executorType.trim().toUpperCase(Locale.ROOT),
+                executorId.trim());
     }
 
     public record ResolvedTarget(String handlerKey, String executorType, String executorId) {}

@@ -24,7 +24,6 @@ def run_snapshot(record_type=worker.RECORD_TYPE_FORMAL):
     return worker.TaskRunSnapshot(
         id=31,
         task_name="生成 TTS 任务 - 批次 1",
-        cli_id="codex",
         ai_prompt_json=json.dumps(prompt),
         ai_response_json="",
         record_type=record_type,
@@ -59,7 +58,6 @@ def result_snapshot(result_id, best_sentence_id, word_clean_id):
         result_name=f"TTS {result_id}",
         task_config_id=1,
         project_id=1,
-        cli_id="codex",
         database_config_id=1,
         status="PENDING",
         record_type=worker.RECORD_TYPE_FORMAL,
@@ -87,10 +85,10 @@ class TtsBatchExecutionTest(unittest.TestCase):
             patch.object(worker, "load_task_run_snapshot", return_value=task_run),
             patch.object(worker, "TASK_HANDLER_REGISTRY", registry),
         ):
-            response = worker.process_task_run_batch_by_type(31, "codex")
+            response = worker.process_task_run_batch_by_type(31)
 
         self.assertEqual("task-run-tts-batch", response["mode"])
-        process_tts.assert_called_once_with(31, "xiaomi-mimo-tts")
+        process_tts.assert_called_once_with(31)
 
     def test_tts_batch_updates_each_result_and_batch_response(self):
         task_run = run_snapshot()
@@ -115,7 +113,7 @@ class TtsBatchExecutionTest(unittest.TestCase):
             patch.object(worker, "process_tts_batch_item", side_effect=process_item) as process_item_mock,
             patch.object(worker, "update_task_run_ai_response", return_value='{"ok":true}') as update_run,
         ):
-            response = worker.process_word_clean_best_sentence_tts_task_run_batch(31, "codex")
+            response = worker.process_word_clean_best_sentence_tts_task_run_batch(31)
 
         self.assertEqual(2, response["successCount"])
         self.assertEqual(0, response["failedCount"])
@@ -124,7 +122,7 @@ class TtsBatchExecutionTest(unittest.TestCase):
         self.assertEqual("SUCCESS", update_states.call_args_list[1].args[0][0][1])
         run_response = update_run.call_args.args[1]
         self.assertEqual(worker.RESULT_MODE_TTS_BATCH, run_response["taskType"])
-        self.assertFalse(run_response["execution"]["legacyJobTableDependency"])
+        self.assertEqual("python-worker-mimo-tts", run_response["execution"]["service"])
         self.assertFalse(run_response["execution"]["validationExecution"])
 
     def test_current_validation_batch_executes_without_updating_formal_results(self):
@@ -152,7 +150,7 @@ class TtsBatchExecutionTest(unittest.TestCase):
             patch.object(worker, "process_tts_batch_item", side_effect=process_item),
             patch.object(worker, "update_task_run_ai_response", return_value='{"ok":true}') as update_run,
         ):
-            response = worker.process_word_clean_best_sentence_tts_task_run_batch(31, "codex")
+            response = worker.process_word_clean_best_sentence_tts_task_run_batch(31)
 
         self.assertTrue(response["validationExecution"])
         self.assertEqual(2, response["successCount"])

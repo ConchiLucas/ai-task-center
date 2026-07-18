@@ -51,9 +51,8 @@ public class TaskResultController {
     @PostMapping("/{id}/process")
     // 方法：process
     public ApiResponse<Map<String, Object>> process(
-            @PathVariable Long id,
-            @RequestParam(required = false) String cliId) {
-        return ApiResponse.ok(service.process(id, cliId), "任务结果处理完成");
+            @PathVariable Long id) {
+        return ApiResponse.ok(service.process(id), "任务结果处理完成");
     }
 
     @PostMapping("/batch-process")

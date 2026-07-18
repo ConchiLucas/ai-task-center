@@ -21,7 +21,6 @@ class ScoreBatchExecutionTargetTest(unittest.TestCase):
         task_run = worker.TaskRunSnapshot(
             id=31,
             task_name="评分验证批次",
-            cli_id="codex",
             ai_prompt_json=json.dumps(prompt),
             ai_response_json="",
             record_type=worker.RECORD_TYPE_VALIDATION_CURRENT,
@@ -53,7 +52,6 @@ class ScoreBatchExecutionTargetTest(unittest.TestCase):
             result_name="评分 41",
             task_config_id=2,
             project_id=1,
-            cli_id="codex",
             database_config_id=1,
             status="PENDING",
             record_type=worker.RECORD_TYPE_FORMAL,

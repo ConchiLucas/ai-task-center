@@ -15,7 +15,6 @@ import com.aitaskcenter.repository.ConnectionConfigRepository;
 import com.aitaskcenter.repository.ProjectConfigRepository;
 import com.aitaskcenter.repository.TaskConfigRepository;
 import com.aitaskcenter.repository.TaskResultRepository;
-import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.Collection;
 import java.util.List;
 import java.util.Optional;
@@ -55,9 +54,6 @@ class TaskConfigHandlerBatchTest {
                 mock(ConnectionConfigRepository.class),
                 resultRepository,
                 workerClient,
-                new TaskRunPromptBuilder(new ObjectMapper()),
-                new TaskExecutionTargetResolver(),
-                mock(AiConfigService.class),
                 jdbcTemplate);
         GenerateTaskRunBatchRequest request = new GenerateTaskRunBatchRequest();
         request.setBatchSize(10);

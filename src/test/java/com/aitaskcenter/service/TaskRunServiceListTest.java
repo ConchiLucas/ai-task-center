@@ -35,7 +35,6 @@ class TaskRunServiceListTest {
         config.setId(1L);
         config.setTaskName("生成 TTS 任务");
         config.setProjectId(1L);
-        config.setCliId("codex");
         config.setHandlerKey("word_clean_best_sentence_tts");
         config.setExecutorType("AI_PROVIDER");
         config.setExecutorId("xiaomi-mimo-tts");
@@ -49,7 +48,6 @@ class TaskRunServiceListTest {
                 mock(TaskRunResultRepository.class),
                 mock(TaskExecutionLogRepository.class),
                 mock(PythonWorkerClient.class),
-                mock(TaskRunPromptBuilder.class),
                 new TaskExecutionTargetResolver());
         CreateTaskRunRequest request = new CreateTaskRunRequest();
         request.setTaskConfigId(1L);
@@ -78,20 +76,20 @@ class TaskRunServiceListTest {
                 mock(TaskRunResultRepository.class),
                 mock(TaskExecutionLogRepository.class),
                 mock(PythonWorkerClient.class),
-                mock(TaskRunPromptBuilder.class),
                 new TaskExecutionTargetResolver());
 
         List<TaskRun> results = service.list(
-                null, null, 1L, null, null, TaskRecordType.VALIDATION_CURRENT);
+                null, null, 1L, null, null, null, TaskRecordType.VALIDATION_CURRENT);
 
         assertEquals(List.of(validationForTask), results);
     }
 
     @Test
-    void filtersLegacyTtsRunsByInferredProviderTarget() {
+    void filtersRunsByStoredProviderTarget() {
         TaskRunRepository repository = mock(TaskRunRepository.class);
         TaskRun legacyTts = taskRun(1L, TaskRecordType.FORMAL);
-        legacyTts.setSelectedTables("[\"public.word_clean_best_sentence\"]");
+        legacyTts.setExecutorType("AI_PROVIDER");
+        legacyTts.setExecutorId("xiaomi-mimo-tts");
         TaskRun scoring = taskRun(2L, TaskRecordType.FORMAL);
         scoring.setSelectedTables("[\"public.word_clean_sentence\"]");
         when(repository.findAllByOrderByCreatedAtDesc()).thenReturn(List.of(legacyTts, scoring));
@@ -101,7 +99,6 @@ class TaskRunServiceListTest {
                 mock(TaskExecutionLogRepository.class));
 
         List<TaskRun> results = service.list(
-                null,
                 null,
                 null,
                 null,
@@ -126,7 +123,6 @@ class TaskRunServiceListTest {
         TaskRunService service = service(repository, linkRepository, executionRepository);
         StartTaskRunRequest request = new StartTaskRunRequest();
         request.setTaskRunIds(List.of(1573L));
-        request.setCliId("codex");
         request.setExecutionMode("thread");
         request.setWorkerCount(2);
 
@@ -162,7 +158,6 @@ class TaskRunServiceListTest {
         assertEquals(true, response.get("accepted"));
         assertEquals("AI_PROVIDER", run.getExecutorType());
         assertEquals("xiaomi-mimo-tts", run.getExecutorId());
-        assertEquals("codex", run.getCliId());
         @SuppressWarnings("unchecked")
         ArgumentCaptor<List<TaskExecutionLog>> executionCaptor = ArgumentCaptor.forClass(List.class);
         verify(executionRepository).saveAll(executionCaptor.capture());
@@ -207,7 +202,6 @@ class TaskRunServiceListTest {
                 mock(TaskExecutionLogRepository.class));
         StartTaskRunRequest request = new StartTaskRunRequest();
         request.setTaskRunIds(List.of(1572L));
-        request.setCliId("codex");
         request.setExecutionMode("thread");
         request.setWorkerCount(1);
 
@@ -226,7 +220,6 @@ class TaskRunServiceListTest {
                 linkRepository,
                 executionRepository,
                 mock(PythonWorkerClient.class),
-                mock(TaskRunPromptBuilder.class),
                 new TaskExecutionTargetResolver());
     }
 
@@ -235,9 +228,11 @@ class TaskRunServiceListTest {
         run.setTaskName("测试批次");
         run.setTaskConfigId(taskConfigId);
         run.setProjectId(1L);
-        run.setCliId("codex");
         run.setStatus("PENDING");
         run.setRecordType(recordType);
+        run.setHandlerKey("task_config_" + taskConfigId);
+        run.setExecutorType("CLI");
+        run.setExecutorId("codex");
         return run;
     }
 }

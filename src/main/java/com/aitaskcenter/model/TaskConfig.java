@@ -15,10 +15,6 @@ public class TaskConfig extends BaseEntity {
     // 字段：所属项目 ID
     private Long projectId;
 
-    @Column
-    // 字段：默认执行 CLI 配置 ID
-    private String cliId;
-
     @Column(length = 100)
     private String handlerKey;
 
@@ -27,9 +23,6 @@ public class TaskConfig extends BaseEntity {
 
     @Column(length = 128)
     private String executorId;
-
-    @Column(length = 128)
-    private String onboardingCliId;
 
     // 字段：关联数据库配置 ID
     private Long databaseConfigId;
@@ -71,16 +64,6 @@ public class TaskConfig extends BaseEntity {
         this.projectId = projectId;
     }
 
-    // 方法：getCliId
-    public String getCliId() {
-        return cliId;
-    }
-
-    // 方法：setCliId
-    public void setCliId(String cliId) {
-        this.cliId = cliId;
-    }
-
     public String getHandlerKey() {
         return handlerKey;
     }
@@ -103,14 +86,6 @@ public class TaskConfig extends BaseEntity {
 
     public void setExecutorId(String executorId) {
         this.executorId = executorId;
-    }
-
-    public String getOnboardingCliId() {
-        return onboardingCliId;
-    }
-
-    public void setOnboardingCliId(String onboardingCliId) {
-        this.onboardingCliId = onboardingCliId;
     }
 
     // 方法：getDatabaseConfigId

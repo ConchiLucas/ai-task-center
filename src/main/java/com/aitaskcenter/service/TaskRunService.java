@@ -1,7 +1,6 @@
 package com.aitaskcenter.service;
 
 import com.aitaskcenter.dto.CreateTaskRunRequest;
-import com.aitaskcenter.dto.PythonWorkerStartRequest;
 import com.aitaskcenter.dto.PythonWorkerTaskRunItem;
 import com.aitaskcenter.dto.StartTaskRunRequest;
 import com.aitaskcenter.model.TaskConfig;
@@ -40,7 +39,6 @@ public class TaskRunService {
     private final TaskRunResultRepository taskRunResultRepository;
     private final TaskExecutionLogRepository taskExecutionLogRepository;
     private final PythonWorkerClient pythonWorkerClient;
-    private final TaskRunPromptBuilder taskRunPromptBuilder;
     private final TaskExecutionTargetResolver executionTargetResolver;
 
     public TaskRunService(
@@ -51,7 +49,6 @@ public class TaskRunService {
             TaskRunResultRepository taskRunResultRepository,
             TaskExecutionLogRepository taskExecutionLogRepository,
             PythonWorkerClient pythonWorkerClient,
-            TaskRunPromptBuilder taskRunPromptBuilder,
             TaskExecutionTargetResolver executionTargetResolver) {
         this.repository = repository;
         this.taskConfigRepository = taskConfigRepository;
@@ -60,7 +57,6 @@ public class TaskRunService {
         this.taskRunResultRepository = taskRunResultRepository;
         this.taskExecutionLogRepository = taskExecutionLogRepository;
         this.pythonWorkerClient = pythonWorkerClient;
-        this.taskRunPromptBuilder = taskRunPromptBuilder;
         this.executionTargetResolver = executionTargetResolver;
     }
 
@@ -69,17 +65,6 @@ public class TaskRunService {
             String taskName,
             Long projectId,
             Long taskConfigId,
-            String cliId,
-            String status,
-            String recordType) {
-        return list(taskName, projectId, taskConfigId, cliId, null, null, status, recordType);
-    }
-
-    public List<TaskRun> list(
-            String taskName,
-            Long projectId,
-            Long taskConfigId,
-            String cliId,
             String executorType,
             String executorId,
             String status,
@@ -91,7 +76,6 @@ public class TaskRunService {
                         || item.getTaskName().toLowerCase(Locale.ROOT).contains(taskName.trim().toLowerCase(Locale.ROOT)))
                 .filter(item -> projectId == null || projectId.equals(item.getProjectId()))
                 .filter(item -> taskConfigId == null || taskConfigId.equals(item.getTaskConfigId()))
-                .filter(item -> !StringUtils.hasText(cliId) || cliId.trim().equals(item.getCliId()))
                 .filter(item -> matchesExecutionTarget(item, executorType, executorId))
                 .filter(item -> !StringUtils.hasText(status) || status.trim().equals(item.getStatus()))
                 .toList();
@@ -101,13 +85,10 @@ public class TaskRunService {
         if (!StringUtils.hasText(executorType) && !StringUtils.hasText(executorId)) {
             return true;
         }
-        TaskExecutionTargetResolver.ResolvedTarget target = executionTargetResolver.resolve(
+        TaskExecutionTargetResolver.ResolvedTarget target = executionTargetResolver.require(
                 run.getHandlerKey(),
                 run.getExecutorType(),
-                run.getExecutorId(),
-                run.getCliId(),
-                run.getSelectedTables(),
-                run.getAiPromptJson());
+                run.getExecutorId());
         return (!StringUtils.hasText(executorType) || executorType.trim().equals(target.executorType()))
                 && (!StringUtils.hasText(executorId) || executorId.trim().equals(target.executorId()));
     }
@@ -125,10 +106,11 @@ public class TaskRunService {
         run.setTaskConfigId(config.getId());
         run.setTaskName(defaultText(request.getTaskName(), config.getTaskName()));
         run.setProjectId(config.getProjectId());
-        run.setCliId(config.getCliId());
-        run.setHandlerKey(config.getHandlerKey());
-        run.setExecutorType(config.getExecutorType());
-        run.setExecutorId(config.getExecutorId());
+        TaskExecutionTargetResolver.ResolvedTarget target = executionTargetResolver.require(
+                config.getHandlerKey(), config.getExecutorType(), config.getExecutorId());
+        run.setHandlerKey(target.handlerKey());
+        run.setExecutorType(target.executorType());
+        run.setExecutorId(target.executorId());
         run.setDatabaseConfigId(config.getDatabaseConfigId());
         run.setSelectedTables(config.getSelectedTables());
         run.setStatus("PENDING");
@@ -184,7 +166,8 @@ public class TaskRunService {
         List<TaskRunResult> links = taskRunResultRepository.findByTaskRunIdOrderByIdAsc(id);
         List<TaskResult> results = loadLinkedResults(links);
         ensureBatchPromptJson(run, results);
-        List<TaskExecutionLog> executions = ensureLegacyExecution(run);
+        List<TaskExecutionLog> executions = taskExecutionLogRepository
+                .findByTaskRunIdOrderByAttemptNoDesc(run.getId());
         return Map.of(
                 "taskRun", run,
                 "links", links,
@@ -344,77 +327,6 @@ public class TaskRunService {
         }
     }
 
-    // 方法：processLinkedResults
-    private Map<String, Object> processLinkedResults(
-            TaskRun run,
-            List<TaskRunResult> links,
-            String cliId,
-            int workerCount,
-            TaskExecutionLog execution) {
-        List<TaskResult> results = loadLinkedResults(links);
-        ensureBatchPromptJson(run, results);
-        for (TaskRunResult link : links) {
-            link.setStatus("RUNNING");
-            link.setErrorMessage("");
-        }
-        taskRunResultRepository.saveAll(links);
-        try {
-            Map<String, Object> response = pythonWorkerClient.processTaskRunBatch(run.getId(), cliId);
-            syncRunResultLinks(links);
-            int failedCount = numberValue(response.get("failedCount"));
-            int successCount = numberValue(response.get("successCount"));
-            Object aiResponseJson = response.get("aiResponseJson");
-            if (aiResponseJson instanceof String text) {
-                run.setAiResponseJson(text);
-                execution.setAiResponseJson(text);
-            }
-            OffsetDateTime end = OffsetDateTime.now();
-            run.setEndTime(end);
-            run.setDurationSeconds(durationSeconds(run.getStartTime(), end));
-            execution.setEndTime(end);
-            execution.setDurationSeconds(durationSeconds(execution.getStartTime(), end));
-            if (failedCount > 0) {
-                run.setStatus("FAILED");
-                run.setReason("批次执行完成，失败 " + failedCount + " 条");
-            } else {
-                run.setStatus("SUCCESS");
-                run.setReason("批次执行成功");
-            }
-            execution.setStatus(run.getStatus());
-            execution.setReason(run.getReason());
-            execution.setRunLog(appendLog(execution.getRunLog(), "批量处理任务结果完成：成功 "
-                    + successCount + " 条，失败 " + failedCount + " 条。"));
-            run.setRunLog("最近执行：第 " + execution.getAttemptNo() + " 次，" + run.getReason() + "。");
-            repository.save(run);
-            taskExecutionLogRepository.save(execution);
-            return response;
-        } catch (Exception ex) {
-            for (TaskRunResult link : links) {
-                link.setStatus("FAILED");
-                link.setErrorMessage(limit(ex.getMessage(), 4000));
-            }
-            taskRunResultRepository.saveAll(links);
-            OffsetDateTime end = OffsetDateTime.now();
-            run.setStatus("FAILED");
-            run.setEndTime(end);
-            run.setDurationSeconds(durationSeconds(run.getStartTime(), end));
-            run.setReason(limit(ex.getMessage(), 1000));
-            execution.setStatus("FAILED");
-            execution.setEndTime(end);
-            execution.setDurationSeconds(durationSeconds(execution.getStartTime(), end));
-            execution.setReason(limit(ex.getMessage(), 1000));
-            execution.setRunLog(appendLog(execution.getRunLog(), "批量处理任务结果失败：" + ex.getMessage()));
-            run.setRunLog("最近执行：第 " + execution.getAttemptNo() + " 次，失败。");
-            repository.save(run);
-            taskExecutionLogRepository.save(execution);
-            return Map.of(
-                    "accepted", false,
-                    "taskRunId", run.getId(),
-                    "failedCount", links.size(),
-                    "message", ex.getMessage());
-        }
-    }
-
     // 方法：loadLinkedResults
     private List<TaskResult> loadLinkedResults(List<TaskRunResult> links) {
         Map<Long, TaskResult> resultsById = taskResultRepository
@@ -432,42 +344,15 @@ public class TaskRunService {
         if (StringUtils.hasText(run.getAiPromptJson()) || results.isEmpty()) {
             return;
         }
-        String promptJson = taskRunPromptBuilder.buildBatchPromptJson(
-                new TaskRunPromptBuilder.BatchPromptContext(
-                        run.getTaskName(),
-                        run.getCliId(),
-                        run.getSelectedTables()),
-                results);
+        TaskExecutionTargetResolver.ResolvedTarget target = executionTargetResolver.require(
+                run.getHandlerKey(), run.getExecutorType(), run.getExecutorId());
+        String promptJson = pythonWorkerClient.buildBatchPrompt(
+                target.handlerKey(),
+                run.getTaskConfigId(),
+                run.getTaskName(),
+                results.stream().map(TaskResult::getId).toList());
         run.setAiPromptJson(promptJson);
         repository.save(run);
-    }
-
-    // 方法：ensureLegacyExecution
-    private List<TaskExecutionLog> ensureLegacyExecution(TaskRun run) {
-        List<TaskExecutionLog> executions = taskExecutionLogRepository.findByTaskRunIdOrderByAttemptNoDesc(run.getId());
-        if (!executions.isEmpty() || (!StringUtils.hasText(run.getRunLog()) && !StringUtils.hasText(run.getAiResponseJson()))) {
-            return executions;
-        }
-        TaskExecutionLog legacy = new TaskExecutionLog();
-        legacy.setTaskRunId(run.getId());
-        legacy.setAttemptNo(1);
-        legacy.setCliId(defaultText(run.getCliId(), "未配置 CLI"));
-        legacy.setHandlerKey(run.getHandlerKey());
-        legacy.setExecutorType(run.getExecutorType());
-        legacy.setExecutorId(run.getExecutorId());
-        legacy.setExecutorLabel(defaultText(run.getExecutorId(), run.getCliId()));
-        legacy.setExecutionMode("legacy");
-        legacy.setWorkerCount(1);
-        legacy.setStatus(defaultText(run.getStatus(), "PENDING"));
-        legacy.setStartTime(run.getStartTime());
-        legacy.setEndTime(run.getEndTime());
-        legacy.setDurationSeconds(run.getDurationSeconds());
-        legacy.setReason(run.getReason());
-        legacy.setRunLog(run.getRunLog());
-        legacy.setAiPromptJson(run.getAiPromptJson());
-        legacy.setAiResponseJson(run.getAiResponseJson());
-        taskExecutionLogRepository.save(legacy);
-        return taskExecutionLogRepository.findByTaskRunIdOrderByAttemptNoDesc(run.getId());
     }
 
     // 方法：createQueuedExecutionLog
@@ -475,18 +360,17 @@ public class TaskRunService {
         TaskExecutionLog execution = new TaskExecutionLog();
         execution.setTaskRunId(run.getId());
         execution.setAttemptNo((run.getAttemptNo() == null ? 0 : run.getAttemptNo()) + 1);
-        execution.setCliId(run.getCliId());
         execution.setHandlerKey(run.getHandlerKey());
         execution.setExecutorType(run.getExecutorType());
         execution.setExecutorId(run.getExecutorId());
-        execution.setExecutorLabel(defaultText(run.getExecutorId(), run.getCliId()));
+        execution.setExecutorLabel(run.getExecutorId());
         execution.setExecutionMode(executionMode);
         execution.setWorkerCount(workerCount);
         execution.setStatus("QUEUED");
         execution.setReason("等待 Python Worker 领取");
         execution.setRunLog("第 " + execution.getAttemptNo() + " 次执行已进入 PostgreSQL 队列。\n"
                 + "调用通道=" + defaultText(run.getExecutorType(), "CLI") + "/"
-                + defaultText(run.getExecutorId(), run.getCliId())
+                + defaultText(run.getExecutorId(), "未配置")
                 + "，模式=" + executionMode + "，并发上限=" + workerCount + "。");
         execution.setAiPromptJson(run.getAiPromptJson());
         execution.setAiResponseJson("");

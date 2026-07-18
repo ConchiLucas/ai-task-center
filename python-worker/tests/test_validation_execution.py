@@ -37,7 +37,6 @@ def snapshot(
         result_name="验证结果",
         task_config_id=1,
         project_id=2,
-        cli_id="codex",
         database_config_id=3,
         status="PENDING",
         record_type=record_type,
@@ -91,10 +90,10 @@ class ValidationExecutionTest(unittest.TestCase):
             patch.object(worker, "load_task_result_snapshot", return_value=task_result),
             patch.object(worker, "TASK_HANDLER_REGISTRY", registry),
         ):
-            result = worker.process_task_result_by_type(7, "codex")
+            result = worker.process_task_result_by_type(7)
 
         self.assertEqual("SUCCESS", result["status"])
-        process_tts.assert_called_once_with(7, "xiaomi-mimo-tts")
+        process_tts.assert_called_once_with(7)
 
     def test_score_validation_skips_source_database_backfill(self):
         task_result = snapshot(task_type=worker.RESULT_MODE_SCORE)
@@ -131,7 +130,7 @@ class ValidationExecutionTest(unittest.TestCase):
             patch.object(worker, "load_connection_config_snapshot") as load_connection,
             patch.object(worker, "backfill_word_clean_sentence_score") as backfill,
         ):
-            result = worker.process_word_clean_sentence_task_result(7, "codex")
+            result = worker.process_word_clean_sentence_task_result(7)
 
         self.assertEqual("SUCCESS", result["status"])
         resolve_target.assert_called_once_with("CLI", "codex", "TEXT_GENERATION")
@@ -188,12 +187,14 @@ class ValidationExecutionTest(unittest.TestCase):
             patch.object(worker, "load_task_result_snapshots", return_value=task_results),
             patch.object(worker, "process_task_result_by_type", return_value={"status": "SUCCESS"}) as process_one,
         ):
-            result = worker.process_validation_task_results_batch([7, 8], "codex", 2)
+            result = worker.process_validation_task_results_batch([7, 8], 2)
 
         self.assertEqual("validation-direct-batch", result["mode"])
         self.assertEqual(2, result["successCount"])
         self.assertEqual(0, result["failedCount"])
         self.assertEqual(2, process_one.call_count)
+        process_one.assert_any_call(7)
+        process_one.assert_any_call(8)
 
 
 if __name__ == "__main__":

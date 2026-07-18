@@ -317,16 +317,15 @@ export default function App() {
     () => new Map(taskConnections.map((connection) => [connection.ID, connection.connectionName])),
     [taskConnections],
   );
-  const cliMap = useMemo(
-    () => new Map(cliConfigs.map((config) => [config.id, config.label || config.id])),
-    [cliConfigs],
-  );
   const executionTargetMap = useMemo(
     () => new Map(executionTargets.map((target) => [executionTargetKey(target.type, target.id), target.label || target.id])),
     [executionTargets],
   );
   const renderExecutionTarget = (record: TaskConfig | TaskRun | TaskResult | TaskExecutionLog) => {
     const execution = resolveExecutionSnapshot(record);
+    if (!execution.executorType || !execution.executorId) {
+      return <Tag>未配置</Tag>;
+    }
     const label = executionTargetMap.get(executionTargetKey(execution.executorType, execution.executorId))
       || ('executorLabel' in record ? record.executorLabel : '')
       || execution.executorId
@@ -955,11 +954,10 @@ export default function App() {
   }) => {
     setTaskRunLoading(true);
     try {
-      const [runList, taskList, connectionData, cliConfig, projectList, targetList] = await Promise.all([
+      const [runList, taskList, connectionData, projectList, targetList] = await Promise.all([
         getTaskRuns(toTaskRunApiFilters(filters)),
         getTaskConfigs(),
         getConnections({}),
-        getLocalCliConfig(),
         getProjects(),
         getExecutionTargets(),
       ]);
@@ -968,8 +966,6 @@ export default function App() {
       setTaskConnections(connectionData.list || []);
       setProjects(projectList);
       setExecutionTargets(targetList);
-      const nextConfigs = cliConfig.configs || [];
-      setCliConfigs(nextConfigs);
       setSelectedTaskRunIds((current) => current.filter((id) => runList.some((run) => run.ID === id)));
     } catch (error) {
       message.error(errorMessage(error, '加载任务列表失败'));
@@ -1163,12 +1159,11 @@ export default function App() {
   }, page = taskResultCurrentPage, pageSize = taskResultTablePageSize) => {
     setTaskResultLoading(true);
     try {
-      const [resultList, runList, taskList, connectionData, cliConfig, projectList, targetList] = await Promise.all([
+      const [resultList, runList, taskList, connectionData, projectList, targetList] = await Promise.all([
         getTaskResults({ ...filters, page, pageSize }),
         getTaskRuns(),
         getTaskConfigs(),
         getConnections({}),
-        getLocalCliConfig(),
         getProjects(),
         getExecutionTargets(),
       ]);
@@ -1181,7 +1176,6 @@ export default function App() {
       setTaskConnections(connectionData.list || []);
       setProjects(projectList);
       setExecutionTargets(targetList);
-      setCliConfigs(cliConfig.configs || []);
       setSelectedTaskResultIds((current) => current.filter((id) => resultList.list.some((result) => result.ID === id)));
     } catch (error) {
       message.error(errorMessage(error, '加载任务结果失败'));
@@ -1207,8 +1201,9 @@ export default function App() {
     if (!result.ID) return;
     const resultId = result.ID;
     const execution = resolveExecutionSnapshot(result);
-    const executionLabel = executionTargetMap.get(executionTargetKey(execution.executorType, execution.executorId))
-      || execution.executorId;
+    const executionLabel = execution.executorType && execution.executorId
+      ? executionTargetMap.get(executionTargetKey(execution.executorType, execution.executorId)) || execution.executorId
+      : '';
     modal.confirm({
       title: result.recordType === 'VALIDATION_CURRENT' ? '执行验证结果' : '执行任务结果',
       content: result.recordType === 'VALIDATION_CURRENT'
@@ -1248,7 +1243,6 @@ export default function App() {
       return;
     }
     taskResultBatchForm.setFieldsValue({
-      cliId: undefined,
       workerCount: 4,
     });
     setTaskResultBatchOpen(true);
@@ -1261,7 +1255,6 @@ export default function App() {
     try {
       const response = await batchProcessTaskResults({
         taskResultIds: selectedTaskResultIds,
-        cliId: values.cliId || undefined,
         workerCount: Number(values.workerCount) || 4,
       });
       const queuedResultCount = Number(response?.queuedResultCount || 0);
@@ -2847,14 +2840,14 @@ export default function App() {
               showSearch
               value={selectedTables}
               onChange={setSelectedTables}
-              placeholder="请选择需要 CLI 读取结构和数据的表"
+              placeholder="请选择任务处理器需要读取的表"
               optionFilterProp="label"
               className="full-field"
               options={availableTables.map((table) => ({ value: table, label: table }))}
               maxTagCount="responsive"
             />
             <Text type="secondary">
-              未来执行 CLI 任务时，可以根据这里选择的表读取表结构、字段信息和样例数据。
+              任务处理器会按这里选择的数据源表读取表结构、字段信息和业务数据。
             </Text>
           </Space>
         </Spin>
@@ -2941,23 +2934,12 @@ export default function App() {
         confirmLoading={batchProcessingResults}
       >
         <Form layout="vertical" form={taskResultBatchForm}>
-          <Form.Item label="旧结果 CLI 覆盖（可选）" name="cliId">
-            <Select
-              allowClear
-              showSearch
-              placeholder="选择 Codex 或 Antigravity"
-              optionFilterProp="label"
-              options={cliConfigs
-                .filter((config) => config.enabled)
-                .map((config) => ({ value: config.id, label: config.label || config.id }))}
-            />
-          </Form.Item>
           <Form.Item label="并发数量" name="workerCount" rules={[{ required: true, message: '请填写并发数量' }]}>
             <InputNumber min={1} max={32} className="full-field" />
           </Form.Item>
           <Text type="secondary">
-            提交后窗口会立即关闭。系统按所选并发数拆分异步执行批次，Python Worker 在后台调用已保存的 CLI 或 AI API；
-            新结果使用自身保存的调用通道；此处 CLI 只兼容尚未保存调用通道的旧结果。成功或已入队结果会自动过滤。
+            提交后窗口会立即关闭。系统按所选并发数拆分异步执行批次，Python Worker 只使用结果中保存的任务处理器和模型调用通道；
+            快照不完整的结果会被拒绝，成功或已入队结果会自动过滤。
           </Text>
         </Form>
       </Modal>
@@ -3116,18 +3098,12 @@ function resolveExecutionSnapshot(record: {
   handlerKey?: string;
   executorType?: ExecutorType;
   executorId?: string;
-  cliId?: string;
-  selectedTables?: string;
-  sourceTables?: string;
 }) {
-  const sourceTables = record.selectedTables || record.sourceTables || '';
-  const inferredTts = sourceTables.includes('word_clean_best_sentence');
-  const handlerKey = (record.handlerKey || (inferredTts
-    ? 'word_clean_best_sentence_tts'
-    : 'word_clean_sentence_score')) as HandlerKey;
-  const executorType = record.executorType || (handlerKey === 'word_clean_best_sentence_tts' ? 'AI_PROVIDER' : 'CLI');
-  const executorId = record.executorId || (executorType === 'AI_PROVIDER' ? 'xiaomi-mimo-tts' : record.cliId || '');
-  return { handlerKey, executorType, executorId };
+  return {
+    handlerKey: record.handlerKey as HandlerKey | undefined,
+    executorType: record.executorType,
+    executorId: record.executorId || '',
+  };
 }
 
 // 函数：formatDateTime
@@ -3224,76 +3200,14 @@ function extractResultInput(payload: Record<string, unknown> | null, raw?: strin
 }
 
 // 函数：buildTaskRunBatchAiPrompt
-function buildTaskRunBatchAiPrompt(run: TaskRun | null, results: TaskResult[]) {
+function buildTaskRunBatchAiPrompt(run: TaskRun | null, _results: TaskResult[]) {
   if (!run) {
     return '暂无批次 AI 提示词';
   }
   if (run.aiPromptJson?.trim()) {
     return formatJsonText(run.aiPromptJson);
   }
-  if (results.length === 0) {
-    return formatJsonText({
-      taskType: 'word_clean_sentence_score_batch',
-      version: 1,
-      batch: {
-        taskName: run.taskName,
-        cliId: run.cliId,
-        selectedTables: run.selectedTables || '',
-        resultCount: 0,
-      },
-      items: [],
-    });
-  }
-  return formatJsonText({
-    taskType: 'word_clean_sentence_score_batch',
-    version: 1,
-    batch: {
-      taskName: run.taskName,
-      cliId: run.cliId,
-      selectedTables: run.selectedTables || '',
-      resultCount: results.length,
-    },
-    instructions: [
-      '你是英语例句质量评审助手。',
-      '请为 items 中每一个任务结果独立评分。',
-      '请只返回 JSON，不要返回 Markdown、解释性文字或数据库 ID。',
-      '返回 items 必须覆盖输入中的全部 itemKey。',
-    ],
-    rules: {
-      scoreMin: 1,
-      scoreMax: 100,
-      uniqueScorePerItem: true,
-      returnOnlyJson: true,
-      doNotReturnDatabaseIds: true,
-    },
-    items: results.map((result, index) => {
-      const payload = parseResultPayload(result.resultContent);
-      const writeBack = isPlainRecord(payload?.writeBack) ? payload.writeBack : null;
-      const candidateMap = isPlainRecord(writeBack?.candidateMap) ? writeBack.candidateMap : {};
-      return {
-        itemKey: batchItemKey(index),
-        taskType: 'word_clean_sentence_score',
-        word: promptSafeText(String(payload?.word || writeBack?.word || '')),
-        sourceTable: String(payload?.sourceTable || writeBack?.sourceTable || ''),
-        candidates: Object.entries(candidateMap).map(([candidate, value]) => {
-          const source = isPlainRecord(value) ? value : {};
-          return {
-            candidate,
-            modelName: promptSafeText(String(source.modelName || '')),
-            sentence: promptSafeText(String(source.sentence || '')),
-            sentenceTranslation: promptSafeText(String(source.sentenceTranslation || '')),
-          };
-        }),
-      };
-    }),
-    responseSchema: {
-      items: results.map((_, index) => ({
-        itemKey: batchItemKey(index),
-        scores: [{ candidate: 'A', score: 95, reason: '简短原因' }],
-        bestCandidate: 'A',
-      })),
-    },
-  });
+  return '该批次未保存处理器生成的模型输入，不能从旧字段推断。';
 }
 
 // 函数：batchItemKey
@@ -3317,21 +3231,6 @@ function formatJsonText(value: unknown) {
     }
   }
   return JSON.stringify(value, null, 2);
-}
-
-// 函数：promptSafeText
-function promptSafeText(value: string) {
-  return value
-    .replace(/0/g, '零')
-    .replace(/1/g, '一')
-    .replace(/2/g, '二')
-    .replace(/3/g, '三')
-    .replace(/4/g, '四')
-    .replace(/5/g, '五')
-    .replace(/6/g, '六')
-    .replace(/7/g, '七')
-    .replace(/8/g, '八')
-    .replace(/9/g, '九');
 }
 
 // 函数：formatResultExecutionResponse

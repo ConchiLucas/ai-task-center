@@ -36,7 +36,6 @@ class TaskOnboardingServiceTest {
         task.setId(12L);
         task.setTaskName("测试任务");
         task.setProjectId(1L);
-        task.setCliId("codex");
         task.setExecutorType("CLI");
         task.setExecutorId("codex");
         task.setOnboardingStep(OnboardingStep.RESULT_CODE.name());

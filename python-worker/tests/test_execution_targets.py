@@ -25,11 +25,10 @@ def database_connection(row):
 
 
 class ExecutionTargetResolutionTest(unittest.TestCase):
-    def test_explicit_runtime_cli_wins_over_onboarding_cli(self):
+    def test_runtime_target_comes_from_strict_snapshot(self):
         task_run = worker.TaskRunSnapshot(
             id=31,
             task_name="评分批次",
-            cli_id="codex",
             ai_prompt_json="{}",
             ai_response_json="",
             record_type=worker.RECORD_TYPE_FORMAL,
@@ -48,7 +47,7 @@ class ExecutionTargetResolutionTest(unittest.TestCase):
         )
 
         with patch.object(worker, "resolve_execution_target", return_value=target) as resolve_target:
-            resolved = worker.resolve_task_run_text_target(task_run, "codex")
+            resolved = worker.resolve_task_run_text_target(task_run)
 
         self.assertEqual("antigravity", resolved.executor_id)
         resolve_target.assert_called_once_with("CLI", "antigravity", "TEXT_GENERATION")
