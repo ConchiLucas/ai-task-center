@@ -2,6 +2,7 @@ package com.aitaskcenter.controller;
 
 import com.aitaskcenter.dto.ApiResponse;
 import com.aitaskcenter.dto.GenerateTaskRunBatchRequest;
+import com.aitaskcenter.dto.SelectExecutionTargetRequest;
 import com.aitaskcenter.dto.TaskOnboardingReportRequest;
 import com.aitaskcenter.dto.TaskOnboardingResponse;
 import com.aitaskcenter.service.onboarding.TaskOnboardingService;
@@ -24,6 +25,12 @@ public class TaskOnboardingController {
     @GetMapping
     public ApiResponse<TaskOnboardingResponse> get(@PathVariable Long id) {
         return ApiResponse.ok(service.get(id));
+    }
+
+    @PostMapping("/execution-target")
+    public ApiResponse<TaskOnboardingResponse> selectExecutionTarget(
+            @PathVariable Long id, @RequestBody SelectExecutionTargetRequest request) {
+        return ApiResponse.ok(service.selectExecutionTarget(id, request));
     }
 
     @PostMapping("/report")

@@ -12,6 +12,7 @@ import com.aitaskcenter.repository.TaskResultRepository;
 import com.aitaskcenter.repository.TaskRunRepository;
 import com.aitaskcenter.repository.TaskRunResultRepository;
 import com.aitaskcenter.service.TaskConfigService;
+import com.aitaskcenter.service.AiConfigService;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.util.List;
 import java.util.Optional;
@@ -42,7 +43,7 @@ class TaskOnboardingServiceTest {
 
         TaskOnboardingService service = new TaskOnboardingService(
                 taskRepository, resultRepository, runRepository, linkRepository,
-                taskConfigService, promptBuilder, objectMapper);
+                taskConfigService, promptBuilder, objectMapper, mock(AiConfigService.class));
         TaskOnboardingReportRequest request = new TaskOnboardingReportRequest();
         request.setStage("result");
         request.setStatus("CODE_READY");

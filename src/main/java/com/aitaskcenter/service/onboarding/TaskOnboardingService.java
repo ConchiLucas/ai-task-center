@@ -1,6 +1,8 @@
 package com.aitaskcenter.service.onboarding;
 
 import com.aitaskcenter.dto.GenerateTaskRunBatchRequest;
+import com.aitaskcenter.dto.ExecutionTargetItem;
+import com.aitaskcenter.dto.SelectExecutionTargetRequest;
 import com.aitaskcenter.dto.TaskOnboardingNodeResponse;
 import com.aitaskcenter.dto.TaskOnboardingReportRequest;
 import com.aitaskcenter.dto.TaskOnboardingResponse;
@@ -17,6 +19,7 @@ import com.aitaskcenter.repository.TaskResultRepository;
 import com.aitaskcenter.repository.TaskRunRepository;
 import com.aitaskcenter.repository.TaskRunResultRepository;
 import com.aitaskcenter.service.TaskConfigService;
+import com.aitaskcenter.service.AiConfigService;
 import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import java.time.OffsetDateTime;
@@ -48,6 +51,7 @@ public class TaskOnboardingService {
     private final TaskConfigService taskConfigService;
     private final TaskOnboardingPromptBuilder promptBuilder;
     private final ObjectMapper objectMapper;
+    private final AiConfigService aiConfigService;
 
     public TaskOnboardingService(
             TaskConfigRepository taskConfigRepository,
@@ -56,7 +60,8 @@ public class TaskOnboardingService {
             TaskRunResultRepository taskRunResultRepository,
             TaskConfigService taskConfigService,
             TaskOnboardingPromptBuilder promptBuilder,
-            ObjectMapper objectMapper) {
+            ObjectMapper objectMapper,
+            AiConfigService aiConfigService) {
         this.taskConfigRepository = taskConfigRepository;
         this.taskResultRepository = taskResultRepository;
         this.taskRunRepository = taskRunRepository;
@@ -64,6 +69,34 @@ public class TaskOnboardingService {
         this.taskConfigService = taskConfigService;
         this.promptBuilder = promptBuilder;
         this.objectMapper = objectMapper;
+        this.aiConfigService = aiConfigService;
+    }
+
+    @Transactional
+    public TaskOnboardingResponse selectExecutionTarget(
+            Long taskConfigId, SelectExecutionTargetRequest request) {
+        TaskConfig task = loadForUpdate(taskConfigId);
+        ExecutionTargetItem selected = requireEnabledTarget(request);
+        Map<String, Object> context = context(task);
+        boolean sameTarget = selected.type().equals(task.getExecutorType())
+                && selected.id().equals(task.getExecutorId());
+        if (sameTarget && step(task) == OnboardingStep.RESULT_CODE) {
+            ensureCodeToken(task, context);
+            saveContext(task, context);
+            return assemble(task, context);
+        }
+
+        task.setExecutorType(selected.type());
+        task.setExecutorId(selected.id());
+        task.setHandlerKey(null);
+        task.setCliId(null);
+        task.setOnboardingCliId(null);
+        task.setOnboardingStep(OnboardingStep.RESULT_CODE.name());
+        task.setOnboardingStatus("ACTIVE");
+        context.clear();
+        context.put("resultCodeToken", UUID.randomUUID().toString());
+        saveContext(task, context);
+        return assemble(task, context);
     }
 
     @Transactional
@@ -275,6 +308,21 @@ public class TaskOnboardingService {
         if (key != null && !StringUtils.hasText(text(context.get(key)))) {
             context.put(key, UUID.randomUUID().toString());
         }
+    }
+
+    private ExecutionTargetItem requireEnabledTarget(SelectExecutionTargetRequest request) {
+        if (request == null
+                || !StringUtils.hasText(request.executorType())
+                || !StringUtils.hasText(request.executorId())) {
+            throw new IllegalArgumentException("请选择模型调用通道");
+        }
+        String type = request.executorType().trim();
+        String id = request.executorId().trim();
+        return aiConfigService.getExecutionTargets().stream()
+                .filter(ExecutionTargetItem::enabled)
+                .filter(target -> type.equals(target.type()) && id.equals(target.id()))
+                .findFirst()
+                .orElseThrow(() -> new IllegalArgumentException("模型调用通道不存在或未启用"));
     }
 
     private void requireStageAndToken(TaskOnboardingReportRequest request, String stage, String expectedToken) {
