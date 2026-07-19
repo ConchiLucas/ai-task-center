@@ -2,7 +2,7 @@ import importlib.util
 import json
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 
 MODULE_PATH = Path(__file__).resolve().parents[1] / "app" / "main.py"
@@ -10,6 +10,14 @@ SPEC = importlib.util.spec_from_file_location("ai_task_center_worker_handler_rou
 worker = importlib.util.module_from_spec(SPEC)
 assert SPEC and SPEC.loader
 SPEC.loader.exec_module(worker)
+
+
+STORAGE_TARGET = {
+    "storageConfigId": 7,
+    "providerType": "MINIO",
+    "bucket": "ai-file-navigation",
+    "objectPrefix": "word_clean_tts",
+}
 
 
 def run_snapshot(handler_key="", executor_type="", executor_id="", payload_task_type=None):
@@ -23,6 +31,7 @@ def run_snapshot(handler_key="", executor_type="", executor_id="", payload_task_
         handler_key=handler_key,
         executor_type=executor_type,
         executor_id=executor_id,
+        task_config_id=1,
     )
 
 
@@ -40,6 +49,7 @@ def result_snapshot():
                 "taskType": worker.RESULT_MODE_TTS,
                 "bestSentenceId": 101,
                 "wordCleanId": 7,
+                "storageTarget": STORAGE_TARGET,
                 "source": {"sourceSentenceId": 501, "sentence": "Example."},
                 "ttsInput": {"text": "Example.", "fileName": "best-101.wav"},
                 "writeBack": {"table": worker.WORD_CLEAN_BEST_SENTENCE_TABLE},
@@ -66,12 +76,53 @@ class HandlerRoutingTest(unittest.TestCase):
             executor_id="custom-mimo",
             payload_task_type=worker.RESULT_MODE_TTS_BATCH,
         )
-        tts_result = {
-            "fileName": "best-101.wav",
-            "downloadUrl": "http://127.0.0.1:19186/api/tts/files/best-101.wav",
-        }
+        task_run.ai_prompt_json = json.dumps({
+            "taskType": worker.RESULT_MODE_TTS_BATCH,
+            "batch": {"taskConfigId": 1, "storageTarget": STORAGE_TARGET},
+            "items": [{
+                "itemKey": "item_A",
+                "bestSentenceId": 101,
+                "wordCleanId": 7,
+                "storageTarget": STORAGE_TARGET,
+            }],
+        })
+        generated = worker.GeneratedTtsAudio(
+            "custom-mimo",
+            "mimo-v2.5-tts",
+            "Chloe",
+            "wav",
+            "best-101.wav",
+            b"RIFF\x10\x00\x00\x00WAVEfmt ",
+        )
+        stored = worker.StoredObject(
+            "ai-file-navigation",
+            "word_clean_tts/best-101.wav",
+            "/ai-file-navigation/word_clean_tts/best-101.wav",
+            20,
+            "abc",
+            "abc",
+            False,
+        )
+        storage_config = worker.ObjectStorageConfig(
+            7,
+            "local",
+            "MINIO",
+            "127.0.0.1:19100",
+            "access",
+            "secret",
+            False,
+            "ai-file-navigation",
+            "word_clean_tts",
+            True,
+            True,
+        )
 
-        with patch.object(worker, "generate_mimo_tts", return_value=tts_result) as generate_tts:
+        with (
+            patch.object(worker, "generate_mimo_tts_audio", return_value=generated) as generate_tts,
+            patch.object(worker, "load_object_storage_config_snapshot", return_value=storage_config),
+            patch.object(worker, "build_minio_client", return_value=MagicMock()),
+            patch.object(worker, "store_verified_wav", return_value=stored),
+        ):
             row, _ = worker.process_tts_batch_item(
                 task_result,
                 task_run,
