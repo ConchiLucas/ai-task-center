@@ -37,6 +37,33 @@ export interface ConnectionConfig {
   UpdatedAt?: string;
 }
 
+export interface ObjectStorageConfig {
+  id: number;
+  configName: string;
+  providerType: 'MINIO';
+  endpoint: string;
+  accessKey: string;
+  useSsl: boolean;
+  bucketName: string;
+  basePath: string;
+  enabled: boolean;
+  isDefault: boolean;
+  secretConfigured: boolean;
+}
+
+export interface ObjectStorageConfigPayload {
+  configName: string;
+  providerType: 'MINIO';
+  endpoint: string;
+  accessKey: string;
+  secretKey: string;
+  useSsl: boolean;
+  bucketName: string;
+  basePath: string;
+  enabled: boolean;
+  isDefault: boolean;
+}
+
 export interface AIProviderConfigItem {
   id: string;
   label: string;
@@ -367,6 +394,30 @@ export async function testConnectionPayload(data: Partial<ConnectionConfig>) {
 export async function listConnectionTables(id: number) {
   const res = await request.get<ApiResponse<string[]>>('/connection/listTables', { params: { ID: id } });
   return res.data.data || [];
+}
+
+export async function getObjectStorageConfigs() {
+  const res = await request.get<ApiResponse<ObjectStorageConfig[]>>('/object-storage-config');
+  return res.data.data || [];
+}
+
+export async function createObjectStorageConfig(data: ObjectStorageConfigPayload) {
+  const res = await request.post<ApiResponse<ObjectStorageConfig>>('/object-storage-config', data);
+  return res.data.data;
+}
+
+export async function updateObjectStorageConfig(id: number, data: ObjectStorageConfigPayload) {
+  const res = await request.put<ApiResponse<ObjectStorageConfig>>(`/object-storage-config/${id}`, data);
+  return res.data.data;
+}
+
+export async function setDefaultObjectStorageConfig(id: number) {
+  const res = await request.put<ApiResponse<ObjectStorageConfig>>(`/object-storage-config/${id}/default`);
+  return res.data.data;
+}
+
+export async function deleteObjectStorageConfig(id: number) {
+  await request.delete<ApiResponse<void>>(`/object-storage-config/${id}`);
 }
 
 // 函数：getAIConfig

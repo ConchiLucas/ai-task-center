@@ -47,6 +47,7 @@ import {
   HandlerKey,
   LocalCliConfig,
   LocalCliConfigItem,
+  ObjectStorageConfig,
   ProjectConfig,
   TaskConfig,
   TaskExecutionLog,
@@ -61,10 +62,12 @@ import {
   batchDeleteTaskRuns,
   cancelTaskRun,
   createConnection,
+  createObjectStorageConfig,
   createProject,
   createTaskRun,
   createTaskConfig,
   deleteConnection,
+  deleteObjectStorageConfig,
   deleteProject,
   deleteTaskConfig,
   deleteTaskResult,
@@ -73,6 +76,7 @@ import {
   getConnections,
   getExecutionTargets,
   getLocalCliConfig,
+  getObjectStorageConfigs,
   getProjects,
   getTaskResult,
   getTaskResults,
@@ -84,18 +88,21 @@ import {
   saveAIActiveProvider,
   saveAIConfig,
   saveLocalCliConfig,
+  setDefaultObjectStorageConfig,
   startTaskRuns,
   testConnectionPayload,
   updateConnection,
+  updateObjectStorageConfig,
   updateProject,
   updateTaskConfig,
 } from './api';
 import TaskOnboardingDrawer from './TaskOnboardingDrawer';
+import { normalizeObjectStorageForm, ObjectStorageFormValues } from './objectStorageForm';
 
 const { Header, Sider, Content } = Layout;
 const { Title, Text, Paragraph } = Typography;
 
-type ActiveTab = 'project' | 'database' | 'ai' | 'cli';
+type ActiveTab = 'project' | 'database' | 'storage' | 'ai' | 'cli';
 type PrimaryModule = 'config' | 'task' | 'taskRun' | 'taskResult';
 
 interface ExecutionTaskDetail {
@@ -204,6 +211,13 @@ export default function App() {
   const [connectionForm] = Form.useForm();
   const [testingConnection, setTestingConnection] = useState(false);
   const [showDbPassword, setShowDbPassword] = useState(false);
+
+  const [objectStorageConfigs, setObjectStorageConfigs] = useState<ObjectStorageConfig[]>([]);
+  const [objectStorageLoading, setObjectStorageLoading] = useState(false);
+  const [objectStorageModalOpen, setObjectStorageModalOpen] = useState(false);
+  const [editingObjectStorage, setEditingObjectStorage] = useState<ObjectStorageConfig | null>(null);
+  const [savingObjectStorage, setSavingObjectStorage] = useState(false);
+  const [objectStorageForm] = Form.useForm<ObjectStorageFormValues>();
 
   const [aiLoading, setAiLoading] = useState(false);
   const [savingAI, setSavingAI] = useState(false);
@@ -386,6 +400,9 @@ export default function App() {
     }
     if (activeTab === 'ai') {
       void loadAI();
+    }
+    if (activeTab === 'storage') {
+      void loadObjectStorageConfigs();
     }
     if (activeTab === 'cli') {
       void loadCliConfig();
@@ -586,6 +603,84 @@ export default function App() {
         await deleteConnection(connection.ID!);
         message.success('删除成功');
         await loadConnections();
+      },
+    });
+  };
+
+  const loadObjectStorageConfigs = async () => {
+    setObjectStorageLoading(true);
+    try {
+      setObjectStorageConfigs(await getObjectStorageConfigs());
+    } catch (error) {
+      message.error(errorMessage(error, '对象存储配置加载失败'));
+    } finally {
+      setObjectStorageLoading(false);
+    }
+  };
+
+  const openObjectStorageModal = (config?: ObjectStorageConfig) => {
+    setEditingObjectStorage(config || null);
+    objectStorageForm.setFieldsValue({
+      configName: config?.configName || '',
+      providerType: 'MINIO',
+      endpoint: config?.endpoint || '127.0.0.1:19100',
+      accessKey: config?.accessKey || '',
+      secretKey: '',
+      useSsl: config?.useSsl || false,
+      bucketName: config?.bucketName || 'ai-file-navigation',
+      basePath: config?.basePath || 'word_clean_tts',
+      enabled: config?.enabled ?? true,
+      isDefault: config?.isDefault ?? objectStorageConfigs.length === 0,
+    });
+    setObjectStorageModalOpen(true);
+  };
+
+  const saveObjectStorage = async () => {
+    const values = await objectStorageForm.validateFields();
+    setSavingObjectStorage(true);
+    try {
+      const payload = normalizeObjectStorageForm(values, Boolean(editingObjectStorage));
+      if (editingObjectStorage) {
+        await updateObjectStorageConfig(editingObjectStorage.id, payload);
+        message.success('对象存储配置修改成功');
+      } else {
+        await createObjectStorageConfig(payload);
+        message.success('对象存储配置添加成功');
+      }
+      setObjectStorageModalOpen(false);
+      await loadObjectStorageConfigs();
+    } catch (error) {
+      message.error(errorMessage(error, '对象存储配置保存失败'));
+    } finally {
+      setSavingObjectStorage(false);
+    }
+  };
+
+  const makeDefaultObjectStorage = async (config: ObjectStorageConfig) => {
+    if (!config.enabled) {
+      message.warning('请先启用该对象存储配置');
+      return;
+    }
+    try {
+      await setDefaultObjectStorageConfig(config.id);
+      message.success('默认对象存储配置已更新');
+      await loadObjectStorageConfigs();
+    } catch (error) {
+      message.error(errorMessage(error, '设置默认对象存储失败'));
+    }
+  };
+
+  const removeObjectStorage = (config: ObjectStorageConfig) => {
+    modal.confirm({
+      title: '删除对象存储配置',
+      content: `确定删除「${config.configName}」吗？`,
+      okText: '删除',
+      okButtonProps: { danger: true },
+      cancelText: '取消',
+      async onOk() {
+        await deleteObjectStorageConfig(config.id);
+        message.success('对象存储配置已删除');
+        await loadObjectStorageConfigs();
       },
     });
   };
@@ -1415,6 +1510,85 @@ export default function App() {
           )}
         </Spin>
       )}
+    </section>
+  );
+
+  const renderObjectStorageView = () => (
+    <section className="panel-page">
+      <div className="page-head">
+        <div>
+          <Title level={3}>对象存储配置</Title>
+          <Text type="secondary">
+            为任务处理器配置文件存储依赖。对象存储不属于 CLI 或 AI 模型调用通道。
+          </Text>
+        </div>
+        <Button type="primary" icon={<PlusOutlined />} onClick={() => openObjectStorageModal()}>
+          新增对象存储
+        </Button>
+      </div>
+      <Spin spinning={objectStorageLoading}>
+        <Table<ObjectStorageConfig>
+          rowKey="id"
+          dataSource={objectStorageConfigs}
+          pagination={false}
+          locale={{ emptyText: <Empty description="暂无对象存储配置" /> }}
+          columns={[
+            {
+              title: '配置名称',
+              dataIndex: 'configName',
+              render: (value: string, config) => (
+                <Space>
+                  <Text strong>{value}</Text>
+                  {config.isDefault && <Tag color="green">默认</Tag>}
+                  <Tag color={config.enabled ? 'blue' : 'default'}>{config.enabled ? '启用' : '停用'}</Tag>
+                </Space>
+              ),
+            },
+            { title: '类型', dataIndex: 'providerType', width: 110, render: (value: string) => <Tag color="purple">{value}</Tag> },
+            { title: 'Endpoint', dataIndex: 'endpoint', ellipsis: true },
+            { title: 'Bucket', dataIndex: 'bucketName', ellipsis: true },
+            { title: '基础路径', dataIndex: 'basePath', ellipsis: true },
+            {
+              title: '凭据',
+              dataIndex: 'secretConfigured',
+              width: 100,
+              render: (configured: boolean) => (
+                <Tag color={configured ? 'green' : 'red'}>{configured ? '已配置' : '未配置'}</Tag>
+              ),
+            },
+            {
+              title: '操作',
+              key: 'action',
+              width: 250,
+              render: (_, config) => (
+                <Space split={<span className="table-action-split" />}>
+                  <Button type="link" size="small" onClick={() => openObjectStorageModal(config)}>编辑</Button>
+                  {!config.isDefault && (
+                    <Button
+                      type="link"
+                      size="small"
+                      disabled={!config.enabled}
+                      onClick={() => void makeDefaultObjectStorage(config)}
+                    >
+                      设为默认
+                    </Button>
+                  )}
+                  <Button
+                    type="link"
+                    size="small"
+                    danger
+                    disabled={config.isDefault}
+                    onClick={() => removeObjectStorage(config)}
+                  >
+                    删除
+                  </Button>
+                </Space>
+              ),
+            },
+          ]}
+          scroll={{ x: 1050 }}
+        />
+      </Spin>
     </section>
   );
 
@@ -2627,6 +2801,7 @@ export default function App() {
               items={[
                 { key: 'project', icon: <CloudServerOutlined />, label: '项目配置' },
                 { key: 'database', icon: <DatabaseOutlined />, label: '数据库配置' },
+                { key: 'storage', icon: <CloudServerOutlined />, label: '对象存储配置' },
                 { key: 'ai', icon: <RobotOutlined />, label: 'AI 配置' },
                 { key: 'cli', icon: <CodeOutlined />, label: '本地 CLI 配置' },
               ]}
@@ -2637,6 +2812,7 @@ export default function App() {
         <Content className="app-content">
           {activeModule === 'config' && activeTab === 'project' && renderProjectView()}
           {activeModule === 'config' && activeTab === 'database' && renderDatabaseView()}
+          {activeModule === 'config' && activeTab === 'storage' && renderObjectStorageView()}
           {activeModule === 'config' && activeTab === 'ai' && renderAIView()}
           {activeModule === 'config' && activeTab === 'cli' && renderCliView()}
           {activeModule === 'task' && renderTaskView()}
@@ -2767,6 +2943,89 @@ export default function App() {
                     />
                   }
                 />
+              </Form.Item>
+            </Col>
+          </Row>
+        </Form>
+      </Modal>
+
+      <Modal
+        title={editingObjectStorage ? '编辑对象存储配置' : '新增对象存储配置'}
+        open={objectStorageModalOpen}
+        onCancel={() => setObjectStorageModalOpen(false)}
+        onOk={() => void saveObjectStorage()}
+        okText="保存"
+        cancelText="取消"
+        width={780}
+        confirmLoading={savingObjectStorage}
+      >
+        <Form layout="vertical" form={objectStorageForm}>
+          <Text type="secondary">
+            当前仅支持 MinIO。Secret Key 不会从后端返回；编辑时留空表示保留数据库中的现有值。
+          </Text>
+          <Row gutter={16} style={{ marginTop: 18 }}>
+            <Col xs={24} md={12}>
+              <Form.Item label="配置名称" name="configName" rules={[{ required: true, whitespace: true, message: '请填写配置名称' }]}>
+                <Input placeholder="本地 Docker MinIO" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="存储类型" name="providerType" rules={[{ required: true }]}>
+                <Select options={[{ value: 'MINIO', label: 'MinIO' }]} />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={16}>
+              <Form.Item label="Endpoint" name="endpoint" rules={[{ required: true, whitespace: true, message: '请填写 Endpoint' }]}>
+                <Input className="mono" placeholder="127.0.0.1:19100" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={8}>
+              <Form.Item label="HTTPS" name="useSsl" valuePropName="checked">
+                <Switch checkedChildren="启用" unCheckedChildren="关闭" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="Access Key" name="accessKey" rules={[{ required: true, whitespace: true, message: '请填写 Access Key' }]}>
+                <Input className="mono" autoComplete="off" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item
+                label={editingObjectStorage?.secretConfigured ? 'Secret Key（已配置）' : 'Secret Key'}
+                name="secretKey"
+                rules={editingObjectStorage ? [] : [{ required: true, whitespace: true, message: '请填写 Secret Key' }]}
+              >
+                <Input.Password
+                  className="mono"
+                  autoComplete="new-password"
+                  placeholder={editingObjectStorage ? '留空表示保留现有 Secret Key' : '请输入 Secret Key'}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="Bucket" name="bucketName" rules={[{ required: true, whitespace: true, message: '请填写 Bucket' }]}>
+                <Input className="mono" placeholder="ai-file-navigation" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="基础路径" name="basePath" rules={[{ required: true, whitespace: true, message: '请填写基础路径' }]}>
+                <Input className="mono" placeholder="word_clean_tts" />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="启用" name="enabled" valuePropName="checked">
+                <Switch
+                  checkedChildren="启用"
+                  unCheckedChildren="停用"
+                  onChange={(enabled) => {
+                    if (!enabled) objectStorageForm.setFieldValue('isDefault', false);
+                  }}
+                />
+              </Form.Item>
+            </Col>
+            <Col xs={24} md={12}>
+              <Form.Item label="默认配置" name="isDefault" valuePropName="checked">
+                <Switch checkedChildren="默认" unCheckedChildren="普通" />
               </Form.Item>
             </Col>
           </Row>
