@@ -10,13 +10,14 @@ assert SPEC.loader is not None
 SPEC.loader.exec_module(worker)
 
 
-def test_catalog_exposes_safe_builtin_descriptors_only():
+def test_catalog_exposes_safe_registered_descriptors_only():
     payload = worker.list_task_handlers()
 
-    assert payload["count"] == 2
+    assert payload["count"] == 3
     assert {item["handlerKey"] for item in payload["handlers"]} == {
         worker.HANDLER_SCORE,
         worker.HANDLER_TTS,
+        worker.TASK_CONFIG_4_HANDLER,
     }
     serialized = json.dumps(payload).lower()
     assert "api_key" not in serialized

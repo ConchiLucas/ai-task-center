@@ -26,20 +26,34 @@ from fastapi.responses import FileResponse
 from pydantic import BaseModel, Field
 
 from app.handler_registry import TaskHandlerDefinition, TaskHandlerRegistry
+from app.object_storage import (
+    ObjectStorageConfig,
+    StorageTarget,
+    object_storage_config_from_row,
+    parse_storage_target,
+    validate_storage_target,
+)
 
 
 app = FastAPI(title="AI Task Center Python Worker")
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SCORE_SOURCE_DESCRIPTION = "word_clean_sentence_score_generation"
 TTS_SOURCE_DESCRIPTION = "word_clean_best_sentence_tts_generation"
+TASK_CONFIG_4_SOURCE_DESCRIPTION = "task_config_4_word_clean_tts_generation"
 WORD_CLEAN_SENTENCE_TABLE = "public.word_clean_sentence"
 WORD_CLEAN_BEST_SENTENCE_TABLE = "public.word_clean_best_sentence"
+TASK_CONFIG_4_SOURCE_TABLE = "public.word_clean_tts"
 RESULT_MODE_SCORE = "word_clean_sentence_score"
 RESULT_MODE_TTS = "word_clean_best_sentence_tts"
+TASK_CONFIG_4_RESULT_MODE = "word_clean_tts"
+TASK_CONFIG_4_BATCH_MODE = f"{TASK_CONFIG_4_RESULT_MODE}_batch"
 RESULT_MODE_SCORE_BATCH = f"{RESULT_MODE_SCORE}_batch"
 RESULT_MODE_TTS_BATCH = f"{RESULT_MODE_TTS}_batch"
 HANDLER_SCORE = RESULT_MODE_SCORE
 HANDLER_TTS = RESULT_MODE_TTS
+TASK_CONFIG_4_HANDLER = "task_config_4"
+TASK_CONFIG_4_EXECUTOR_TYPE = "AI_PROVIDER"
+TASK_CONFIG_4_EXECUTOR_ID = "xiaomi-mimo-tts"
 TASK_HANDLER_REGISTRY = TaskHandlerRegistry()
 PYTHON_WORKER_PUBLIC_BASE_URL = os.getenv(
     "PYTHON_WORKER_PUBLIC_BASE_URL",
@@ -165,6 +179,7 @@ class TaskRunSnapshot:
     handler_key: str = ""
     executor_type: str = ""
     executor_id: str = ""
+    task_config_id: int | None = None
 
 
 @dataclass(frozen=True)
@@ -249,6 +264,68 @@ def connect_database(settings: DatabaseSettings):
         user=settings.user,
         password=settings.password,
         connect_timeout=5,
+    )
+
+
+def load_object_storage_config_snapshot(storage_config_id: int) -> ObjectStorageConfig:
+    if storage_config_id <= 0:
+        raise HTTPException(status_code=400, detail="对象存储配置 ID 无效")
+    settings = load_database_settings()
+    try:
+        with connect_database(settings) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    select id, config_name, provider_type, endpoint, access_key, secret_key,
+                           use_ssl, bucket_name, base_path, enabled, is_default
+                    from tb_object_storage_config
+                    where id = %s
+                    """,
+                    (storage_config_id,),
+                )
+                row = cursor.fetchone()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取对象存储配置失败: {exc}") from exc
+    if not row:
+        raise HTTPException(status_code=400, detail=f"对象存储配置不存在: {storage_config_id}")
+    return object_storage_config_from_row(row)
+
+
+def load_default_object_storage_config_snapshot() -> ObjectStorageConfig:
+    settings = load_database_settings()
+    try:
+        with connect_database(settings) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    select id, config_name, provider_type, endpoint, access_key, secret_key,
+                           use_ssl, bucket_name, base_path, enabled, is_default
+                    from tb_object_storage_config
+                    where enabled = true
+                      and is_default = true
+                    order by id
+                    limit 2
+                    """
+                )
+                rows = cursor.fetchall()
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取默认对象存储配置失败: {exc}") from exc
+    if len(rows) != 1:
+        raise HTTPException(status_code=400, detail="系统必须配置且只能配置一个启用的默认对象存储")
+    config = object_storage_config_from_row(rows[0])
+    try:
+        validate_storage_target(storage_target_from_config(config), config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return config
+
+
+def storage_target_from_config(config: ObjectStorageConfig) -> StorageTarget:
+    return StorageTarget(
+        storage_config_id=config.id,
+        provider_type=config.provider_type,
+        bucket=config.bucket_name,
+        object_prefix=config.base_path,
     )
 
 
@@ -1055,7 +1132,8 @@ def load_task_run_snapshot(task_run_id: int) -> TaskRunSnapshot:
                     select run.id, run.task_name,
                            run.ai_prompt_json, run.ai_response_json, run.record_type,
                            greatest(1, least(32, coalesce(run.requested_worker_count, 1))),
-                           run.handler_key, run.executor_type, run.executor_id
+                           run.handler_key, run.executor_type, run.executor_id,
+                           run.task_config_id
                     from tb_task_run run
                     where run.id = %s
                     """,
@@ -1077,6 +1155,7 @@ def load_task_run_snapshot(task_run_id: int) -> TaskRunSnapshot:
         handler_key=str(row[6] or ""),
         executor_type=str(row[7] or ""),
         executor_id=str(row[8] or ""),
+        task_config_id=int(row[9]) if row[9] is not None else None,
     )
 
 
@@ -1646,6 +1725,39 @@ def fetch_word_clean_best_sentences(connection_config: ConnectionConfigSnapshot)
     ]
 
 
+# 函数：fetch_task_config_4_word_tts_sources
+def fetch_task_config_4_word_tts_sources(
+    connection_config: ConnectionConfigSnapshot,
+) -> list[dict[str, Any]]:
+    try:
+        with connect_source_database(connection_config) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(
+                    """
+                    select id, word_clean_id, word, status
+                    from public.word_clean_tts
+                    where status = 'pending'
+                      and btrim(word) <> ''
+                    order by id
+                    """
+                )
+                rows = cursor.fetchall()
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"读取 word_clean_tts 失败: {exc}") from exc
+
+    return [
+        {
+            "wordCleanTtsId": int(row[0]),
+            "wordCleanId": int(row[1]),
+            "word": str(row[2] or "").strip(),
+            "status": str(row[3] or ""),
+        }
+        for row in rows
+    ]
+
+
 # 函数：candidate_label
 def candidate_label(index: int) -> str:
     label = ""
@@ -1941,6 +2053,133 @@ def build_tts_result_rows(
     return rows
 
 
+def validate_task_config_4_result_snapshot(task_config: TaskConfigSnapshot) -> None:
+    if task_config.id != 4:
+        raise HTTPException(status_code=400, detail="task_config_4 只允许任务配置 ID 4")
+    tables = {normalize_table_name(table) for table in parse_selected_tables(task_config.selected_tables)}
+    if tables != {TASK_CONFIG_4_SOURCE_TABLE}:
+        raise HTTPException(
+            status_code=400,
+            detail=f"{TASK_CONFIG_4_HANDLER} 只允许来源表 {TASK_CONFIG_4_SOURCE_TABLE}",
+        )
+    if str(task_config.handler_key or "").strip() != TASK_CONFIG_4_HANDLER:
+        raise HTTPException(
+            status_code=400,
+            detail=f"任务处理器快照必须为 {TASK_CONFIG_4_HANDLER}",
+        )
+    executor_type = str(task_config.executor_type or "").strip().upper()
+    executor_id = str(task_config.executor_id or "").strip()
+    if executor_type != TASK_CONFIG_4_EXECUTOR_TYPE or executor_id != TASK_CONFIG_4_EXECUTOR_ID:
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"{TASK_CONFIG_4_HANDLER} 模型目标快照必须为 "
+                f"{TASK_CONFIG_4_EXECUTOR_TYPE}/{TASK_CONFIG_4_EXECUTOR_ID}"
+            ),
+        )
+
+
+def build_task_config_4_result_payload(
+    source: dict[str, Any],
+    storage_target: dict[str, Any] | StorageTarget,
+) -> dict[str, Any]:
+    source_id = int(source["wordCleanTtsId"])
+    word_clean_id = int(source["wordCleanId"])
+    word = str(source.get("word") or "").strip()
+    normalized_storage_target = (
+        storage_target if isinstance(storage_target, StorageTarget) else parse_storage_target(storage_target)
+    )
+    return {
+        "taskType": TASK_CONFIG_4_RESULT_MODE,
+        "wordCleanTtsId": source_id,
+        "wordCleanId": word_clean_id,
+        "word": word,
+        "sourceTable": TASK_CONFIG_4_SOURCE_TABLE,
+        "storageTarget": normalized_storage_target.as_payload(),
+        "source": {
+            "id": source_id,
+            "wordCleanId": word_clean_id,
+            "word": word,
+            "status": "pending",
+        },
+        "ttsInput": {
+            "text": word,
+            "fileName": f"word_clean_{word_clean_id}_tts_{source_id}.wav",
+            "defaultAudioFormat": "wav",
+        },
+        "writeBack": {
+            "table": TASK_CONFIG_4_SOURCE_TABLE,
+            "match": {
+                "id": source_id,
+                "word_clean_id": word_clean_id,
+                "word": word,
+                "status": "pending",
+            },
+            "ttsResultMapping": {
+                "status": "success",
+                "provider": "ttsResult.provider",
+                "model": "ttsResult.model",
+                "voice": "ttsResult.voice",
+                "audio_format": "ttsResult.audioFormat",
+                "tts_bucket": "ttsResult.bucket",
+                "tts_object_key": "ttsResult.objectKey",
+                "tts_object_url": "ttsResult.objectUrl",
+                "content_type": "ttsResult.contentType",
+                "file_size": "ttsResult.fileSize",
+                "duration_ms": "ttsResult.durationMs",
+                "generated_at": "now()",
+                "error_message": "",
+                "updated_at": "now()",
+            },
+        },
+    }
+
+
+def build_task_config_4_result_rows(
+    task_config: TaskConfigSnapshot,
+    tables: list[str],
+    sources: list[dict[str, Any]],
+    existing_source_ids: set[int],
+    record_type: str,
+    storage_target: dict[str, Any] | StorageTarget,
+) -> list[tuple[Any, ...]]:
+    validate_task_config_4_result_snapshot(task_config)
+    now = datetime.now(timezone.utc)
+    source_tables_json = json.dumps(tables, ensure_ascii=False)
+    rows: list[tuple[Any, ...]] = []
+    for source in sources:
+        source_id = int(source["wordCleanTtsId"])
+        if source_id in existing_source_ids:
+            continue
+        word_clean_id = int(source["wordCleanId"])
+        word = str(source.get("word") or "").strip()
+        payload = build_task_config_4_result_payload(source, storage_target)
+        rows.append(
+            (
+                f"{task_config.task_name} - {word[:80]} ({word_clean_id})",
+                None,
+                task_config.id,
+                task_config.project_id,
+                TASK_CONFIG_4_HANDLER,
+                TASK_CONFIG_4_EXECUTOR_TYPE,
+                TASK_CONFIG_4_EXECUTOR_ID,
+                task_config.database_config_id,
+                source_tables_json,
+                TASK_CONFIG_4_SOURCE_DESCRIPTION,
+                "PENDING",
+                f"单词 {word} 待生成 TTS",
+                json.dumps(payload, ensure_ascii=False),
+                "",
+                now,
+                None,
+                now,
+                now,
+                record_type,
+            )
+        )
+    return rows
+
+
 # 函数：insert_task_result_rows
 def replace_task_result_rows(
     task_config_id: int,
@@ -2025,6 +2264,8 @@ def generate_word_clean_sentence_results(
     tables = parse_selected_tables(task_config.selected_tables)
     ensure_word_clean_sentence_task(tables)
     connection_config = load_connection_config_snapshot(task_config.database_config_id)
+    object_storage_config = load_default_object_storage_config_snapshot()
+    storage_target = storage_target_from_config(object_storage_config)
     script_path = write_word_clean_sentence_score_script(task_config, connection_config)
     existing_ids = (
         set()
@@ -2097,6 +2338,63 @@ def generate_word_clean_best_sentence_tts_results(
         "totalBestSentences": len(best_sentences),
         "insertedCount": inserted_count,
         "skippedCount": len(best_sentences) - inserted_count,
+        "deletedCount": deleted_count,
+        "overwrite": overwrite,
+        "recordType": record_type,
+        "limit": limit,
+    }
+
+
+def generate_task_config_4_results(
+    task_config_id: int,
+    overwrite: bool,
+    record_type: str = RECORD_TYPE_FORMAL,
+    limit: int | None = None,
+) -> dict[str, Any]:
+    if record_type not in {RECORD_TYPE_VALIDATION_CURRENT, RECORD_TYPE_FORMAL}:
+        raise HTTPException(status_code=400, detail="任务结果记录类型无效")
+    if limit is not None and (limit < 1 or limit > 20):
+        raise HTTPException(status_code=400, detail="验证结果数量需在 1 到 20 之间")
+    task_config = load_task_config_snapshot(task_config_id)
+    validate_task_config_4_result_snapshot(task_config)
+    tables = parse_selected_tables(task_config.selected_tables)
+    connection_config = load_connection_config_snapshot(task_config.database_config_id)
+    existing_ids = (
+        set()
+        if overwrite or record_type == RECORD_TYPE_VALIDATION_CURRENT
+        else load_existing_result_source_ids(
+            task_config.id,
+            TASK_CONFIG_4_SOURCE_DESCRIPTION,
+            ("wordCleanTtsId",),
+            RECORD_TYPE_FORMAL,
+        )
+    )
+    sources = fetch_task_config_4_word_tts_sources(connection_config)
+    rows = build_task_config_4_result_rows(
+        task_config,
+        tables,
+        sources,
+        existing_ids,
+        record_type,
+        storage_target,
+    )
+    if limit is not None:
+        rows = rows[:limit]
+    inserted_count, deleted_count = replace_task_result_rows(
+        task_config.id,
+        TASK_CONFIG_4_SOURCE_DESCRIPTION,
+        record_type,
+        rows,
+        overwrite,
+    )
+    return {
+        "accepted": True,
+        "mode": TASK_CONFIG_4_RESULT_MODE,
+        "taskConfigId": task_config.id,
+        "sourceTable": TASK_CONFIG_4_SOURCE_TABLE,
+        "totalPendingWords": len(sources),
+        "insertedCount": inserted_count,
+        "skippedCount": len(sources) - inserted_count,
         "deletedCount": deleted_count,
         "overwrite": overwrite,
         "recordType": record_type,
@@ -2733,6 +3031,52 @@ def parse_tts_task_run_batch_prompt(task_run: TaskRunSnapshot) -> dict[str, Any]
     return prompt
 
 
+def parse_task_config_4_tts_batch_prompt(task_run: TaskRunSnapshot) -> dict[str, Any]:
+    try:
+        prompt = json.loads(task_run.ai_prompt_json or "{}")
+    except json.JSONDecodeError as exc:
+        raise HTTPException(status_code=400, detail=f"单词 TTS 批次载荷 JSON 解析失败: {exc}") from exc
+    if not isinstance(prompt, dict):
+        raise HTTPException(status_code=400, detail="单词 TTS 批次载荷必须是 JSON 对象")
+    if prompt.get("taskType") != TASK_CONFIG_4_BATCH_MODE:
+        raise HTTPException(status_code=400, detail="单词 TTS 批次载荷类型不支持")
+    batch = prompt.get("batch")
+    if not isinstance(batch, dict) or int(batch.get("taskConfigId") or 0) != 4:
+        raise HTTPException(status_code=400, detail="单词 TTS 批次任务配置快照必须为 4")
+    target = batch.get("executionTarget")
+    if not isinstance(target, dict) or target != {
+        "executorType": TASK_CONFIG_4_EXECUTOR_TYPE,
+        "executorId": TASK_CONFIG_4_EXECUTOR_ID,
+    }:
+        raise HTTPException(status_code=400, detail="单词 TTS 批次模型目标快照不匹配")
+    try:
+        batch_storage_target = parse_storage_target(batch.get("storageTarget"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"单词 TTS 批次对象存储快照无效: {exc}") from exc
+    items = prompt.get("items")
+    if not isinstance(items, list) or not items:
+        raise HTTPException(status_code=400, detail="单词 TTS 批次载荷缺少 items")
+    item_keys: set[str] = set()
+    for item in items:
+        if not isinstance(item, dict):
+            raise HTTPException(status_code=400, detail="单词 TTS 批次 items 每一项必须是对象")
+        item_key = str(item.get("itemKey") or "").strip()
+        if not item_key:
+            raise HTTPException(status_code=400, detail="单词 TTS 批次 item 缺少 itemKey")
+        if item_key in item_keys:
+            raise HTTPException(status_code=400, detail=f"单词 TTS 批次 itemKey 重复: {item_key}")
+        item_keys.add(item_key)
+        if int(item.get("wordCleanTtsId") or 0) <= 0 or int(item.get("wordCleanId") or 0) <= 0:
+            raise HTTPException(status_code=400, detail=f"单词 TTS 批次来源 ID 无效: {item_key}")
+        try:
+            item_storage_target = parse_storage_target(item.get("storageTarget"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"单词 TTS 批次 item 对象存储快照无效: {item_key}: {exc}") from exc
+        if item_storage_target != batch_storage_target:
+            raise HTTPException(status_code=400, detail=f"单词 TTS 批次 item 对象存储快照不一致: {item_key}")
+    return prompt
+
+
 # 函数：build_task_run_batch_item_contexts
 def build_task_run_batch_item_contexts(
     prompt: dict[str, Any],
@@ -3268,6 +3612,307 @@ def backfill_word_clean_best_sentence_tts(
     }
 
 
+def backfill_task_config_4_word_tts(
+    connection_config: ConnectionConfigSnapshot,
+    payload: dict[str, Any],
+    tts_result: dict[str, Any],
+) -> dict[str, Any]:
+    write_back = payload.get("writeBack")
+    if not isinstance(write_back, dict) or write_back.get("table") != TASK_CONFIG_4_SOURCE_TABLE:
+        raise ValueError("单词 TTS 任务缺少来源回填契约")
+    match = write_back.get("match")
+    if not isinstance(match, dict):
+        raise ValueError("单词 TTS 任务缺少来源匹配条件")
+    source_id = int(payload["wordCleanTtsId"])
+    word_clean_id = int(payload["wordCleanId"])
+    word = str(payload.get("word") or "").strip()
+    if (
+        int(match.get("id") or 0) != source_id
+        or int(match.get("word_clean_id") or 0) != word_clean_id
+        or str(match.get("word") or "").strip() != word
+        or str(match.get("status") or "pending").strip() != "pending"
+    ):
+        raise ValueError("单词 TTS 来源回填匹配条件与载荷不一致")
+    file_name = str(tts_result.get("fileName") or "")
+    normalized = {
+        "provider": str(tts_result.get("provider") or TASK_CONFIG_4_EXECUTOR_ID),
+        "model": str(tts_result.get("model") or ""),
+        "voice": str(tts_result.get("voice") or ""),
+        "audioFormat": str(tts_result.get("format") or payload["ttsInput"].get("defaultAudioFormat") or "wav"),
+        "bucket": str(tts_result.get("bucket") or ""),
+        "objectKey": str(tts_result.get("objectKey") or file_name),
+        "objectUrl": str(tts_result.get("objectUrl") or tts_result.get("downloadUrl") or ""),
+        "contentType": str(tts_result.get("contentType") or "audio/wav"),
+        "fileSize": int(tts_result.get("byteSize") or tts_result.get("fileSize") or 0),
+        "durationMs": int(tts_result["durationMs"]) if tts_result.get("durationMs") is not None else None,
+    }
+    with connect_source_database(connection_config) as connection:
+        with connection.cursor() as cursor:
+            cursor.execute(
+                """
+                update public.word_clean_tts
+                set status = 'success',
+                    provider = %s,
+                    model = %s,
+                    voice = %s,
+                    audio_format = %s,
+                    tts_bucket = %s,
+                    tts_object_key = %s,
+                    tts_object_url = %s,
+                    content_type = %s,
+                    file_size = %s,
+                    duration_ms = %s,
+                    generated_at = now(),
+                    error_message = '',
+                    updated_at = now()
+                where id = %s
+                  and word_clean_id = %s
+                  and word = %s
+                  and status = 'pending'
+                """,
+                (
+                    normalized["provider"],
+                    normalized["model"],
+                    normalized["voice"],
+                    normalized["audioFormat"],
+                    normalized["bucket"],
+                    normalized["objectKey"],
+                    normalized["objectUrl"],
+                    normalized["contentType"],
+                    normalized["fileSize"],
+                    normalized["durationMs"],
+                    source_id,
+                    word_clean_id,
+                    word,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ValueError(f"单词 TTS 来源已变化、已处理或不存在: {source_id}")
+        connection.commit()
+    return {
+        **normalized,
+        "wordCleanTtsId": source_id,
+        "wordCleanId": word_clean_id,
+        "sourceGuardMatched": True,
+    }
+
+
+def validate_task_config_4_result_execution_snapshot(task_result: TaskResultSnapshot) -> None:
+    if (
+        task_result.task_config_id != 4
+        or str(task_result.handler_key or "").strip() != TASK_CONFIG_4_HANDLER
+        or str(task_result.executor_type or "").strip().upper() != TASK_CONFIG_4_EXECUTOR_TYPE
+        or str(task_result.executor_id or "").strip() != TASK_CONFIG_4_EXECUTOR_ID
+    ):
+        raise HTTPException(status_code=400, detail="task_config_4 处理器或模型目标快照不匹配")
+
+
+def validate_task_config_4_run_execution_snapshot(task_run: TaskRunSnapshot) -> None:
+    if task_run.task_config_id != 4:
+        raise HTTPException(status_code=400, detail="task_config_4 批次任务配置快照必须为 4")
+    if (
+        str(task_run.handler_key or "").strip() != TASK_CONFIG_4_HANDLER
+        or str(task_run.executor_type or "").strip().upper() != TASK_CONFIG_4_EXECUTOR_TYPE
+        or str(task_run.executor_id or "").strip() != TASK_CONFIG_4_EXECUTOR_ID
+    ):
+        raise HTTPException(status_code=400, detail="task_config_4 批次处理器或模型目标快照不匹配")
+
+
+def resolve_task_config_4_storage_context(
+    task_result: TaskResultSnapshot,
+    task_run: TaskRunSnapshot | None = None,
+) -> tuple[StorageTarget, ObjectStorageConfig]:
+    payload = parse_task_config_4_tts_payload(task_result)
+    try:
+        result_target = parse_storage_target(payload.get("storageTarget"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"任务结果对象存储快照无效: {exc}") from exc
+    if task_run is not None:
+        prompt = parse_task_config_4_tts_batch_prompt(task_run)
+        try:
+            run_target = parse_storage_target(prompt["batch"].get("storageTarget"))
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"批次对象存储快照无效: {exc}") from exc
+        if run_target != result_target:
+            raise HTTPException(status_code=400, detail="任务结果与批次对象存储快照不一致")
+    config = load_object_storage_config_snapshot(result_target.storage_config_id)
+    try:
+        validate_storage_target(result_target, config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result_target, config
+
+
+def process_task_config_4_tts_batch_item(
+    task_result: TaskResultSnapshot,
+    task_run: TaskRunSnapshot,
+    item_key: str,
+    validation_execution: bool = False,
+) -> tuple[tuple[int, str, str, dict[str, Any] | None, str], dict[str, Any]]:
+    try:
+        validate_task_config_4_result_execution_snapshot(task_result)
+        validate_task_config_4_run_execution_snapshot(task_run)
+        resolve_task_config_4_storage_context(task_result, task_run)
+        payload = parse_task_config_4_tts_payload(task_result)
+        tts_result = generate_mimo_tts(
+            payload["ttsInput"],
+            TASK_CONFIG_4_EXECUTOR_ID,
+            strict_provider=True,
+        )
+        if validation_execution:
+            backfill_result = {
+                "skipped": True,
+                "reason": "当前验证批次不回写业务源表",
+            }
+        else:
+            connection_config = load_connection_config_snapshot(task_result.database_config_id)
+            backfill_result = backfill_task_config_4_word_tts(connection_config, payload, tts_result)
+        completed_payload = {
+            **payload,
+            "ttsResult": tts_result,
+            "execution": {
+                "mode": TASK_CONFIG_4_BATCH_MODE,
+                "taskRunId": task_run.id,
+                "itemKey": item_key,
+                "service": "python-worker-mimo-tts",
+                "processedAt": datetime.now(timezone.utc).isoformat(),
+                "validationExecution": validation_execution,
+                "sourceWriteBackSkipped": validation_execution,
+            },
+            "backfillResult": backfill_result,
+        }
+        file_name = str(tts_result.get("fileName") or payload["ttsInput"].get("fileName") or "音频")
+        summary = (
+            f"单词 TTS 验证生成成功（未回填）：{file_name}"
+            if validation_execution
+            else f"单词 TTS 生成并回填成功：{file_name}"
+        )
+        response_item = {
+            "itemKey": item_key,
+            "taskResultId": task_result.id,
+            "status": "SUCCESS",
+            "ttsResult": tts_result,
+            "backfillResult": backfill_result,
+            "validationExecution": validation_execution,
+        }
+        return (task_result.id, "SUCCESS", summary, completed_payload, ""), response_item
+    except Exception as exc:
+        try:
+            payload = parse_task_result_content(task_result)
+        except Exception:
+            payload = {"rawResultContent": task_result.result_content}
+        failed_payload = {
+            **payload,
+            "processorError": str(exc),
+            "processedAt": datetime.now(timezone.utc).isoformat(),
+            "mode": TASK_CONFIG_4_BATCH_MODE,
+            "taskRunId": task_run.id,
+            "itemKey": item_key,
+        }
+        response_item = {
+            "itemKey": item_key,
+            "taskResultId": task_result.id,
+            "status": "FAILED",
+            "errorMessage": str(exc),
+        }
+        return (task_result.id, "FAILED", "单词 TTS 批次执行失败", failed_payload, str(exc)), response_item
+
+
+def process_task_config_4_tts_task_run_batch(task_run_id: int) -> dict[str, Any]:
+    task_run = load_task_run_snapshot(task_run_id)
+    validate_task_config_4_run_execution_snapshot(task_run)
+    if task_run.record_type == RECORD_TYPE_VALIDATION_HISTORY:
+        raise HTTPException(status_code=400, detail="历史验证批次仅供查看，不能执行")
+    validation_execution = task_run.record_type == RECORD_TYPE_VALIDATION_CURRENT
+    prompt = parse_task_config_4_tts_batch_prompt(task_run)
+    task_result_ids = load_task_run_result_ids(task_run.id)
+    if not task_result_ids:
+        raise HTTPException(status_code=400, detail="单词 TTS 批次未关联任务结果")
+    task_results = load_task_result_snapshots(task_result_ids)
+    if any(item.record_type != RECORD_TYPE_FORMAL for item in task_results):
+        raise HTTPException(status_code=400, detail="单词 TTS 批次只能关联正式任务结果")
+    for item in task_results:
+        validate_task_config_4_result_execution_snapshot(item)
+    prompt_items = prompt["items"]
+    if len(prompt_items) != len(task_results):
+        raise HTTPException(status_code=400, detail="单词 TTS 批次 items 数量与关联任务结果数量不一致")
+    for index, task_result in enumerate(task_results):
+        payload = parse_task_config_4_tts_payload(task_result)
+        prompt_item = prompt_items[index]
+        if (
+            int(prompt_item.get("wordCleanTtsId") or 0) != int(payload["wordCleanTtsId"])
+            or int(prompt_item.get("wordCleanId") or 0) != int(payload["wordCleanId"])
+        ):
+            raise HTTPException(status_code=400, detail=f"单词 TTS 批次 item 来源快照不匹配: {task_result.id}")
+
+    if validation_execution:
+        batch_update_task_run_result_link_states(task_run.id, [
+            (item.id, "RUNNING", "") for item in task_results
+        ])
+    else:
+        batch_update_task_result_states([
+            (item.id, "RUNNING", "单词 TTS 批次执行中，正在调用 MiMo", None, "")
+            for item in task_results
+        ])
+    worker_count = min(max(1, task_run.requested_worker_count), len(task_results))
+    completed_by_index: dict[
+        int,
+        tuple[tuple[int, str, str, dict[str, Any] | None, str], dict[str, Any]],
+    ] = {}
+    with ThreadPoolExecutor(max_workers=worker_count) as executor:
+        futures = {
+            executor.submit(
+                process_task_config_4_tts_batch_item,
+                task_result,
+                task_run,
+                str(prompt_items[index]["itemKey"]),
+                validation_execution,
+            ): index
+            for index, task_result in enumerate(task_results)
+        }
+        for future in as_completed(futures):
+            completed_by_index[futures[future]] = future.result()
+    result_rows: list[tuple[int, str, str, dict[str, Any] | None, str]] = []
+    response_items: list[dict[str, Any]] = []
+    for index in range(len(task_results)):
+        row, response_item = completed_by_index[index]
+        result_rows.append(row)
+        response_items.append(response_item)
+
+    if validation_execution:
+        batch_update_task_run_result_link_states(task_run.id, [
+            (row[0], row[1], row[4]) for row in result_rows
+        ])
+    else:
+        batch_update_task_result_states(result_rows)
+    success_count = sum(1 for row in result_rows if row[1] == "SUCCESS")
+    failed_count = len(result_rows) - success_count
+    ai_response_json = update_task_run_ai_response(task_run.id, {
+        "taskType": TASK_CONFIG_4_BATCH_MODE,
+        "items": response_items,
+        "execution": {
+            "mode": TASK_CONFIG_4_BATCH_MODE,
+            "taskRunId": task_run.id,
+            "workerCount": worker_count,
+            "service": "python-worker-mimo-tts",
+            "continueOnItemFailure": True,
+            "processedAt": datetime.now(timezone.utc).isoformat(),
+            "validationExecution": validation_execution,
+            "sourceWriteBackSkipped": validation_execution,
+        },
+    })
+    return {
+        "accepted": True,
+        "mode": TASK_CONFIG_4_BATCH_MODE,
+        "taskRunId": task_run.id,
+        "taskResultCount": len(task_results),
+        "successCount": success_count,
+        "failedCount": failed_count,
+        "aiResponseJson": ai_response_json,
+        "validationExecution": validation_execution,
+    }
+
+
 # 函数：process_tts_batch_item
 def process_tts_batch_item(
     task_result: TaskResultSnapshot,
@@ -3486,6 +4131,66 @@ def process_tts_validation_task_result(task_result: TaskResultSnapshot) -> dict[
             "processedAt": datetime.now(timezone.utc).isoformat(),
         }
         update_task_result_state(task_result.id, "FAILED", "TTS 验证执行失败", failed_payload, str(exc))
+        if isinstance(exc, HTTPException):
+            raise
+        raise HTTPException(status_code=500, detail=str(exc)) from exc
+
+
+def parse_task_config_4_tts_payload(task_result: TaskResultSnapshot) -> dict[str, Any]:
+    payload = parse_task_result_content(task_result)
+    if payload.get("taskType") != TASK_CONFIG_4_RESULT_MODE:
+        raise HTTPException(status_code=400, detail=f"任务结果不是 {TASK_CONFIG_4_RESULT_MODE} 类型")
+    if payload.get("sourceTable") != TASK_CONFIG_4_SOURCE_TABLE:
+        raise HTTPException(status_code=400, detail="单词 TTS 任务来源表快照无效")
+    if int(payload.get("wordCleanTtsId") or 0) <= 0 or int(payload.get("wordCleanId") or 0) <= 0:
+        raise HTTPException(status_code=400, detail="单词 TTS 任务来源 ID 无效")
+    tts_input = payload.get("ttsInput")
+    if not isinstance(tts_input, dict) or not str(tts_input.get("text") or "").strip():
+        raise HTTPException(status_code=400, detail="单词 TTS 任务缺少有效的 ttsInput.text")
+    return payload
+
+
+def process_task_config_4_tts_validation_result(task_result_id: int) -> dict[str, Any]:
+    task_result = load_task_result_snapshot(task_result_id)
+    if task_result.record_type != RECORD_TYPE_VALIDATION_CURRENT:
+        raise HTTPException(status_code=400, detail="单词 TTS 单条验证只支持当前验证数据")
+    validate_task_config_4_result_execution_snapshot(task_result)
+    payload = parse_task_config_4_tts_payload(task_result)
+    update_task_result_state(task_result.id, "RUNNING", "正在生成单词验证 TTS 音频", payload, "")
+    try:
+        resolve_task_config_4_storage_context(task_result)
+        tts_result = generate_mimo_tts(
+            payload["ttsInput"],
+            TASK_CONFIG_4_EXECUTOR_ID,
+            strict_provider=True,
+        )
+        completed_payload = {
+            **payload,
+            "ttsResult": tts_result,
+            "validationExecution": {
+                "sourceWriteBackSkipped": True,
+                "processedAt": datetime.now(timezone.utc).isoformat(),
+                "service": "python-worker-mimo-tts",
+            },
+        }
+        file_name = str(tts_result.get("fileName") or payload["ttsInput"].get("fileName") or "音频")
+        byte_size = int(tts_result.get("byteSize") or 0)
+        summary = f"单词 TTS 验证生成成功：{file_name}（{byte_size} 字节），未回填来源业务表"
+        update_task_result_state(task_result.id, "SUCCESS", summary, completed_payload, "")
+        return {
+            "accepted": True,
+            "taskResultId": task_result.id,
+            "status": "SUCCESS",
+            "summary": summary,
+            "ttsResult": tts_result,
+        }
+    except Exception as exc:
+        failed_payload = {
+            **payload,
+            "processorError": str(exc),
+            "processedAt": datetime.now(timezone.utc).isoformat(),
+        }
+        update_task_result_state(task_result.id, "FAILED", "单词 TTS 验证执行失败", failed_payload, str(exc))
         if isinstance(exc, HTTPException):
             raise
         raise HTTPException(status_code=500, detail=str(exc)) from exc
@@ -3816,6 +4521,80 @@ def build_tts_handler_batch_prompt(
     }
 
 
+def build_task_config_4_tts_batch_prompt(
+    task_config_id: int,
+    task_run_name: str,
+    task_result_ids: list[int],
+) -> dict[str, Any]:
+    if task_config_id != 4:
+        raise HTTPException(status_code=400, detail="task_config_4 批次任务配置 ID 必须为 4")
+    task_results = load_task_result_snapshots(task_result_ids)
+    if len(task_results) != len(task_result_ids):
+        raise HTTPException(status_code=400, detail="单词 TTS 批次任务结果数量不匹配")
+    items: list[dict[str, Any]] = []
+    batch_storage_target: StorageTarget | None = None
+    for index, task_result in enumerate(task_results):
+        validate_task_config_4_result_execution_snapshot(task_result)
+        if task_result.record_type != RECORD_TYPE_FORMAL:
+            raise HTTPException(status_code=400, detail="单词 TTS 批次只能使用正式任务结果")
+        payload = parse_task_config_4_tts_payload(task_result)
+        try:
+            storage_target = parse_storage_target(payload.get("storageTarget"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"任务结果对象存储快照无效: {task_result.id}: {exc}") from exc
+        if batch_storage_target is None:
+            batch_storage_target = storage_target
+        elif storage_target != batch_storage_target:
+            raise HTTPException(status_code=400, detail="单词 TTS 批次包含不一致的对象存储快照")
+        items.append({
+            "itemKey": alphabetic_item_key(index),
+            "taskType": TASK_CONFIG_4_RESULT_MODE,
+            "wordCleanTtsId": int(payload["wordCleanTtsId"]),
+            "wordCleanId": int(payload["wordCleanId"]),
+            "word": str(payload.get("word") or ""),
+            "sourceTable": payload["sourceTable"],
+            "storageTarget": storage_target.as_payload(),
+            "source": payload.get("source"),
+            "ttsInput": payload["ttsInput"],
+            "writeBack": payload.get("writeBack"),
+        })
+    return {
+        "taskType": TASK_CONFIG_4_BATCH_MODE,
+        "version": 1,
+        "batch": {
+            "taskConfigId": 4,
+            "taskName": task_run_name.strip(),
+            "resultCount": len(task_results),
+            "executionTarget": {
+                "executorType": TASK_CONFIG_4_EXECUTOR_TYPE,
+                "executorId": TASK_CONFIG_4_EXECUTOR_ID,
+            },
+            "storageTarget": batch_storage_target.as_payload() if batch_storage_target else None,
+        },
+        "instructions": [
+            "按 items 顺序逐项生成单词 TTS 音频。",
+            "每个 item 独立调用 TTS 服务，单项失败不得中断或覆盖其他 item。",
+        ],
+        "rules": {
+            "continueOnItemFailure": True,
+            "oneProviderCallPerItem": True,
+        },
+        "items": items,
+        "responseSchema": {
+            "items": [{
+                "itemKey": item["itemKey"],
+                "status": "SUCCESS|FAILED",
+                "ttsResult": {
+                    "fileName": "生成的音频文件名",
+                    "downloadUrl": "音频访问地址",
+                    "byteSize": "音频字节数",
+                },
+                "errorMessage": "失败时的错误信息",
+            } for item in items],
+        },
+    }
+
+
 TASK_HANDLER_REGISTRY.register(TaskHandlerDefinition(
     handler_key=HANDLER_SCORE,
     required_capability="TEXT_GENERATION",
@@ -3833,6 +4612,14 @@ TASK_HANDLER_REGISTRY.register(TaskHandlerDefinition(
     ),
     batch_prompt_builder=build_tts_handler_batch_prompt,
     batch_processor=process_word_clean_best_sentence_tts_task_run_batch,
+))
+TASK_HANDLER_REGISTRY.register(TaskHandlerDefinition(
+    handler_key=TASK_CONFIG_4_HANDLER,
+    required_capability="AUDIO_TTS",
+    result_generator=generate_task_config_4_results,
+    single_processor=process_task_config_4_tts_validation_result,
+    batch_prompt_builder=build_task_config_4_tts_batch_prompt,
+    batch_processor=process_task_config_4_tts_task_run_batch,
 ))
 
 
