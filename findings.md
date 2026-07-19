@@ -1,5 +1,17 @@
 # Findings
 
+## 2026-07-19 TTS MinIO 端到端成功语义
+
+- 任务配置 4 正式结果共 22,098 条：21,888 条 `SUCCESS` 和 210 条 `FAILED`。
+- 21,888 条成功结果均有本地 WAV，文件大小与数据库一致、RIFF/WAVE 头有效且哈希唯一；本次不迁移、不修改、不删除。
+- 210 条失败结果的共同原因是 MiMo HTTP 429；它们是本次唯一允许重试的正式数据集合。
+- 当前 MinIO bucket `ai-file-navigation` 中没有与基础单词 TTS 文件名匹配的 `word_clean_tts/word_clean_*_tts_*.wav` 对象。
+- 业务表 `public.word_clean_tts` 的旧成功记录仍是空 bucket 和 Worker 本地 URL；因此当前页面的“处理成功”只代表旧链路本地生成成功，不代表 MinIO 已上传。
+- 新链路必须由 Python Worker 自己完成 WAV 校验、MinIO 上传、对象校验、业务表回填和任务结果写回，任何一步失败都保持 `FAILED`。
+- 对象存储配置需要成为 AI Task Center 自己的数据库配置；只受控复制一次现有 Docker MinIO 凭据，运行时不依赖相邻项目 `.env`。
+- 当前 task_config_4 的 Worker 实现仍由 `generate_mimo_tts` 写入 `data/tts_audio`，随后立即回填并返回成功；这是本次主要修改点。
+- 工作区的 `python-worker/app/main.py`、两个现有测试和 `data/` 是前一轮保留的未提交改动，实施时必须保留并只做目标范围内叠加。
+
 ## 统一调用通道改造
 
 - 当前 `cliId` 同时存在于 `TaskConfig`、`TaskResult`、`TaskRun`、`TaskExecutionLog`，并被接入流程、单条处理、批次生成、筛选和日志复用。

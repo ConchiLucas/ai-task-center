@@ -1,21 +1,29 @@
 # Task Plan
 
 ## Goal
-在当前分支实现统一任务处理器与调用通道：PostgreSQL/Python Worker 负责调度，运行时从 CLI 或 AI Provider 中固定选择一个调用通道；TTS 显示并使用 MiMo API，评分任务可继续使用 CLI 并为直接 AI API 扩展留出标准接口。
+在当前分支把任务配置 4 的基础单词 TTS 收紧为端到端成功：MiMo 生成 WAV、Python Worker 上传并验证现有 Docker MinIO、业务表回填和任务结果写回全部完成后才标记 `SUCCESS`；只重试当前 210 条失败结果，不迁移或修改已有 21,888 条成功结果。
 
 ## Current Phase
-Complete — implementation, full verification, service restart, and read-only runtime acceptance are finished.
+Implementation planning — approved design is complete; detailed TDD plan and scoped implementation are in progress.
 
 ## Phases
-1. [complete] 编写实施计划，锁定兼容字段、服务边界和测试命令
-2. [complete] TDD 增加 Java 调用通道目录、能力模型和任务快照字段
-3. [complete] TDD 重构 Python Worker 调用通道解析与 TTS/评分路由
-4. [complete] TDD 更新批次生成、开始执行接口和历史兼容读取
-5. [complete] 更新 React 任务配置、任务列表、日志和开始执行弹窗
-6. [complete] 执行 Java、Python、React 全量验证并启动三个服务验收
+1. [complete] 完成 TTS MinIO 端到端成功语义设计并确认数据边界
+2. [in_progress] 编写详细实施计划，锁定测试、配置、快照和精确重试步骤
+3. [pending] TDD 实现 Java/React 对象存储配置管理
+4. [pending] TDD 实现 Python Worker MinIO 上传、验证、代理与 429 退避
+5. [pending] TDD 接入 task_config_4 严格存储快照和端到端状态写回
+6. [pending] 执行 Java、Python、React 全量验证并重启三个服务
+7. [pending] 备份并精确补齐 210 条失败结果快照，以并发 1 重试和逐条验收
 
 ## Decisions
 - 不使用独立 worktree；用户明确要求在当前分支直接修改。
+- 复用当前 Docker MinIO `127.0.0.1:19100` 和 bucket `ai-file-navigation`，对象前缀为 `word_clean_tts`。
+- MinIO 是处理器存储依赖，不是 CLI/AI Provider 调用通道。
+- 对象存储凭据由 AI Task Center 自己的数据库配置管理，Worker 不读取相邻项目运行时配置。
+- 新 TTS 不长期落本地文件；现有 21,888 个本地 WAV 和成功结果保持不变。
+- 仅精确选择任务配置 4、正式数据、当前 `FAILED`、来源表仍为 `public.word_clean_tts` 的 210 条结果进行快照补齐和重试。
+- 对象上传后必须通过 `stat_object` 校验大小和 ETag/MD5，随后业务表回填成功，最终才允许写 `SUCCESS`。
+- 210 条重试固定并发 1，429 使用 `Retry-After` 或有限指数退避。
 - `handlerKey` 表示做什么；`executorType + executorId` 表示通过谁调用。
 - `executorType` 第一版仅允许 `CLI`、`AI_PROVIDER`。
 - 接入阶段的 `onboardingCliId` 与运行调用通道分离。
@@ -26,7 +34,9 @@ Complete — implementation, full verification, service restart, and read-only r
 
 ## Safety
 - 不输出、记录或提交 API Key 正文。
-- 不调用真实 AI 或 TTS 完成功能验证；使用单元测试和安全配置检查。
+- 实现和自动测试阶段不调用真实 AI/TTS；仅在全部测试和 MinIO 烟测通过后执行用户已授权的 210 条正式重试。
+- 数据修改前先导出 210 条失败结果完整备份、精确 ID 清单并计算 SHA-256。
+- 禁止更新 21,888 条历史成功结果，禁止删除已有结果、批次、业务记录或本地 WAV。
 - 保留工作区中已有 MiMo、提示词边界和前端悬浮修复相关改动。
 - 不修改外部业务项目。
 
