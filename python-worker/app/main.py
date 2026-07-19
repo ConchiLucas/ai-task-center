@@ -23,7 +23,7 @@ from typing import Any
 import psycopg2
 from psycopg2.extras import execute_values
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from pydantic import BaseModel, Field
 
 from app.handler_registry import TaskHandlerDefinition, TaskHandlerRegistry
@@ -32,6 +32,7 @@ from app.object_storage import (
     StoredObject,
     StorageTarget,
     build_minio_client,
+    build_object_key,
     object_storage_config_from_row,
     parse_storage_target,
     store_verified_wav,
@@ -4775,6 +4776,42 @@ def download_tts_file(file_name: str) -> FileResponse:
     if not file_path.exists() or not file_path.is_file():
         raise HTTPException(status_code=404, detail="TTS 文件不存在")
     return FileResponse(file_path, media_type="audio/wav", filename=file_name)
+
+
+@app.get("/api/tts/storage/{storage_config_id}/{bucket}/{object_key:path}")
+def download_tts_storage_file(
+    storage_config_id: int,
+    bucket: str,
+    object_key: str,
+) -> StreamingResponse:
+    config = load_object_storage_config_snapshot(storage_config_id)
+    try:
+        target = StorageTarget(config.id, config.provider_type, bucket, config.base_path)
+        validate_storage_target(target, config)
+        normalized_key = build_object_key(config.base_path, Path(object_key).name)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    if object_key != normalized_key:
+        raise HTTPException(status_code=400, detail="TTS 对象路径不属于配置前缀")
+    try:
+        object_response = build_minio_client(config).get_object(bucket, object_key)
+    except Exception as exc:
+        if str(getattr(exc, "code", "")) in {"NoSuchKey", "NoSuchObject", "NoSuchBucket"}:
+            raise HTTPException(status_code=404, detail="TTS MinIO 对象不存在") from exc
+        raise HTTPException(status_code=502, detail=f"读取 TTS MinIO 对象失败: {exc}") from exc
+
+    def stream_object():
+        try:
+            yield from object_response.stream(64 * 1024)
+        finally:
+            object_response.close()
+            object_response.release_conn()
+
+    return StreamingResponse(
+        stream_object(),
+        media_type="audio/wav",
+        headers={"Content-Disposition": f'inline; filename="{Path(object_key).name}"'},
+    )
 
 
 @app.get("/api/task-handlers")
