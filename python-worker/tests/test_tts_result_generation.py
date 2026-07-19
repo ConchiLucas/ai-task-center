@@ -13,6 +13,14 @@ assert SPEC and SPEC.loader
 SPEC.loader.exec_module(worker)
 
 
+STORAGE_TARGET = {
+    "storageConfigId": 1,
+    "providerType": "MINIO",
+    "bucket": "ai-file-navigation",
+    "objectPrefix": "word_clean_tts",
+}
+
+
 def task_config(selected_tables: str = '["public.word_clean_best_sentence"]'):
     return worker.TaskConfigSnapshot(
         id=1,
@@ -65,6 +73,7 @@ class TtsResultGenerationTest(unittest.TestCase):
             [best_sentence()],
             set(),
             worker.RECORD_TYPE_VALIDATION_CURRENT,
+            STORAGE_TARGET,
         )
 
         self.assertEqual(1, len(rows))
@@ -77,6 +86,7 @@ class TtsResultGenerationTest(unittest.TestCase):
         self.assertEqual("PENDING", row[10])
         self.assertEqual(worker.RECORD_TYPE_VALIDATION_CURRENT, row[-1])
         self.assertEqual(worker.RESULT_MODE_TTS, payload["taskType"])
+        self.assertEqual(STORAGE_TARGET, payload["storageTarget"])
         self.assertEqual(11, payload["bestSentenceId"])
         self.assertEqual("This is an example.", payload["ttsInput"]["text"])
         self.assertEqual("word_clean_7_best_11.wav", payload["ttsInput"]["fileName"])
@@ -90,9 +100,16 @@ class TtsResultGenerationTest(unittest.TestCase):
             [best_sentence()],
             {11},
             worker.RECORD_TYPE_FORMAL,
+            STORAGE_TARGET,
         )
 
         self.assertEqual([], rows)
+
+    def test_builds_tts_payload_with_required_storage_snapshot(self):
+        payload = worker.build_tts_result_payload(best_sentence(), STORAGE_TARGET)
+
+        self.assertEqual(STORAGE_TARGET, payload["storageTarget"])
+        self.assertEqual("word_clean_7_best_11.wav", payload["ttsInput"]["fileName"])
 
     def test_fetch_reads_best_sentence_directly_without_legacy_job_status(self):
         cursor = MagicMock()

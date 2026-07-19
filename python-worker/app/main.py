@@ -1960,13 +1960,17 @@ def build_score_result_rows(
 
 
 # 函数：build_tts_result_payload
-def build_tts_result_payload(best_sentence: dict[str, Any]) -> dict[str, Any]:
+def build_tts_result_payload(
+    best_sentence: dict[str, Any],
+    storage_target: dict[str, Any],
+) -> dict[str, Any]:
     best_sentence_id = int(best_sentence["bestSentenceId"])
     word_clean_id = int(best_sentence["wordCleanId"])
     source_sentence_id = int(best_sentence["sourceSentenceId"])
     sentence = str(best_sentence.get("sentence") or "")
     return {
         "taskType": RESULT_MODE_TTS,
+        "storageTarget": dict(storage_target),
         "bestSentenceId": best_sentence_id,
         "wordCleanId": word_clean_id,
         "word": str(best_sentence.get("word") or ""),
@@ -2029,6 +2033,7 @@ def build_tts_result_rows(
     best_sentences: list[dict[str, Any]],
     existing_best_sentence_ids: set[int],
     record_type: str,
+    storage_target: dict[str, Any],
 ) -> list[tuple[Any, ...]]:
     now = datetime.now(timezone.utc)
     source_tables_json = json.dumps(tables, ensure_ascii=False)
@@ -2043,7 +2048,7 @@ def build_tts_result_rows(
         word_clean_id = int(best_sentence["wordCleanId"])
         word = str(best_sentence.get("word") or "").strip()
         display_word = word[:80] if word else str(word_clean_id)
-        payload = build_tts_result_payload(best_sentence)
+        payload = build_tts_result_payload(best_sentence, storage_target)
         rows.append(
             (
                 f"{task_config.task_name} - {display_word} ({word_clean_id})",
@@ -2331,13 +2336,22 @@ def generate_word_clean_best_sentence_tts_results(
     tables = parse_selected_tables(task_config.selected_tables)
     ensure_word_clean_best_sentence_task(tables)
     connection_config = load_connection_config_snapshot(task_config.database_config_id)
+    object_storage_config = load_default_object_storage_config_snapshot()
+    storage_target = storage_target_from_config(object_storage_config).as_payload()
     existing_ids = (
         set()
         if overwrite or record_type == RECORD_TYPE_VALIDATION_CURRENT
         else load_existing_best_sentence_ids(task_config.id, TTS_SOURCE_DESCRIPTION, RECORD_TYPE_FORMAL)
     )
     best_sentences = fetch_word_clean_best_sentences(connection_config)
-    rows = build_tts_result_rows(task_config, tables, best_sentences, existing_ids, record_type)
+    rows = build_tts_result_rows(
+        task_config,
+        tables,
+        best_sentences,
+        existing_ids,
+        record_type,
+        storage_target,
+    )
     if limit is not None:
         rows = rows[:limit]
     inserted_count, deleted_count = replace_task_result_rows(
