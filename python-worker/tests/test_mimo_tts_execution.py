@@ -4,6 +4,9 @@ import json
 import os
 import tempfile
 import unittest
+import urllib.error
+from datetime import datetime, timezone
+from io import BytesIO
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -82,7 +85,7 @@ class MimoTtsExecutionTest(unittest.TestCase):
         self.assertEqual("environment", config.source)
 
     def test_generates_audio_inside_python_worker(self):
-        audio = b"RIFF-test-wave"
+        audio = b"RIFF\x10\x00\x00\x00WAVEfmt "
         response = {
             "choices": [
                 {"message": {"audio": {"data": base64.b64encode(audio).decode("ascii")}}}
@@ -123,6 +126,81 @@ class MimoTtsExecutionTest(unittest.TestCase):
         request = urlopen.call_args.args[0]
         self.assertEqual("https://database.example/v1/chat/completions", request.full_url)
         self.assertNotIn("database-secret", str(result))
+
+    def test_generates_validated_audio_bytes_without_writing_local_file(self):
+        audio = b"RIFF\x10\x00\x00\x00WAVEfmt "
+        response = {
+            "choices": [{"message": {"audio": {"data": base64.b64encode(audio).decode("ascii")}}}]
+        }
+        config = worker.MiMoTTSConfig(
+            provider_id="xiaomi-mimo-tts",
+            api_key="database-secret",
+            base_url="https://database.example/v1",
+            model="database-model",
+            voice="Chloe",
+            source="database",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with (
+                patch.object(worker, "TTS_OUTPUT_DIR", Path(directory)),
+                patch.object(worker, "load_mimo_tts_config", return_value=config),
+                patch.object(worker.urllib.request, "urlopen", return_value=FakeResponse(response)),
+            ):
+                generated = worker.generate_mimo_tts_audio({
+                    "text": "example",
+                    "fileName": "example.wav",
+                    "defaultAudioFormat": "wav",
+                })
+                files = list(Path(directory).iterdir())
+
+        self.assertEqual(audio, generated.audio_bytes)
+        self.assertEqual("example.wav", generated.file_name)
+        self.assertEqual([], files)
+        self.assertNotIn("database-secret", repr(generated))
+
+    def test_retry_after_supports_seconds_and_http_date(self):
+        now = datetime(2026, 7, 19, 9, 0, 0, tzinfo=timezone.utc)
+
+        self.assertEqual(3.0, worker.parse_retry_after_seconds("3", now))
+        self.assertEqual(
+            5.0,
+            worker.parse_retry_after_seconds("Sun, 19 Jul 2026 09:00:05 GMT", now),
+        )
+
+    def test_429_uses_bounded_retry_and_stops_after_max_attempts(self):
+        config = worker.MiMoTTSConfig(
+            provider_id="xiaomi-mimo-tts",
+            api_key="database-secret",
+            base_url="https://database.example/v1",
+            model="database-model",
+            voice="Chloe",
+            source="database",
+        )
+
+        def rate_limit():
+            return urllib.error.HTTPError(
+                "https://database.example/v1/chat/completions",
+                429,
+                "Too Many Requests",
+                {},
+                BytesIO(b'{"error":"rate limited"}'),
+            )
+
+        sleeps = MagicMock()
+        with (
+            patch.object(worker, "load_mimo_tts_config", return_value=config),
+            patch.object(worker.urllib.request, "urlopen", side_effect=[rate_limit(), rate_limit(), rate_limit()]),
+            self.assertRaises(worker.HTTPException) as raised,
+        ):
+            worker.generate_mimo_tts_audio(
+                {"text": "example", "fileName": "example.wav", "defaultAudioFormat": "wav"},
+                max_attempts=3,
+                sleep=sleeps,
+            )
+
+        self.assertEqual(502, raised.exception.status_code)
+        self.assertIn("HTTP 429", raised.exception.detail)
+        self.assertEqual([((1.0,), {}), ((2.0,), {})], sleeps.call_args_list)
 
     def test_rejects_unsafe_tts_file_name(self):
         with self.assertRaises(worker.HTTPException) as raised:

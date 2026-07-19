@@ -198,18 +198,29 @@ def test_rejects_nonmatching_handler_model_or_source_snapshot(config, message):
 
 def test_single_validation_uses_strict_mimo_target_without_source_writeback():
     result = task_result()
-    generated = {
-        "provider": "xiaomi-mimo-tts",
-        "model": "mimo-v2-tts",
-        "voice": "default",
-        "format": "wav",
-        "fileName": "word_clean_14153_tts_2.wav",
-        "byteSize": 42,
-    }
+    generated = worker.GeneratedTtsAudio(
+        provider="xiaomi-mimo-tts",
+        model="mimo-v2-tts",
+        voice="default",
+        audio_format="wav",
+        file_name="word_clean_14153_tts_2.wav",
+        audio_bytes=b"RIFF\x10\x00\x00\x00WAVEfmt ",
+    )
+    stored = worker.StoredObject(
+        bucket="ai-file-navigation",
+        object_key="word_clean_tts/word_clean_14153_tts_2.wav",
+        object_url="/ai-file-navigation/word_clean_tts/word_clean_14153_tts_2.wav",
+        byte_size=20,
+        md5="abc",
+        etag="abc",
+        reused=False,
+    )
 
     with (
         patch.object(worker, "load_task_result_snapshot", return_value=result),
-        patch.object(worker, "generate_mimo_tts", return_value=generated) as generate_tts,
+        patch.object(worker, "generate_mimo_tts_audio", return_value=generated) as generate_tts,
+        patch.object(worker, "build_minio_client", return_value=MagicMock()),
+        patch.object(worker, "store_verified_wav", return_value=stored),
         patch.object(worker, "update_task_result_state") as update_state,
         patch.object(worker, "connect_source_database") as source_connection,
         patch.object(worker, "load_object_storage_config_snapshot", return_value=storage_config()),

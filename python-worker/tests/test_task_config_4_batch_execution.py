@@ -1,5 +1,8 @@
 import importlib.util
 import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -129,6 +132,29 @@ def generated_tts(file_name="word_clean_14153_tts_2.wav"):
     }
 
 
+def generated_audio(file_name="word_clean_14153_tts_2.wav"):
+    return worker.GeneratedTtsAudio(
+        provider="xiaomi-mimo-tts",
+        model="mimo-v2.5-tts",
+        voice="Chloe",
+        audio_format="wav",
+        file_name=file_name,
+        audio_bytes=b"RIFF\x10\x00\x00\x00WAVEfmt ",
+    )
+
+
+def stored_object(file_name="word_clean_14153_tts_2.wav"):
+    return worker.StoredObject(
+        bucket="ai-file-navigation",
+        object_key=f"word_clean_tts/{file_name}",
+        object_url=f"/ai-file-navigation/word_clean_tts/{file_name}",
+        byte_size=20,
+        md5="abc",
+        etag="abc",
+        reused=False,
+    )
+
+
 def test_batch_builder_reuses_result_payload_and_strict_target_snapshot():
     results = [
         result_snapshot(),
@@ -198,7 +224,9 @@ def test_validation_item_calls_mimo_but_never_writes_source_table():
     task_result = result_snapshot()
     task_run = run_snapshot(worker.RECORD_TYPE_VALIDATION_CURRENT)
     with (
-        patch.object(worker, "generate_mimo_tts", return_value=generated_tts()) as generate,
+        patch.object(worker, "generate_mimo_tts_audio", return_value=generated_audio()) as generate,
+        patch.object(worker, "build_minio_client", return_value=MagicMock()),
+        patch.object(worker, "store_verified_wav", return_value=stored_object()),
         patch.object(worker, "load_connection_config_snapshot") as load_connection,
         patch.object(worker, "backfill_task_config_4_word_tts") as backfill,
         patch.object(worker, "load_object_storage_config_snapshot", return_value=storage_config()),
@@ -225,7 +253,9 @@ def test_formal_item_backfills_its_own_source_row():
     task_result = result_snapshot()
     task_run = run_snapshot()
     with (
-        patch.object(worker, "generate_mimo_tts", return_value=generated_tts()),
+        patch.object(worker, "generate_mimo_tts_audio", return_value=generated_audio()),
+        patch.object(worker, "build_minio_client", return_value=MagicMock()),
+        patch.object(worker, "store_verified_wav", return_value=stored_object()),
         patch.object(worker, "load_connection_config_snapshot", return_value=MagicMock()),
         patch.object(worker, "load_object_storage_config_snapshot", return_value=storage_config()),
         patch.object(
@@ -246,9 +276,75 @@ def test_formal_item_backfills_its_own_source_row():
     assert backfill.call_args.args[1]["wordCleanTtsId"] == 2
 
 
+def test_formal_item_only_succeeds_after_verified_upload_and_backfill():
+    task_result = result_snapshot()
+    task_run = run_snapshot()
+    events = []
+
+    def generate(*_args, **_kwargs):
+        events.append("mimo")
+        return generated_audio()
+
+    def store(*_args, **_kwargs):
+        events.append("minio")
+        return stored_object()
+
+    def backfill(*_args, **_kwargs):
+        events.append("backfill")
+        return {"wordCleanTtsId": 2, "sourceGuardMatched": True}
+
+    with (
+        patch.object(worker, "generate_mimo_tts_audio", side_effect=generate),
+        patch.object(worker, "build_minio_client", return_value=MagicMock()),
+        patch.object(worker, "store_verified_wav", side_effect=store),
+        patch.object(worker, "load_connection_config_snapshot", return_value=MagicMock()),
+        patch.object(worker, "load_object_storage_config_snapshot", return_value=storage_config()),
+        patch.object(worker, "backfill_task_config_4_word_tts", side_effect=backfill),
+    ):
+        row, response = worker.process_task_config_4_tts_batch_item(task_result, task_run, "item_A")
+
+    assert row[1] == "SUCCESS"
+    assert events == ["mimo", "minio", "backfill"]
+    assert response["ttsResult"]["bucket"] == "ai-file-navigation"
+    assert response["ttsResult"]["objectKey"].startswith("word_clean_tts/")
+    assert response["ttsResult"]["storageVerified"] is True
+
+
+def test_minio_failure_keeps_result_failed_and_skips_backfill():
+    with (
+        patch.object(worker, "generate_mimo_tts_audio", return_value=generated_audio()),
+        patch.object(worker, "build_minio_client", return_value=MagicMock()),
+        patch.object(worker, "store_verified_wav", side_effect=RuntimeError("minio unavailable")),
+        patch.object(worker, "load_object_storage_config_snapshot", return_value=storage_config()),
+        patch.object(worker, "backfill_task_config_4_word_tts") as backfill,
+    ):
+        row, response = worker.process_task_config_4_tts_batch_item(result_snapshot(), run_snapshot(), "item_A")
+
+    assert row[1] == "FAILED"
+    assert row[3]["failureStage"] == "MINIO_UPLOAD"
+    assert response["failureStage"] == "MINIO_UPLOAD"
+    backfill.assert_not_called()
+
+
+def test_backfill_failure_keeps_result_failed_after_verified_upload():
+    with (
+        patch.object(worker, "generate_mimo_tts_audio", return_value=generated_audio()),
+        patch.object(worker, "build_minio_client", return_value=MagicMock()),
+        patch.object(worker, "store_verified_wav", return_value=stored_object()),
+        patch.object(worker, "load_connection_config_snapshot", return_value=MagicMock()),
+        patch.object(worker, "load_object_storage_config_snapshot", return_value=storage_config()),
+        patch.object(worker, "backfill_task_config_4_word_tts", side_effect=RuntimeError("source changed")),
+    ):
+        row, response = worker.process_task_config_4_tts_batch_item(result_snapshot(), run_snapshot(), "item_A")
+
+    assert row[1] == "FAILED"
+    assert row[3]["failureStage"] == "SOURCE_BACKFILL"
+    assert response["failureStage"] == "SOURCE_BACKFILL"
+
+
 def test_item_failure_is_returned_without_raising_or_hiding_other_items():
     with (
-        patch.object(worker, "generate_mimo_tts", side_effect=RuntimeError("provider timeout")),
+        patch.object(worker, "generate_mimo_tts_audio", side_effect=RuntimeError("provider timeout")),
         patch.object(worker, "load_object_storage_config_snapshot", return_value=storage_config()),
     ):
         row, response = worker.process_task_config_4_tts_batch_item(
@@ -264,6 +360,7 @@ def test_item_failure_is_returned_without_raising_or_hiding_other_items():
         "taskResultId": 41,
         "status": "FAILED",
         "errorMessage": "provider timeout",
+        "failureStage": "MIMO_TTS",
     }
 
 
@@ -329,6 +426,34 @@ def test_batch_execution_keeps_item_order_and_isolates_failures():
     run_response = update_run.call_args.args[1]
     assert [item["itemKey"] for item in run_response["items"]] == ["item_A", "item_B"]
     assert run_response["execution"]["continueOnItemFailure"] is True
+    assert run_response["execution"]["workerCount"] == 1
+
+
+def test_task_config_4_mimo_calls_are_globally_serialized():
+    state_lock = threading.Lock()
+    active = 0
+    maximum = 0
+
+    def generate(*_args, **_kwargs):
+        nonlocal active, maximum
+        with state_lock:
+            active += 1
+            maximum = max(maximum, active)
+        time.sleep(0.02)
+        with state_lock:
+            active -= 1
+        return generated_audio()
+
+    with patch.object(worker, "generate_mimo_tts_audio", side_effect=generate):
+        with ThreadPoolExecutor(max_workers=2) as executor:
+            futures = [
+                executor.submit(worker.generate_task_config_4_mimo_audio, {"text": "word"})
+                for _ in range(2)
+            ]
+            for future in futures:
+                future.result()
+
+    assert maximum == 1
 
 
 def test_validation_batch_updates_links_instead_of_formal_results():

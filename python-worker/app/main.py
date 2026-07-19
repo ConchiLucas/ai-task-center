@@ -1,5 +1,6 @@
 import base64
 import binascii
+from email.utils import parsedate_to_datetime
 import json
 import logging
 import os
@@ -14,7 +15,7 @@ import urllib.error
 import urllib.request
 import uuid
 from concurrent.futures import Future, ThreadPoolExecutor, as_completed
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -28,10 +29,14 @@ from pydantic import BaseModel, Field
 from app.handler_registry import TaskHandlerDefinition, TaskHandlerRegistry
 from app.object_storage import (
     ObjectStorageConfig,
+    StoredObject,
     StorageTarget,
+    build_minio_client,
     object_storage_config_from_row,
     parse_storage_target,
+    store_verified_wav,
     validate_storage_target,
+    validate_wav_bytes,
 )
 
 
@@ -88,6 +93,7 @@ QUEUE_HEARTBEAT_SECONDS = max(10, int(os.getenv("TASK_QUEUE_HEARTBEAT_SECONDS", 
 QUEUE_WORKER_ID = f"{socket.gethostname()}:{os.getpid()}:{uuid.uuid4().hex[:8]}"
 QUEUE_STOP_EVENT = threading.Event()
 QUEUE_STATE_LOCK = threading.Lock()
+TASK_CONFIG_4_TTS_LOCK = threading.Lock()
 QUEUE_STATE: dict[str, Any] = {
     "running": False,
     "workerId": QUEUE_WORKER_ID,
@@ -222,6 +228,16 @@ class MiMoTTSConfig:
     model: str
     voice: str
     source: str
+
+
+@dataclass(frozen=True)
+class GeneratedTtsAudio:
+    provider: str
+    model: str
+    voice: str
+    audio_format: str
+    file_name: str
+    audio_bytes: bytes = field(repr=False)
 
 
 @dataclass(frozen=True)
@@ -3448,12 +3464,32 @@ def resolve_tts_file_path(file_name: str) -> Path:
     return file_path
 
 
-# 函数：generate_mimo_tts
-def generate_mimo_tts(
+# 函数：parse_retry_after_seconds
+def parse_retry_after_seconds(value: str | None, now: datetime | None = None) -> float | None:
+    normalized = str(value or "").strip()
+    if not normalized:
+        return None
+    try:
+        return min(60.0, max(0.0, float(normalized)))
+    except ValueError:
+        pass
+    try:
+        retry_at = parsedate_to_datetime(normalized)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if retry_at.tzinfo is None:
+        retry_at = retry_at.replace(tzinfo=timezone.utc)
+    current = now or datetime.now(timezone.utc)
+    return min(60.0, max(0.0, (retry_at - current).total_seconds()))
+
+
+def generate_mimo_tts_audio(
     tts_input: dict[str, Any],
     provider_id: str | None = None,
     strict_provider: bool = False,
-) -> dict[str, Any]:
+    max_attempts: int = 4,
+    sleep: Any = time.sleep,
+) -> GeneratedTtsAudio:
     text = str(tts_input.get("text") or "").strip()
     if not text:
         raise HTTPException(status_code=400, detail="TTS 文本不能为空")
@@ -3487,19 +3523,32 @@ def generate_mimo_tts(
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(request, timeout=90) as response:
-            response_payload = json.loads(response.read().decode("utf-8"))
-    except urllib.error.HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:1000]
-        raise HTTPException(
-            status_code=502,
-            detail=f"MiMo TTS 请求失败: HTTP {exc.code}, {detail}",
-        ) from exc
-    except urllib.error.URLError as exc:
-        raise HTTPException(status_code=503, detail="MiMo TTS 服务当前不可用") from exc
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
-        raise HTTPException(status_code=502, detail="MiMo TTS 响应不是有效 JSON") from exc
+    attempts = max(1, min(10, int(max_attempts)))
+    response_payload: dict[str, Any] | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            with urllib.request.urlopen(request, timeout=90) as response:
+                response_payload = json.loads(response.read().decode("utf-8"))
+            break
+        except urllib.error.HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            if exc.code == 429 and attempt < attempts:
+                retry_after = parse_retry_after_seconds(
+                    exc.headers.get("Retry-After") if exc.headers is not None else None
+                )
+                delay = retry_after if retry_after is not None else min(30.0, float(2 ** (attempt - 1)))
+                sleep(delay)
+                continue
+            raise HTTPException(
+                status_code=502,
+                detail=f"MiMo TTS 请求失败: HTTP {exc.code}, {detail}",
+            ) from exc
+        except urllib.error.URLError as exc:
+            raise HTTPException(status_code=503, detail="MiMo TTS 服务当前不可用") from exc
+        except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+            raise HTTPException(status_code=502, detail="MiMo TTS 响应不是有效 JSON") from exc
+    if response_payload is None:
+        raise HTTPException(status_code=502, detail="MiMo TTS 未返回有效响应")
 
     try:
         audio_base64 = response_payload["choices"][0]["message"]["audio"]["data"]
@@ -3515,19 +3564,48 @@ def generate_mimo_tts(
     except (binascii.Error, ValueError) as exc:
         raise HTTPException(status_code=502, detail="MiMo TTS 音频内容不是有效 base64") from exc
 
-    file_name = safe_tts_file_name(str(tts_input.get("fileName") or ""))
+    try:
+        validate_wav_bytes(audio_bytes)
+    except ValueError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return GeneratedTtsAudio(
+        provider=config.provider_id,
+        model=model,
+        voice=voice,
+        audio_format=audio_format,
+        file_name=safe_tts_file_name(str(tts_input.get("fileName") or "")),
+        audio_bytes=audio_bytes,
+    )
+
+
+def generate_task_config_4_mimo_audio(tts_input: dict[str, Any]) -> GeneratedTtsAudio:
+    with TASK_CONFIG_4_TTS_LOCK:
+        return generate_mimo_tts_audio(
+            tts_input,
+            TASK_CONFIG_4_EXECUTOR_ID,
+            strict_provider=True,
+        )
+
+
+# 函数：generate_mimo_tts
+def generate_mimo_tts(
+    tts_input: dict[str, Any],
+    provider_id: str | None = None,
+    strict_provider: bool = False,
+) -> dict[str, Any]:
+    generated = generate_mimo_tts_audio(tts_input, provider_id, strict_provider)
     TTS_OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    file_path = resolve_tts_file_path(file_name)
-    file_path.write_bytes(audio_bytes)
+    file_path = resolve_tts_file_path(generated.file_name)
+    file_path.write_bytes(generated.audio_bytes)
     return {
-        "provider": config.provider_id,
-        "model": model,
-        "voice": voice,
-        "format": audio_format,
-        "fileName": file_name,
+        "provider": generated.provider,
+        "model": generated.model,
+        "voice": generated.voice,
+        "format": generated.audio_format,
+        "fileName": generated.file_name,
         "filePath": str(file_path),
-        "downloadUrl": f"{PYTHON_WORKER_PUBLIC_BASE_URL}/api/tts/files/{file_name}",
-        "byteSize": len(audio_bytes),
+        "downloadUrl": f"{PYTHON_WORKER_PUBLIC_BASE_URL}/api/tts/files/{generated.file_name}",
+        "byteSize": len(generated.audio_bytes),
         "contentType": "audio/wav",
     }
 
@@ -3743,30 +3821,67 @@ def resolve_task_config_4_storage_context(
     return result_target, config
 
 
+def build_task_config_4_stored_tts_result(
+    generated: GeneratedTtsAudio,
+    stored: StoredObject,
+    storage_config: ObjectStorageConfig,
+) -> dict[str, Any]:
+    return {
+        "provider": generated.provider,
+        "model": generated.model,
+        "voice": generated.voice,
+        "format": generated.audio_format,
+        "audioFormat": generated.audio_format,
+        "fileName": generated.file_name,
+        "bucket": stored.bucket,
+        "objectKey": stored.object_key,
+        "objectUrl": stored.object_url,
+        "downloadUrl": (
+            f"{PYTHON_WORKER_PUBLIC_BASE_URL}/api/tts/storage/"
+            f"{storage_config.id}/{stored.bucket}/{stored.object_key}"
+        ),
+        "byteSize": stored.byte_size,
+        "fileSize": stored.byte_size,
+        "contentType": "audio/wav",
+        "md5": stored.md5,
+        "etag": stored.etag,
+        "objectReused": stored.reused,
+        "storageVerified": True,
+    }
+
+
 def process_task_config_4_tts_batch_item(
     task_result: TaskResultSnapshot,
     task_run: TaskRunSnapshot,
     item_key: str,
     validation_execution: bool = False,
 ) -> tuple[tuple[int, str, str, dict[str, Any] | None, str], dict[str, Any]]:
+    failure_stage = "SNAPSHOT_VALIDATION"
     try:
         validate_task_config_4_result_execution_snapshot(task_result)
         validate_task_config_4_run_execution_snapshot(task_run)
-        resolve_task_config_4_storage_context(task_result, task_run)
+        _, storage_config = resolve_task_config_4_storage_context(task_result, task_run)
         payload = parse_task_config_4_tts_payload(task_result)
-        tts_result = generate_mimo_tts(
-            payload["ttsInput"],
-            TASK_CONFIG_4_EXECUTOR_ID,
-            strict_provider=True,
+        failure_stage = "MIMO_TTS"
+        generated = generate_task_config_4_mimo_audio(payload["ttsInput"])
+        failure_stage = "MINIO_UPLOAD"
+        stored = store_verified_wav(
+            build_minio_client(storage_config),
+            storage_config,
+            generated.file_name,
+            generated.audio_bytes,
         )
+        tts_result = build_task_config_4_stored_tts_result(generated, stored, storage_config)
         if validation_execution:
             backfill_result = {
                 "skipped": True,
                 "reason": "当前验证批次不回写业务源表",
             }
         else:
+            failure_stage = "SOURCE_BACKFILL"
             connection_config = load_connection_config_snapshot(task_result.database_config_id)
             backfill_result = backfill_task_config_4_word_tts(connection_config, payload, tts_result)
+        failure_stage = "RESULT_PERSISTENCE"
         completed_payload = {
             **payload,
             "ttsResult": tts_result,
@@ -3808,12 +3923,14 @@ def process_task_config_4_tts_batch_item(
             "mode": TASK_CONFIG_4_BATCH_MODE,
             "taskRunId": task_run.id,
             "itemKey": item_key,
+            "failureStage": failure_stage,
         }
         response_item = {
             "itemKey": item_key,
             "taskResultId": task_result.id,
             "status": "FAILED",
             "errorMessage": str(exc),
+            "failureStage": failure_stage,
         }
         return (task_result.id, "FAILED", "单词 TTS 批次执行失败", failed_payload, str(exc)), response_item
 
@@ -3854,7 +3971,7 @@ def process_task_config_4_tts_task_run_batch(task_run_id: int) -> dict[str, Any]
             (item.id, "RUNNING", "单词 TTS 批次执行中，正在调用 MiMo", None, "")
             for item in task_results
         ])
-    worker_count = min(max(1, task_run.requested_worker_count), len(task_results))
+    worker_count = 1
     completed_by_index: dict[
         int,
         tuple[tuple[int, str, str, dict[str, Any] | None, str], dict[str, Any]],
@@ -4157,13 +4274,20 @@ def process_task_config_4_tts_validation_result(task_result_id: int) -> dict[str
     validate_task_config_4_result_execution_snapshot(task_result)
     payload = parse_task_config_4_tts_payload(task_result)
     update_task_result_state(task_result.id, "RUNNING", "正在生成单词验证 TTS 音频", payload, "")
+    failure_stage = "SNAPSHOT_VALIDATION"
     try:
-        resolve_task_config_4_storage_context(task_result)
-        tts_result = generate_mimo_tts(
-            payload["ttsInput"],
-            TASK_CONFIG_4_EXECUTOR_ID,
-            strict_provider=True,
+        _, storage_config = resolve_task_config_4_storage_context(task_result)
+        failure_stage = "MIMO_TTS"
+        generated = generate_task_config_4_mimo_audio(payload["ttsInput"])
+        failure_stage = "MINIO_UPLOAD"
+        stored = store_verified_wav(
+            build_minio_client(storage_config),
+            storage_config,
+            generated.file_name,
+            generated.audio_bytes,
         )
+        tts_result = build_task_config_4_stored_tts_result(generated, stored, storage_config)
+        failure_stage = "RESULT_PERSISTENCE"
         completed_payload = {
             **payload,
             "ttsResult": tts_result,
@@ -4189,6 +4313,7 @@ def process_task_config_4_tts_validation_result(task_result_id: int) -> dict[str
             **payload,
             "processorError": str(exc),
             "processedAt": datetime.now(timezone.utc).isoformat(),
+            "failureStage": failure_stage,
         }
         update_task_result_state(task_result.id, "FAILED", "单词 TTS 验证执行失败", failed_payload, str(exc))
         if isinstance(exc, HTTPException):
