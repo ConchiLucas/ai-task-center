@@ -276,6 +276,50 @@ def test_formal_item_backfills_its_own_source_row():
     assert backfill.call_args.args[1]["wordCleanTtsId"] == 2
 
 
+def test_success_payload_removes_stale_failure_and_execution_fields():
+    task_result = result_snapshot()
+    payload = json.loads(task_result.result_content)
+    payload.update({
+        "processorError": "previous 429",
+        "processedAt": "old-time",
+        "mode": "old-mode",
+        "taskRunId": 12,
+        "itemKey": "item_Z",
+        "failureStage": "MIMO_TTS",
+        "ttsResult": {"objectKey": "old"},
+        "execution": {"taskRunId": 12},
+        "backfillResult": {"sourceGuardMatched": False},
+    })
+    task_result.result_content = json.dumps(payload)
+    with (
+        patch.object(worker, "generate_mimo_tts_audio", return_value=generated_audio()),
+        patch.object(worker, "build_minio_client", return_value=MagicMock()),
+        patch.object(worker, "store_verified_wav", return_value=stored_object()),
+        patch.object(worker, "load_connection_config_snapshot", return_value=MagicMock()),
+        patch.object(worker, "load_object_storage_config_snapshot", return_value=storage_config()),
+        patch.object(
+            worker,
+            "backfill_task_config_4_word_tts",
+            return_value={"wordCleanTtsId": 2, "sourceGuardMatched": True},
+        ),
+    ):
+        row, _ = worker.process_task_config_4_tts_batch_item(task_result, run_snapshot(), "item_A")
+
+    completed_payload = row[3]
+    for stale_key in (
+        "processorError",
+        "processedAt",
+        "mode",
+        "taskRunId",
+        "itemKey",
+        "failureStage",
+    ):
+        assert stale_key not in completed_payload
+    assert completed_payload["ttsResult"]["objectKey"].startswith("word_clean_tts/")
+    assert completed_payload["execution"]["taskRunId"] == 31
+    assert completed_payload["backfillResult"]["sourceGuardMatched"] is True
+
+
 def test_formal_item_only_succeeds_after_verified_upload_and_backfill():
     task_result = result_snapshot()
     task_run = run_snapshot()

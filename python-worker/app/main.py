@@ -3851,6 +3851,21 @@ def build_task_config_4_stored_tts_result(
     }
 
 
+def clear_previous_task_config_4_execution(payload: dict[str, Any]) -> dict[str, Any]:
+    stale_keys = {
+        "processorError",
+        "processedAt",
+        "mode",
+        "taskRunId",
+        "itemKey",
+        "failureStage",
+        "ttsResult",
+        "execution",
+        "backfillResult",
+    }
+    return {key: value for key, value in payload.items() if key not in stale_keys}
+
+
 def process_task_config_4_tts_batch_item(
     task_result: TaskResultSnapshot,
     task_run: TaskRunSnapshot,
@@ -3884,7 +3899,7 @@ def process_task_config_4_tts_batch_item(
             backfill_result = backfill_task_config_4_word_tts(connection_config, payload, tts_result)
         failure_stage = "RESULT_PERSISTENCE"
         completed_payload = {
-            **payload,
+            **clear_previous_task_config_4_execution(payload),
             "ttsResult": tts_result,
             "execution": {
                 "mode": TASK_CONFIG_4_BATCH_MODE,
