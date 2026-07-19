@@ -11,6 +11,12 @@
 - 对象存储配置需要成为 AI Task Center 自己的数据库配置；只受控复制一次现有 Docker MinIO 凭据，运行时不依赖相邻项目 `.env`。
 - 当前 task_config_4 的 Worker 实现仍由 `generate_mimo_tts` 写入 `data/tts_audio`，随后立即回填并返回成功；这是本次主要修改点。
 - 工作区的 `python-worker/app/main.py`、两个现有测试和 `data/` 是前一轮保留的未提交改动，实施时必须保留并只做目标范围内叠加。
+- 最终新批次 8268 仅包含备份的 210 条失败 ID，并发 1，首次执行即 210/210 成功；task_config_4 正式结果最终为 22,098 条 `SUCCESS`、0 条 `FAILED`。
+- 210 个新对象均位于 `ai-file-navigation/word_clean_tts/`，逐个下载验证为有效 RIFF/WAVE；总大小 15,584,280 字节，数据库大小与 MinIO MD5/ETag 全部一致。
+- 210 条 `public.word_clean_tts` 来源行全部回填 `success`，存储元数据与任务结果逐字段一致；Worker 代理对首、中、末样本返回同一 `audio/wav`。
+- 原 21,888 条任务结果的完整规范化 SHA-256 仍为 `e4a01038cc741cfa70018a1f4e27dc085d933b15f367b5af114e2dd6dfd54979`，本次没有迁移其本地 WAV 或修改其结果行。
+- 旧失败载荷在成功合并时会残留 `processorError` 等顶层字段；已通过 RED/GREEN 回归修正，并只清理本次 210 条成功结果的旧字段。
+- 启动脚本原先使用大结果集接口作 2 秒探针，会误判健康后端；改为轻量对象存储配置接口后，Java、Worker、React 可可靠启动。
 
 ## 统一调用通道改造
 

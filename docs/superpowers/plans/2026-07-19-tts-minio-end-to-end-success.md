@@ -22,29 +22,29 @@
 - Create: `src/test/java/com/aitaskcenter/service/ObjectStorageConfigServiceTest.java`
 - Create: `src/test/java/com/aitaskcenter/controller/ObjectStorageConfigControllerTest.java`
 
-- [ ] Write RED service tests for required fields, `MINIO` normalization, one enabled default, blank-secret update preservation, and disabled-default rejection.
-- [ ] Write RED controller/response tests proving list/create/update responses never contain `secretKey` plaintext and expose only `secretConfigured`.
-- [ ] Run `mvn -Dtest=ObjectStorageConfigServiceTest,ObjectStorageConfigControllerTest test` and confirm the tests fail because the types do not exist.
-- [ ] Implement the entity, repository, request/response DTOs, transactional service, and `/api/object-storage-config` CRUD/default endpoints using existing response conventions.
-- [ ] Make default replacement atomic by clearing any previous default in the same transaction before saving the new enabled default.
-- [ ] Re-run the focused Maven tests and confirm GREEN.
-- [ ] Commit only Task 1 files: `feat: add object storage configuration`.
+- [x] Write RED service tests for required fields, `MINIO` normalization, one enabled default, blank-secret update preservation, and disabled-default rejection.
+- [x] Write RED controller/response tests proving list/create/update responses never contain `secretKey` plaintext and expose only `secretConfigured`.
+- [x] Run `mvn -Dtest=ObjectStorageConfigServiceTest,ObjectStorageConfigControllerTest test` and confirm the tests fail because the types do not exist.
+- [x] Implement the entity, repository, request/response DTOs, transactional service, and `/api/object-storage-config` CRUD/default endpoints using existing response conventions.
+- [x] Make default replacement atomic by clearing any previous default in the same transaction before saving the new enabled default.
+- [x] Re-run the focused Maven tests and confirm GREEN (6 tests).
+- [x] Commit only Task 1 files: `feat: add object storage configuration` (`bbb73e73`).
 
 ### Task 2: Add object-storage configuration UI
 
 **Files:**
-- Modify: `web-react/src/types.ts`
-- Modify: `web-react/src/api.ts`
+- Modify: `web-react/src/api.ts` (this project keeps API types in the same module; there is no `types.ts`)
 - Modify: `web-react/src/App.tsx`
-- Modify: `web-react/src/styles.css`
+- Create: `web-react/src/objectStorageForm.ts`
+- Create: `web-react/tests/objectStorageForm.test.mjs`
 
-- [ ] Add `ObjectStorageConfig` types that model `secretConfigured` without a returned secret value.
-- [ ] Add list/create/update/delete/default API calls against the Java endpoints.
-- [ ] Add an “对象存储” tab under configuration management with list, edit modal, enabled/default state, and masked secret placeholder.
-- [ ] Require name, endpoint, access key, bucket, and base path; require secret on create, but submit blank on edit to preserve the existing secret.
-- [ ] Prevent choosing default while disabled and show a clear explanation that this config is a task-handler dependency, not an AI invocation channel.
-- [ ] Run `npm run build` in `web-react` and fix all TypeScript/build failures.
-- [ ] Commit only Task 2 files: `feat: manage object storage in web console`.
+- [x] Add `ObjectStorageConfig` types that model `secretConfigured` without a returned secret value.
+- [x] Add list/create/update/delete/default API calls against the Java endpoints.
+- [x] Add an “对象存储” tab under configuration management with list, edit modal, enabled/default state, and masked secret placeholder.
+- [x] Require name, endpoint, access key, bucket, and base path; require secret on create, but submit blank on edit to preserve the existing secret.
+- [x] Prevent choosing default while disabled and show a clear explanation that this config is a task-handler dependency, not an AI invocation channel.
+- [x] Run 3 Node form-semantic tests and `npm run build` in `web-react`; both pass.
+- [x] Commit only Task 2 files: `feat: manage object storage in web console` (`a1cc5949`).
 
 ### Task 3: Build the Python MinIO storage adapter with TDD
 
@@ -53,13 +53,13 @@
 - Create: `python-worker/app/object_storage.py`
 - Create: `python-worker/tests/test_object_storage.py`
 
-- [ ] Write RED tests for database row mapping, masked/disabled/missing configuration rejection, exact snapshot validation, safe deterministic key construction, valid WAV enforcement, and MD5/size metadata.
-- [ ] Write RED adapter tests with a fake MinIO client for missing object upload, exact-object reuse, mismatched-object overwrite, post-upload stat failure, size mismatch, and ETag/MD5 mismatch.
-- [ ] Run `python-worker/.venv/bin/python -m pytest -q python-worker/tests/test_object_storage.py` and confirm RED.
-- [ ] Add a pinned MinIO SDK dependency and implement focused dataclasses/functions in `app/object_storage.py`; do not log credentials.
-- [ ] Re-run the focused tests and confirm GREEN.
-- [ ] Install the pinned dependency only in `python-worker/.venv` and verify imports.
-- [ ] Commit only Task 3 files: `feat: add verified MinIO storage adapter`.
+- [x] Write RED tests for database row mapping, secret-safe representation, exact snapshot validation, safe deterministic key construction, valid WAV enforcement, and MD5/size metadata.
+- [x] Write RED adapter tests with a fake MinIO client for missing object upload, exact-object reuse, mismatched-object overwrite, and ETag/MD5 mismatch.
+- [x] Run the focused object-storage module and confirm RED because `app.object_storage` did not exist.
+- [x] Add pinned `minio==7.2.20` and implement focused dataclasses/functions in `app/object_storage.py`; credentials are excluded from representation.
+- [x] Re-run the focused tests and confirm GREEN (12 tests).
+- [x] Install the pinned dependency only in `python-worker/.venv` and verify SDK/module imports.
+- [x] Commit only Task 3 files: `feat: add verified MinIO storage adapter` (`e0fbb058`).
 
 ### Task 4: Add strict storage snapshots to task-config-4 result generation
 
@@ -69,14 +69,14 @@
 - Modify: `python-worker/tests/test_task_config_4_batch_execution.py`
 - Modify: `python-worker/tests/test_task_handler_catalog.py`
 
-- [ ] Write RED generation tests requiring `storageTarget.storageConfigId/providerType/bucket/objectPrefix` in every newly generated task-config-4 result.
-- [ ] Write RED batch-prompt tests requiring the same storage snapshot and rejecting mixed/missing result snapshots.
-- [ ] Write RED execution tests rejecting differences among result snapshot, run prompt snapshot, and live database configuration.
-- [ ] Run only the three focused task-config-4 test modules and confirm the new assertions fail.
-- [ ] Load the single enabled default config during result generation and add the immutable storage snapshot to result JSON.
-- [ ] Propagate the exact snapshot to the batch prompt and validate equality at execution; do not fall back to environment variables or another repository.
-- [ ] Re-run focused tests and confirm GREEN.
-- [ ] Commit only Task 4 changes, preserving the pre-existing task-config-4 work: `feat: snapshot TTS object storage target`.
+- [x] Write RED generation tests requiring `storageTarget.storageConfigId/providerType/bucket/objectPrefix` in every newly generated task-config-4 result.
+- [x] Write RED batch-prompt tests requiring the same storage snapshot and rejecting mixed/missing result snapshots.
+- [x] Write RED execution tests rejecting differences among result snapshot, run prompt snapshot, and live database configuration.
+- [x] Run the focused task-config-4 tests and confirm four expected failures for missing storage snapshot behavior.
+- [x] Load the single enabled default config during result generation and add the immutable storage snapshot to result JSON.
+- [x] Propagate the exact snapshot to the batch prompt and validate equality at execution; no environment or adjacent-project fallback exists.
+- [x] Re-run focused tests and confirm GREEN (21 task-config-4 tests; 33 with storage adapter regression).
+- [x] Commit Task 4 together with the pre-existing same-scope task-config-4 handler base: `081cffd1`.
 
 ### Task 5: Make TTS processing end-to-end and rate-limit aware
 
@@ -87,16 +87,16 @@
 - Modify: `python-worker/tests/test_task_config_4_batch_execution.py`
 - Modify: `python-worker/tests/test_tts_batch_execution.py`
 
-- [ ] Write RED tests that MiMo generation returns validated WAV bytes without permanent local persistence for task config 4.
-- [ ] Write RED tests that a result is `SUCCESS` only after verified upload and successful business backfill; MinIO failure, verification failure, or backfill failure must produce `FAILED` with a specific `failureStage`.
-- [ ] Write RED 429 tests for numeric/date `Retry-After`, bounded exponential fallback, maximum attempts, and injected sleep so unit tests do not wait.
-- [ ] Run focused tests and confirm RED.
-- [ ] Split MiMo response decoding from persistence, validate RIFF/WAVE before storage, compute metadata, upload/verify, backfill source, then construct final `ttsResult` and success tuple.
-- [ ] Keep legacy best-sentence/local-file behavior unchanged unless its tests prove shared helpers need a compatible wrapper.
-- [ ] Configure task-config-4 batch execution with concurrency 1 and bounded retry; never automatically switch provider.
-- [ ] Ensure failure payloads contain `failureStage` but no credentials or full provider response secrets.
-- [ ] Re-run focused tests and confirm GREEN.
-- [ ] Commit Task 5 files: `fix: require verified MinIO upload for TTS success`.
+- [x] Write RED tests that MiMo generation returns validated WAV bytes without permanent local persistence for task config 4.
+- [x] Write RED tests that a result is `SUCCESS` only after verified upload and successful business backfill; MinIO or backfill failure produces `FAILED` with a specific `failureStage`.
+- [x] Write RED 429 tests for numeric/date `Retry-After`, bounded exponential fallback, maximum attempts, and injected sleep.
+- [x] Run focused tests and confirm seven expected missing-behavior failures plus a separate global-concurrency RED test.
+- [x] Split MiMo response decoding from persistence, validate RIFF/WAVE before storage, upload/verify, backfill source, then construct final `ttsResult` and success tuple.
+- [x] Keep legacy best-sentence/local-file behavior through the existing `generate_mimo_tts` compatibility wrapper and regression tests.
+- [x] Configure task-config-4 batch and Worker-process-wide MiMo execution with concurrency 1 and bounded retry; provider never switches.
+- [x] Ensure failure payloads contain `failureStage` but no credentials.
+- [x] Re-run focused tests and confirm GREEN (48 tests plus compileall).
+- [x] Commit Task 5 files: `fix: require verified MinIO upload for TTS success` (`e2acd8aa`).
 
 ### Task 6: Add a read-only MinIO audio proxy
 
@@ -105,25 +105,25 @@
 - Create: `python-worker/tests/test_minio_audio_proxy.py`
 - Modify: `web-react/src/App.tsx` only if the existing `downloadUrl` normalization requires adjustment.
 
-- [ ] Write RED FastAPI tests for valid configured bucket/key streaming, `audio/wav`, missing object 404, invalid path 400, and mismatched snapshot/config rejection.
-- [ ] Implement `/api/tts/storage/{storage_config_id}/{bucket}/{object_key:path}` as a read-only stream with path/prefix validation and guaranteed response close/release.
-- [ ] Set new result `downloadUrl` to the Worker proxy and retain business `objectUrl` as `/ai-file-navigation/word_clean_tts/<file>`.
-- [ ] Run proxy tests and `npm run build`; confirm GREEN.
-- [ ] Commit Task 6 files: `feat: proxy MinIO TTS audio through worker`.
+- [x] Write RED tests for configured bucket/key streaming, `audio/wav`, missing object 404, invalid path 400, and bucket/config rejection.
+- [x] Implement `/api/tts/storage/{storage_config_id}/{bucket}/{object_key:path}` as a read-only stream with path/prefix validation and guaranteed response close/release.
+- [x] Set new result `downloadUrl` to the Worker proxy and retain business `objectUrl` as `/ai-file-navigation/word_clean_tts/<file>`.
+- [x] Run 5 proxy tests plus related regressions and compileall; React requires no change because it already uses `downloadUrl`.
+- [x] Commit Task 6 files: `feat: proxy MinIO TTS audio through worker` (`a106ff86`).
 
 ### Task 7: Run full automated verification and restart services
 
 **Files:**
 - Modify only files required by test failures in the feature scope.
 
-- [ ] Run `mvn test` and record the passing test count.
-- [ ] Run `python-worker/.venv/bin/python -m pytest -q python-worker/tests` and record the passing test count.
-- [ ] Run `python-worker/.venv/bin/python -m compileall -q python-worker/app python-worker/tests`.
-- [ ] Run `npm run build` in `web-react`.
-- [ ] Run `git diff --check` and inspect `git diff --stat` plus all feature diffs for secrets and unrelated files.
-- [ ] Restart with `./scripts/start-dev.sh` and verify frontend `19637`, Java `18743`, Worker `19186`, and queue scheduler health.
-- [ ] Register the existing Docker MinIO as the enabled default config by reading existing credentials without printing them.
-- [ ] Upload/read/stat/delete one dedicated smoke-test object under a non-business prefix; do not invoke MiMo.
+- [x] Run `mvn test` and record the passing test count (58 passed; standard command works on Java 26).
+- [x] Run `python-worker/.venv/bin/python -m pytest -q python-worker/tests` and record the passing test count (94 passed after final regression).
+- [x] Run `python-worker/.venv/bin/python -m compileall -q python-worker/app python-worker/tests`.
+- [x] Run `npm run build` in `web-react` and the 3 object-storage form tests.
+- [x] Run `git diff --check` and inspect `git diff --stat` plus all feature diffs for secrets and unrelated files.
+- [x] Restart with `./scripts/start-dev.sh` and verify frontend `19637`, Java `18743`, Worker `19186`, and queue scheduler health.
+- [x] Register the existing Docker MinIO as enabled default config ID 1 without printing its Secret Key.
+- [x] Upload/read/stat/proxy/delete a dedicated smoke-test object; no MiMo invocation.
 
 ### Task 8: Backup and retry exactly the 210 failed results
 
@@ -131,14 +131,14 @@
 - Create runtime artifacts under: `/private/tmp/ai-task-center-tts-retry-20260719/`
 - Do not modify task-workflow scripts.
 
-- [ ] Re-query the candidate set with all guards: `task_config_id = 4`, `record_type = 'FORMAL'`, `status = 'FAILED'`, and payload/write-back source `public.word_clean_tts`; assert count and sorted IDs equal the audited 210 set.
-- [ ] Export full rows/result JSON, exact sorted IDs, source-row guards, and pre-change counts; calculate and record SHA-256 for every backup artifact.
-- [ ] In one transaction, add only the approved storage snapshot to those exact failed result payloads; assert affected rows equals 210 and historical-success affected rows equals 0.
-- [ ] Create a new task run containing only those 210 result IDs with concurrency 1 and the same handler/executor/storage snapshots.
-- [ ] Start the run and monitor it to a terminal state, respecting MiMo bounded 429 retry; do not include any existing success result.
-- [ ] Verify every successful item across `tb_task_result`, `public.word_clean_tts`, MinIO stat/MD5/size, and Worker proxy playback.
-- [ ] Report counts for success, remaining failure, missing object, size mismatch, metadata mismatch, and untouched historical successes.
-- [ ] Preserve all backups and report their absolute paths and SHA-256 hashes.
+- [x] Re-query the candidate set with all guards and assert the exact audited 210 sorted IDs.
+- [x] Export complete result/source rows and sorted IDs; calculate SHA-256 backup artifacts.
+- [x] In one transaction, add storage snapshot only to the exact 210 failed payloads; historical 21,888-row SHA-256 remained unchanged.
+- [x] Create task run 8268 with only those 210 IDs, concurrency 1, and strict handler/executor/storage snapshots.
+- [x] Monitor the run to `SUCCESS` on attempt 1; no prior success result was included.
+- [x] Verify all 210 across result rows, source rows, MinIO full-byte WAV/size/MD5/ETag, and Worker proxy samples.
+- [x] Final counts: 210 success, 0 failure, 0 missing object, 0 size mismatch, 0 metadata mismatch, 21,888 historical results untouched.
+- [x] Preserve backups and final verification report under `/private/tmp/ai-task-center-tts-retry-20260719/` with SHA-256 hashes.
 
 ### Task 9: Final review and handoff
 
@@ -147,8 +147,8 @@
 - Modify: `findings.md`
 - Modify: `progress.md`
 
-- [ ] Perform a focused code review for secret exposure, transaction boundaries, status ordering, retry scope, and accidental historical migration.
-- [ ] Re-run the smallest decisive verification if review changes code.
-- [ ] Update the planning files with final evidence and any remaining failed IDs.
-- [ ] Commit the planning record separately without adding `data/tts_audio` or unrelated user changes.
-- [ ] Summarize implementation, service state, 210-result outcome, untouched 21,888 baseline, artifact paths, and SHA-256 values.
+- [x] Perform a focused self-review for secret exposure, transaction boundaries, status ordering, retry scope, and accidental historical migration (subagent delegation prohibited in this session).
+- [x] Re-run decisive verification after review changes: standard `mvn test` 58/58; Python 94/94; frontend tests/build; runtime and data audit.
+- [x] Update the planning files with final evidence; remaining failed IDs: none.
+- [x] Commit the planning record separately without adding `data/tts_audio` or unrelated user changes.
+- [x] Summarize implementation, service state, 210-result outcome, untouched 21,888 baseline, artifact paths, and SHA-256 values.

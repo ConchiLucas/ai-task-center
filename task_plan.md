@@ -4,16 +4,16 @@
 在当前分支把任务配置 4 的基础单词 TTS 收紧为端到端成功：MiMo 生成 WAV、Python Worker 上传并验证现有 Docker MinIO、业务表回填和任务结果写回全部完成后才标记 `SUCCESS`；只重试当前 210 条失败结果，不迁移或修改已有 21,888 条成功结果。
 
 ## Current Phase
-Implementation planning — approved design is complete; detailed TDD plan and scoped implementation are in progress.
+Final handoff — implementation, exact retry, data verification, service restart and code review are complete.
 
 ## Phases
 1. [complete] 完成 TTS MinIO 端到端成功语义设计并确认数据边界
-2. [in_progress] 编写详细实施计划，锁定测试、配置、快照和精确重试步骤
-3. [pending] TDD 实现 Java/React 对象存储配置管理
-4. [pending] TDD 实现 Python Worker MinIO 上传、验证、代理与 429 退避
-5. [pending] TDD 接入 task_config_4 严格存储快照和端到端状态写回
-6. [pending] 执行 Java、Python、React 全量验证并重启三个服务
-7. [pending] 备份并精确补齐 210 条失败结果快照，以并发 1 重试和逐条验收
+2. [complete] 编写详细实施计划，锁定测试、配置、快照和精确重试步骤
+3. [complete] TDD 实现 Java/React 对象存储配置管理
+4. [complete] TDD 实现 Python Worker MinIO 上传、验证、代理与 429 退避
+5. [complete] TDD 接入 task_config_4 严格存储快照和端到端状态写回
+6. [complete] 执行 Java、Python、React 全量验证并重启三个服务
+7. [complete] 备份并精确补齐 210 条失败结果快照，以并发 1 重试和逐条验收
 
 ## Decisions
 - 不使用独立 worktree；用户明确要求在当前分支直接修改。
@@ -28,7 +28,7 @@ Implementation planning — approved design is complete; detailed TDD plan and s
 - `executorType` 第一版仅允许 `CLI`、`AI_PROVIDER`。
 - 接入阶段的 `onboardingCliId` 与运行调用通道分离。
 - 新字段迁移期允许为空；旧记录按自身字段、任务配置、旧 `cliId`/载荷顺序回退。
-- 不批量更新或删除已有 `tb_task_result`、`tb_task_run`、`tb_task_run_result`。
+- 只对已备份且精确匹配的 210 条失败结果补存储快照并执行；不更新原 21,888 条成功结果，不删除任何结果、批次或关联记录。
 - Java 只负责编排和持久化；CLI、AI API、TTS 调用全部在 Python Worker。
 - 失败重试不自动跨调用通道切换。
 
@@ -51,3 +51,5 @@ Implementation planning — approved design is complete; detailed TDD plan and s
 | Python Worker 虚拟环境未安装 `pytest` | 1 | 仅在项目 `.venv` 安装 pytest 8.4.2；全量 37 项通过。 |
 | 全量 Python 测试新增调用通道校验后仍使用旧 mock | 1 | 补充统一目标解析 mock 与断言后通过，未放宽生产校验。 |
 | 系统无 `psql` 命令 | 2 | 使用 Worker 已有 psycopg2 连接只读验证 Key 是否非空，未输出密钥。 |
+| Java 26 超出当前 Byte Buddy 正式支持版本，标准 `mvn test` 无法 mock | 1 | 先用单测确认 `net.bytebuddy.experimental` 可行，再将该属性限定到 Surefire 测试进程；标准命令 58/58 通过。 |
+| 启动脚本以大结果集 `/api/task-run/list` 做 2 秒健康检查，误判并移除健康后端 | 1 | 改用轻量 `/api/object-storage-config` 探针；脚本语法与三服务真实启动均通过。 |
