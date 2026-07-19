@@ -3046,6 +3046,13 @@ def parse_tts_task_run_batch_prompt(task_run: TaskRunSnapshot) -> dict[str, Any]
         raise HTTPException(status_code=400, detail="TTS 批次执行载荷必须是 JSON 对象")
     if prompt.get("taskType") != RESULT_MODE_TTS_BATCH:
         raise HTTPException(status_code=400, detail="TTS 批次执行载荷类型不支持")
+    batch = prompt.get("batch")
+    if not isinstance(batch, dict) or int(batch.get("taskConfigId") or 0) != int(task_run.task_config_id or 0):
+        raise HTTPException(status_code=400, detail="TTS 批次任务配置快照不匹配")
+    try:
+        batch_storage_target = parse_storage_target(batch.get("storageTarget"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"TTS 批次对象存储快照无效: {exc}") from exc
     items = prompt.get("items")
     if not isinstance(items, list) or not items:
         raise HTTPException(status_code=400, detail="TTS 批次执行载荷缺少 items")
@@ -3059,6 +3066,14 @@ def parse_tts_task_run_batch_prompt(task_run: TaskRunSnapshot) -> dict[str, Any]
         if item_key in item_keys:
             raise HTTPException(status_code=400, detail=f"TTS 批次 itemKey 重复: {item_key}")
         item_keys.add(item_key)
+        if int(item.get("bestSentenceId") or 0) <= 0 or int(item.get("wordCleanId") or 0) <= 0:
+            raise HTTPException(status_code=400, detail=f"TTS 批次 item 来源 ID 无效: {item_key}")
+        try:
+            item_storage_target = parse_storage_target(item.get("storageTarget"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"TTS 批次 item 对象存储快照无效: {item_key}: {exc}") from exc
+        if item_storage_target != batch_storage_target:
+            raise HTTPException(status_code=400, detail=f"TTS 批次 item 对象存储快照不一致: {item_key}")
     return prompt
 
 
@@ -3822,6 +3837,31 @@ def resolve_task_config_4_storage_context(
         raise HTTPException(status_code=400, detail=f"任务结果对象存储快照无效: {exc}") from exc
     if task_run is not None:
         prompt = parse_task_config_4_tts_batch_prompt(task_run)
+        try:
+            run_target = parse_storage_target(prompt["batch"].get("storageTarget"))
+        except (KeyError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=f"批次对象存储快照无效: {exc}") from exc
+        if run_target != result_target:
+            raise HTTPException(status_code=400, detail="任务结果与批次对象存储快照不一致")
+    config = load_object_storage_config_snapshot(result_target.storage_config_id)
+    try:
+        validate_storage_target(result_target, config)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc)) from exc
+    return result_target, config
+
+
+def resolve_tts_storage_context(
+    task_result: TaskResultSnapshot,
+    task_run: TaskRunSnapshot | None = None,
+) -> tuple[StorageTarget, ObjectStorageConfig]:
+    payload = parse_tts_task_result_payload(task_result)
+    try:
+        result_target = parse_storage_target(payload.get("storageTarget"))
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=f"任务结果对象存储快照无效: {exc}") from exc
+    if task_run is not None:
+        prompt = parse_tts_task_run_batch_prompt(task_run)
         try:
             run_target = parse_storage_target(prompt["batch"].get("storageTarget"))
         except (KeyError, ValueError) as exc:
@@ -4627,6 +4667,7 @@ def build_tts_handler_batch_prompt(
 ) -> dict[str, Any]:
     task_results = load_task_result_snapshots(task_result_ids)
     items: list[dict[str, Any]] = []
+    batch_storage_target: StorageTarget | None = None
     for index, task_result in enumerate(task_results):
         payload = parse_tts_task_result_payload(task_result)
         best_sentence_id = int(payload.get("bestSentenceId") or 0)
@@ -4634,12 +4675,21 @@ def build_tts_handler_batch_prompt(
         write_back = payload.get("writeBack")
         if best_sentence_id <= 0 or word_clean_id <= 0 or not isinstance(write_back, dict):
             raise HTTPException(status_code=400, detail=f"TTS 任务结果来源信息无效: {task_result.id}")
+        try:
+            storage_target = parse_storage_target(payload.get("storageTarget"))
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=f"TTS 任务结果对象存储快照无效: {task_result.id}: {exc}") from exc
+        if batch_storage_target is None:
+            batch_storage_target = storage_target
+        elif storage_target != batch_storage_target:
+            raise HTTPException(status_code=400, detail="TTS 批次包含不一致的对象存储快照")
         items.append({
             "itemKey": alphabetic_item_key(index),
             "taskType": RESULT_MODE_TTS,
             "word": str(payload.get("word") or ""),
             "bestSentenceId": best_sentence_id,
             "wordCleanId": word_clean_id,
+            "storageTarget": storage_target.as_payload(),
             "sourceTable": str(payload.get("sourceTable") or ""),
             "source": payload.get("source"),
             "ttsInput": payload["ttsInput"],
@@ -4652,6 +4702,7 @@ def build_tts_handler_batch_prompt(
             "taskConfigId": task_config_id,
             "taskName": task_run_name.strip(),
             "resultCount": len(task_results),
+            "storageTarget": batch_storage_target.as_payload() if batch_storage_target else None,
         },
         "instructions": [
             "按 items 顺序处理每一条最佳句子 TTS 任务。",

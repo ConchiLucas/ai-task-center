@@ -12,13 +12,52 @@ assert SPEC and SPEC.loader
 SPEC.loader.exec_module(worker)
 
 
+STORAGE_TARGET = {
+    "storageConfigId": 7,
+    "providerType": "MINIO",
+    "bucket": "ai-file-navigation",
+    "objectPrefix": "word_clean_tts",
+}
+
+
+def storage_config():
+    return worker.ObjectStorageConfig(
+        id=7,
+        config_name="local",
+        provider_type="MINIO",
+        endpoint="127.0.0.1:19100",
+        access_key="access",
+        secret_key="secret",
+        bucket_name="ai-file-navigation",
+        base_path="word_clean_tts",
+        enabled=True,
+        is_default=True,
+    )
+
+
 def run_snapshot(record_type=worker.RECORD_TYPE_FORMAL):
     prompt = {
         "taskType": worker.RESULT_MODE_TTS_BATCH,
         "version": 1,
+        "batch": {
+            "taskConfigId": 1,
+            "storageTarget": STORAGE_TARGET,
+        },
         "items": [
-            {"itemKey": "item_A", "taskType": worker.RESULT_MODE_TTS},
-            {"itemKey": "item_B", "taskType": worker.RESULT_MODE_TTS},
+            {
+                "itemKey": "item_A",
+                "taskType": worker.RESULT_MODE_TTS,
+                "bestSentenceId": 101,
+                "wordCleanId": 7,
+                "storageTarget": STORAGE_TARGET,
+            },
+            {
+                "itemKey": "item_B",
+                "taskType": worker.RESULT_MODE_TTS,
+                "bestSentenceId": 102,
+                "wordCleanId": 8,
+                "storageTarget": STORAGE_TARGET,
+            },
         ],
     }
     return worker.TaskRunSnapshot(
@@ -31,6 +70,7 @@ def run_snapshot(record_type=worker.RECORD_TYPE_FORMAL):
         handler_key=worker.HANDLER_TTS,
         executor_type="AI_PROVIDER",
         executor_id="xiaomi-mimo-tts",
+        task_config_id=1,
     )
 
 
@@ -39,6 +79,7 @@ def result_snapshot(result_id, best_sentence_id, word_clean_id):
         "taskType": worker.RESULT_MODE_TTS,
         "bestSentenceId": best_sentence_id,
         "wordCleanId": word_clean_id,
+        "storageTarget": STORAGE_TARGET,
         "source": {
             "sourceSentenceId": 501 + result_id,
             "sentence": f"Sentence {result_id}.",
@@ -66,6 +107,42 @@ def result_snapshot(result_id, best_sentence_id, word_clean_id):
 
 
 class TtsBatchExecutionTest(unittest.TestCase):
+    def test_batch_builder_reuses_strict_storage_target(self):
+        results = [result_snapshot(41, 101, 7), result_snapshot(42, 102, 8)]
+        with patch.object(worker, "load_task_result_snapshots", return_value=results):
+            prompt = worker.build_tts_handler_batch_prompt(1, "生成 TTS 任务 - 批次 1", [41, 42])
+
+        self.assertEqual(STORAGE_TARGET, prompt["batch"]["storageTarget"])
+        self.assertEqual(STORAGE_TARGET, prompt["items"][0]["storageTarget"])
+        self.assertEqual(101, prompt["items"][0]["bestSentenceId"])
+
+    def test_storage_context_rejects_result_run_or_live_config_mismatch(self):
+        task_result = result_snapshot(41, 101, 7)
+        task_run = run_snapshot()
+
+        with patch.object(
+            worker,
+            "load_object_storage_config_snapshot",
+            return_value=storage_config(),
+        ):
+            target, loaded = worker.resolve_tts_storage_context(task_result, task_run)
+
+        self.assertEqual(STORAGE_TARGET, target.as_payload())
+        self.assertEqual(7, loaded.id)
+
+        prompt = json.loads(task_run.ai_prompt_json)
+        prompt["batch"]["storageTarget"]["bucket"] = "other"
+        task_run.ai_prompt_json = json.dumps(prompt)
+        with (
+            patch.object(
+                worker,
+                "load_object_storage_config_snapshot",
+                return_value=storage_config(),
+            ),
+            self.assertRaisesRegex(worker.HTTPException, "对象存储快照不一致"),
+        ):
+            worker.resolve_tts_storage_context(task_result, task_run)
+
     def test_parses_tts_batch_execution_payload(self):
         prompt = worker.parse_tts_task_run_batch_prompt(run_snapshot())
 
