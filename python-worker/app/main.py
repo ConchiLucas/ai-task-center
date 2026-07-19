@@ -4107,6 +4107,7 @@ def process_tts_batch_item(
     item_key: str,
     validation_execution: bool = False,
 ) -> tuple[tuple[int, str, str, dict[str, Any] | None, str], dict[str, Any]]:
+    failure_stage = "SNAPSHOT_VALIDATION"
     try:
         payload = parse_tts_task_result_payload(task_result)
         explicit_type = str(task_run.executor_type or task_result.executor_type or "").strip().upper()
@@ -4116,21 +4117,34 @@ def process_tts_batch_item(
         if explicit_type and explicit_type != "AI_PROVIDER":
             raise HTTPException(status_code=400, detail=f"TTS 不支持调用通道类型: {explicit_type}")
         provider_id = explicit_id or MIMO_PROVIDER_ID
-        tts_result = generate_mimo_tts(
-            payload["ttsInput"],
-            provider_id,
-            strict_provider=bool(explicit_id),
+        _, storage_config = resolve_tts_storage_context(task_result, task_run)
+        failure_stage = "MIMO_TTS"
+        with TASK_CONFIG_4_TTS_LOCK:
+            generated = generate_mimo_tts_audio(
+                payload["ttsInput"],
+                provider_id,
+                strict_provider=True,
+            )
+        failure_stage = "MINIO_UPLOAD"
+        stored = store_verified_wav(
+            build_minio_client(storage_config),
+            storage_config,
+            generated.file_name,
+            generated.audio_bytes,
         )
+        tts_result = build_task_config_4_stored_tts_result(generated, stored, storage_config)
         if validation_execution:
             backfill_result = {
                 "skipped": True,
                 "reason": "当前验证批次不回写业务源表",
             }
         else:
+            failure_stage = "SOURCE_BACKFILL"
             connection_config = load_connection_config_snapshot(task_result.database_config_id)
             backfill_result = backfill_word_clean_best_sentence_tts(connection_config, payload, tts_result)
+        failure_stage = "RESULT_PERSISTENCE"
         completed_payload = {
-            **payload,
+            **clear_previous_task_config_4_execution(payload),
             "ttsResult": tts_result,
             "execution": {
                 "mode": "task-run-tts-batch",
@@ -4170,12 +4184,14 @@ def process_tts_batch_item(
             "mode": "task-run-tts-batch",
             "taskRunId": task_run.id,
             "itemKey": item_key,
+            "failureStage": failure_stage,
         }
         response_item = {
             "itemKey": item_key,
             "taskResultId": task_result.id,
             "status": "FAILED",
             "errorMessage": str(exc),
+            "failureStage": failure_stage,
         }
         return (task_result.id, "FAILED", "TTS 批次执行失败", failed_payload, str(exc)), response_item
 
@@ -4198,6 +4214,14 @@ def process_word_clean_best_sentence_tts_task_run_batch(
     prompt_items = prompt["items"]
     if len(prompt_items) != len(task_results):
         raise HTTPException(status_code=400, detail="TTS 批次 items 数量与关联任务结果数量不一致")
+    for index, task_result in enumerate(task_results):
+        payload = parse_tts_task_result_payload(task_result)
+        prompt_item = prompt_items[index]
+        if (
+            int(prompt_item.get("bestSentenceId") or 0) != int(payload["bestSentenceId"])
+            or int(prompt_item.get("wordCleanId") or 0) != int(payload["wordCleanId"])
+        ):
+            raise HTTPException(status_code=400, detail=f"TTS 批次 item 来源快照不匹配: {task_result.id}")
 
     if validation_execution:
         batch_update_task_run_result_link_states(task_run.id, [
@@ -4210,7 +4234,7 @@ def process_word_clean_best_sentence_tts_task_run_batch(
         ])
     result_rows: list[tuple[int, str, str, dict[str, Any] | None, str]] = []
     response_items: list[dict[str, Any]] = []
-    worker_count = min(task_run.requested_worker_count, len(task_results))
+    worker_count = 1
     with ThreadPoolExecutor(max_workers=worker_count) as executor:
         futures = {
             executor.submit(

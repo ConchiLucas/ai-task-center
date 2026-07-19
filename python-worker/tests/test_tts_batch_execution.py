@@ -106,6 +106,29 @@ def result_snapshot(result_id, best_sentence_id, word_clean_id):
     )
 
 
+def generated_audio(file_name="best-101.wav"):
+    return worker.GeneratedTtsAudio(
+        provider="xiaomi-mimo-tts",
+        model="mimo-v2.5-tts",
+        voice="Chloe",
+        audio_format="wav",
+        file_name=file_name,
+        audio_bytes=b"RIFF\x10\x00\x00\x00WAVEfmt ",
+    )
+
+
+def stored_object(file_name="best-101.wav"):
+    return worker.StoredObject(
+        bucket="ai-file-navigation",
+        object_key=f"word_clean_tts/{file_name}",
+        object_url=f"/ai-file-navigation/word_clean_tts/{file_name}",
+        byte_size=20,
+        md5="abc",
+        etag="abc",
+        reused=False,
+    )
+
+
 class TtsBatchExecutionTest(unittest.TestCase):
     def test_batch_builder_reuses_strict_storage_target(self):
         results = [result_snapshot(41, 101, 7), result_snapshot(42, 102, 8)]
@@ -200,6 +223,7 @@ class TtsBatchExecutionTest(unittest.TestCase):
         run_response = update_run.call_args.args[1]
         self.assertEqual(worker.RESULT_MODE_TTS_BATCH, run_response["taskType"])
         self.assertEqual("python-worker-mimo-tts", run_response["execution"]["service"])
+        self.assertEqual(1, run_response["execution"]["workerCount"])
         self.assertFalse(run_response["execution"]["validationExecution"])
 
     def test_current_validation_batch_executes_without_updating_formal_results(self):
@@ -241,13 +265,11 @@ class TtsBatchExecutionTest(unittest.TestCase):
     def test_validation_tts_item_skips_source_backfill(self):
         task_result = result_snapshot(41, 101, 7)
         task_run = run_snapshot(worker.RECORD_TYPE_VALIDATION_CURRENT)
-        tts_result = {
-            "fileName": "best-101.wav",
-            "downloadUrl": "http://127.0.0.1:19186/api/tts/files/best-101.wav",
-        }
-
         with (
-            patch.object(worker, "generate_mimo_tts", return_value=tts_result),
+            patch.object(worker, "generate_mimo_tts_audio", return_value=generated_audio()) as generate,
+            patch.object(worker, "build_minio_client", return_value=MagicMock()),
+            patch.object(worker, "store_verified_wav", return_value=stored_object()),
+            patch.object(worker, "load_object_storage_config_snapshot", return_value=storage_config()),
             patch.object(worker, "load_connection_config_snapshot") as load_connection,
             patch.object(worker, "backfill_word_clean_best_sentence_tts") as backfill,
         ):
@@ -261,8 +283,87 @@ class TtsBatchExecutionTest(unittest.TestCase):
         self.assertEqual("SUCCESS", row[1])
         self.assertTrue(response_item["validationExecution"])
         self.assertTrue(response_item["backfillResult"]["skipped"])
+        self.assertTrue(response_item["ttsResult"]["storageVerified"])
+        generate.assert_called_once_with(
+            json.loads(task_result.result_content)["ttsInput"],
+            "xiaomi-mimo-tts",
+            strict_provider=True,
+        )
         load_connection.assert_not_called()
         backfill.assert_not_called()
+
+    def test_formal_item_only_succeeds_after_verified_upload_and_backfill(self):
+        task_result = result_snapshot(41, 101, 7)
+        events = []
+
+        def generate(*_args, **_kwargs):
+            events.append("mimo")
+            return generated_audio()
+
+        def store(*_args, **_kwargs):
+            events.append("minio")
+            return stored_object()
+
+        def backfill(*_args, **_kwargs):
+            events.append("backfill")
+            return {"bestSentenceId": 101, "sourceGuardMatched": True}
+
+        with (
+            patch.object(worker, "generate_mimo_tts_audio", side_effect=generate),
+            patch.object(worker, "build_minio_client", return_value=MagicMock()),
+            patch.object(worker, "store_verified_wav", side_effect=store),
+            patch.object(worker, "load_object_storage_config_snapshot", return_value=storage_config()),
+            patch.object(worker, "load_connection_config_snapshot", return_value=MagicMock()),
+            patch.object(worker, "backfill_word_clean_best_sentence_tts", side_effect=backfill),
+        ):
+            row, response = worker.process_tts_batch_item(task_result, run_snapshot(), "item_A")
+
+        self.assertEqual("SUCCESS", row[1])
+        self.assertEqual(["mimo", "minio", "backfill"], events)
+        self.assertTrue(response["ttsResult"]["storageVerified"])
+        self.assertIn("/api/tts/storage/7/", response["ttsResult"]["downloadUrl"])
+
+    def test_minio_failure_marks_stage_and_skips_source_backfill(self):
+        with (
+            patch.object(worker, "generate_mimo_tts_audio", return_value=generated_audio()),
+            patch.object(worker, "build_minio_client", return_value=MagicMock()),
+            patch.object(worker, "store_verified_wav", side_effect=RuntimeError("minio unavailable")),
+            patch.object(worker, "load_object_storage_config_snapshot", return_value=storage_config()),
+            patch.object(worker, "backfill_word_clean_best_sentence_tts") as backfill,
+        ):
+            row, response = worker.process_tts_batch_item(
+                result_snapshot(41, 101, 7),
+                run_snapshot(),
+                "item_A",
+            )
+
+        self.assertEqual("FAILED", row[1])
+        self.assertEqual("MINIO_UPLOAD", row[3]["failureStage"])
+        self.assertEqual("MINIO_UPLOAD", response["failureStage"])
+        backfill.assert_not_called()
+
+    def test_backfill_failure_stays_failed_after_verified_upload(self):
+        with (
+            patch.object(worker, "generate_mimo_tts_audio", return_value=generated_audio()),
+            patch.object(worker, "build_minio_client", return_value=MagicMock()),
+            patch.object(worker, "store_verified_wav", return_value=stored_object()),
+            patch.object(worker, "load_object_storage_config_snapshot", return_value=storage_config()),
+            patch.object(worker, "load_connection_config_snapshot", return_value=MagicMock()),
+            patch.object(
+                worker,
+                "backfill_word_clean_best_sentence_tts",
+                side_effect=RuntimeError("source changed"),
+            ),
+        ):
+            row, response = worker.process_tts_batch_item(
+                result_snapshot(41, 101, 7),
+                run_snapshot(),
+                "item_A",
+            )
+
+        self.assertEqual("FAILED", row[1])
+        self.assertEqual("SOURCE_BACKFILL", row[3]["failureStage"])
+        self.assertEqual("SOURCE_BACKFILL", response["failureStage"])
 
     def test_formal_tts_backfill_updates_best_sentence_without_job_table(self):
         task_result = result_snapshot(41, 101, 7)
