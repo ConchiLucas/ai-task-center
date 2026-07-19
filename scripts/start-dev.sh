@@ -35,7 +35,7 @@ if [ "$(uname -s)" = "Darwin" ] && command -v launchctl >/dev/null 2>&1; then
   USE_LAUNCHCTL=true
 fi
 
-BACKEND_URL="http://${LOCAL_HOST}:${BACKEND_PORT}/api/task-run/list"
+BACKEND_URL="http://${LOCAL_HOST}:${BACKEND_PORT}/api/object-storage-config"
 FRONTEND_URL="http://${LOCAL_HOST}:${FRONTEND_PORT}/"
 WORKER_URL="http://${LOCAL_HOST}:${WORKER_PORT}/api/health"
 

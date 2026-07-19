@@ -43,7 +43,7 @@ tags: [startup, runtime, ports]
 ## 健康检查
 
 ```bash
-curl -s http://127.0.0.1:18743/api/task-run/list
+curl -s http://127.0.0.1:18743/api/object-storage-config
 curl -s http://127.0.0.1:19186/api/health
 curl -s http://127.0.0.1:19186/api/queue/status
 curl -s -o /tmp/ai-task-center-frontend.check -w '%{http_code}' http://127.0.0.1:19637/
